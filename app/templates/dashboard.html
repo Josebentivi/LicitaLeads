@@ -26,10 +26,11 @@
   <h2>Leads recentes</h2>
   {% if leads %}
   <div class="table-wrap"><table>
-    <thead><tr><th>Empresa</th><th>Evento</th><th>Score</th><th>Prazo</th><th>Revisão</th></tr></thead>
+    <thead><tr><th>Empresa</th><th>Evento</th><th>Score</th><th>Adicionado em</th><th>Prazo</th><th>Revisão</th></tr></thead>
     <tbody>{% for lead in leads %}<tr>
       <td><a href="/leads/{{ lead.id }}">{{ lead.company_name or 'Empresa não confirmada' }}</a></td>
       <td>{{ lead.event_type or 'unknown' }}</td><td>{{ lead.score }}</td>
+      <td>{{ lead.created_at }}</td>
       <td>{{ lead.deadline_status or 'unknown' }}</td>
       <td>{{ 'Sim' if lead.requires_manual_review else 'Não' }}</td>
     </tr>{% endfor %}</tbody>

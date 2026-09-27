@@ -8,6 +8,22 @@ origem de cada conclusão e nunca inventa participantes, eventos ou prazos.
 > MVP para apoio à análise. Uma estimativa de prazo não substitui a conferência
 > do edital, da ata, da plataforma oficial e da legislação aplicável.
 
+## Documentação
+
+A documentação completa está em [`docs/`](docs/README.md):
+
+- [Visão geral](docs/visao_geral.md) — escopo, princípios e limitações.
+- [Arquitetura](docs/arquitetura.md) — componentes, fluxo e processos.
+- [Modelo de dados](docs/modelo_de_dados.md) — entidades e proveniência.
+- [API](docs/api.md) — endpoints REST, páginas web e erros.
+- [CLI](docs/cli.md) — comandos e scheduler.
+- [Guia de uso](docs/guia_de_uso.md) — fluxo operacional e revisão de leads.
+- [Configuração](docs/configuracao.md) — variáveis de ambiente.
+- [Segurança](docs/seguranca.md) — downloads, arquivos e privacidade.
+- [Operação](docs/operacao.md) — banco, migrations, testes e troubleshooting.
+- [Matriz de fontes](docs/matriz_de_fontes.md) e
+  [plano de implementação](docs/plano_de_implementacao.md).
+
 ## Requisitos
 
 - Python 3.12
@@ -50,8 +66,8 @@ eventos, prazos, contatos, leads e apresentação. `SourceRecord`, vínculos de
 fonte e evidências permitem responder de onde veio cada campo. SQLite é usado
 por padrão; PostgreSQL é habilitado somente ao configurar `DATABASE_URL`.
 
-Consulte a [matriz de fontes](docs/data_source_capability_matrix.md) e o
-[plano de implementação](docs/implementation_plan.md).
+Consulte a [matriz de fontes](docs/matriz_de_fontes.md) e o
+[plano de implementação](docs/plano_de_implementacao.md).
 
 ## Comandos principais
 

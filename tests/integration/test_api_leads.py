@@ -6,6 +6,7 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
+from zoneinfo import ZoneInfo
 
 import httpx
 import pytest
@@ -187,6 +188,8 @@ async def _full_graph(database: DatabaseContext):
             recommended_action="Revisar recurso.",
             score_breakdown={"evidence": "25/25"},
             fingerprint="a" * 64,
+            created_at=observed_at,
+            updated_at=observed_at,
         )
         run = CrawlRun(
             connector="pncp",
@@ -272,6 +275,22 @@ async def test_procurement_evidence_and_web_pages(
     assert '<td class="item-number">3</td>' not in item_number_search.text
     assert '<details class="description-details">' in item_number_search.text
 
+    expected_created = ids.observed_at.astimezone(ZoneInfo("America/Sao_Paulo")).strftime(
+        "%d/%m/%Y %H:%M:%S %Z"
+    )
+    leads_page = responses[12].text
+    assert "Adicionado em" in leads_page
+    assert expected_created in leads_page
+
+    lead_detail_page = responses[13].text
+    assert "Cronologia" in lead_detail_page
+    assert expected_created in lead_detail_page
+    assert "Nenhuma revisão registrada" in lead_detail_page
+
+    dashboard_page = responses[9].text
+    assert "Adicionado em" in dashboard_page
+    assert expected_created in dashboard_page
+
 
 @pytest.mark.asyncio
 async def test_lead_filters_review_patch_and_idempotent_outreach(
@@ -320,6 +339,22 @@ async def test_lead_filters_review_patch_and_idempotent_outreach(
     assert forced.json()["created"] is True
     assert "Nenhuma mensagem" not in first.json()["draft"]["message"]
     assert first.json()["draft"]["sent"] is False
+
+    local_day = ids.observed_at.astimezone(ZoneInfo("America/Sao_Paulo")).date()
+    filtered = await api_client.get(
+        "/leads",
+        params={"created_from": local_day.isoformat(), "created_to": local_day.isoformat()},
+    )
+    excluded = await api_client.get(
+        "/leads", params={"created_from": (local_day + timedelta(days=1)).isoformat()}
+    )
+    assert filtered.status_code == 200 and "Empresa Exemplo Ltda." in filtered.text
+    assert excluded.status_code == 200 and "Nenhum lead encontrado." in excluded.text
+
+    lead_page = await api_client.get(f"/leads/{ids.lead}")
+    assert "Revisão: Ajustes solicitados" in lead_page.text
+    assert "Analista" in lead_page.text
+    assert "Rascunho gerado em" in lead_page.text
 
 
 @pytest.mark.asyncio

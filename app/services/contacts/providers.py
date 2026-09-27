@@ -16,6 +16,8 @@ from urllib.robotparser import RobotFileParser
 
 from app.services.identifiers import is_valid_cnpj, normalize_cnpj
 
+from .domains import EMAIL_PATTERN, GENERIC_EMAIL_PREFIXES
+
 # Regexes and constructor calls below are clearer when kept as single expressions.
 # ruff: noqa: E501
 
@@ -137,19 +139,6 @@ class FetchedPage:
 
 PageFetcher = Callable[[str], Awaitable[FetchedPage]]
 
-_GENERIC_EMAIL_PREFIXES = {
-    "administrativo",
-    "atendimento",
-    "comercial",
-    "contato",
-    "financeiro",
-    "juridico",
-    "licitacao",
-    "licitacoes",
-    "sac",
-    "vendas",
-}
-_EMAIL = re.compile(r"(?<![\w.+-])([A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,})(?![\w.-])", re.I)
 _PHONE = re.compile(r"(?<!\d)(?:\+?55\s*)?(?:\(?\d{2}\)?[\s.-]*)?9?\d{4}[\s.-]*\d{4}(?!\d)")
 _PHONE_LABEL = re.compile(
     r"(?:whats(?:app)?|telefone|fone|tel\.?|comercial|atendimento|contato)\s*:?.{0,24}$", re.I
@@ -329,7 +318,7 @@ class PublicWebsiteContactProvider:
                 normalize_cnpj(company_cnpj),
             )
         ]
-        email_values = {match.group(1).lower() for match in _EMAIL.finditer(text)}
+        email_values = {match.group(1).lower() for match in EMAIL_PATTERN.finditer(text)}
         for anchor in soup.select('a[href^="mailto:"]'):
             href_value = anchor.get("href", "")
             href = href_value if isinstance(href_value, str) else ""
@@ -337,7 +326,7 @@ class PublicWebsiteContactProvider:
                 email_values.add(href[7:].split("?", 1)[0].lower())
         for email in email_values:
             local, _, email_domain = email.partition("@")
-            generic = local.split("+", 1)[0] in _GENERIC_EMAIL_PREFIXES
+            generic = local.split("+", 1)[0] in GENERIC_EMAIL_PREFIXES
             if email_domain.rstrip(".") not in {domain, f"www.{domain}"} or not generic:
                 continue
             contacts.append(

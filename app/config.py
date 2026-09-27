@@ -66,6 +66,7 @@ class Settings(BaseSettings):
     contact_search_enabled: bool = False
     contact_search_provider: str = "none"
     contact_search_api_key: str = ""
+    contact_domain_discovery_enabled: bool = True
     outreach_mode: Literal["draft_only"] = "draft_only"
     outreach_sender_name: str = "Equipe jurídica"
     outreach_law_firm: str = "LicitaLead Monitor"
@@ -150,6 +151,7 @@ class Settings(BaseSettings):
             "llm_provider": self.llm_provider,
             "llm_model": self.llm_model,
             "contact_search_enabled": self.contact_search_enabled,
+            "contact_domain_discovery_enabled": self.contact_domain_discovery_enabled,
             "outreach_mode": self.outreach_mode,
             "scheduler_enabled": self.scheduler_enabled,
             "scheduler_mode": "separate_process",

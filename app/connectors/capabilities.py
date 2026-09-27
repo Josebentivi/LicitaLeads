@@ -235,7 +235,7 @@ def render_capability_matrix_markdown(
     """Render the API capability registry as a deterministic Markdown matrix.
 
     Documentation tooling can write this value directly to
-    ``docs/data_source_capability_matrix.md``.  Accepting an explicit registry
+    ``docs/matriz_de_fontes.md``.  Accepting an explicit registry
     also makes previews and tests possible without mutating the canonical data.
     """
 

@@ -95,7 +95,7 @@
   <div class="table-wrap"><table class="detail-table participant-table">
     <thead><tr><th>Empresa</th><th>Item</th><th>Papel</th><th>Valores</th><th>Situação</th><th>Confiança</th><th>Evidência</th><th>Origem</th></tr></thead>
     <tbody>{% for participant in participants %}<tr>
-      <td><strong>{{ participant.company_name }}</strong><small>CNPJ {{ participant.cnpj }}</small></td><td>{{ participant.item_number }}</td><td>{{ participant.role }}</td>
+      <td><strong>{{ participant.company_name }}</strong><small>CNPJ {{ participant.cnpj }}</small>{% if participant.website %}<small><a href="{{ participant.website }}" target="_blank" rel="noopener">{{ participant.domain or participant.website }}</a></small>{% endif %}</td><td>{{ participant.item_number }}</td><td>{{ participant.role }}</td>
       <td><dl class="cell-list"><div><dt>Proposta</dt><dd>{{ participant.proposal_value }}</dd></div><div><dt>Final</dt><dd>{{ participant.final_value }}</dd></div></dl></td>
       <td><span class="badge">{{ participant.status }}</span></td><td>{{ participant.confidence }}</td>
       <td>{% if participant.evidence_url %}<a href="{{ participant.evidence_url }}">Abrir evidência</a>{% else %}Não informado{% endif %}</td><td>{{ origin_details(participant.origin) }}</td>

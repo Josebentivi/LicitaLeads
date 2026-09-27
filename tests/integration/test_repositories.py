@@ -122,8 +122,8 @@ async def test_company_lead_contact_and_outreach_repositories(database: Database
             deadline_status=lead.deadline.status if lead.deadline else None,
             has_contact=False,
             pending_review=False,
-            created_from=datetime.now(UTC) - timedelta(days=1),
-            created_to=datetime.now(UTC) + timedelta(days=1),
+            created_from=ids.observed_at - timedelta(days=1),
+            created_to=ids.observed_at + timedelta(days=1),
         )
         assert page.total == 1
         company_repo = CompanyRepository(session)

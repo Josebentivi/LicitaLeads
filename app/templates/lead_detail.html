@@ -4,6 +4,12 @@
 <p><a href="/leads">← Leads</a></p>
 <div class="page-heading"><div><p class="eyebrow">Score {{ lead.score }}/100</p><h1>{{ lead.company_name or 'Empresa não confirmada' }}</h1><p>{{ lead.cnpj or 'CNPJ não disponível' }}</p></div><span class="badge">{{ lead.lead_status }}</span></div>
 <section class="panel"><h2>Oportunidade</h2><p>{{ lead.reason_summary or 'Motivo requer revisão manual.' }}</p><p><strong>Ação recomendada:</strong> {{ lead.recommended_action or 'Revisar evidências.' }}</p></section>
+<section class="panel"><h2>Cronologia</h2><div class="relevant-dates">
+  <span><strong>Adicionado em</strong>{{ lead.created_at }}</span>
+  <span><strong>Atualizado em</strong>{{ lead.updated_at }}</span>
+  {% for review in reviews %}<span><strong>Revisão: {{ review.decision }}</strong>{{ review.reviewed_at }} · {{ review.reviewer or 'Revisor não informado' }}{% if review.previous_status %} · status anterior: {{ review.previous_status }}{% endif %}{% if review.notes %} · {{ review.notes }}{% endif %}</span>{% endfor %}
+  {% if draft %}<span><strong>Rascunho gerado em</strong>{{ lead.draft_created_at }}</span>{% endif %}
+</div>{% if not reviews %}<p class="hint">Nenhuma revisão registrada. Mudanças de status feitas fora do fluxo de revisão não geram evento.</p>{% endif %}</section>
 <section class="panel"><h2>Rastreabilidade</h2>{% for evidence in evidences %}<article class="evidence"><blockquote>{{ evidence.text_excerpt }}</blockquote><a href="/api/evidence/{{ evidence.id }}">Abrir evidência{% if evidence.page_number %}, página {{ evidence.page_number }}{% endif %}</a></article>{% else %}<p class="empty">Nenhuma evidência vinculada.</p>{% endfor %}</section>
 <section class="panel"><h2>Rascunho</h2>{% if draft %}<h3>{{ draft.subject }}</h3><pre class="draft">{{ draft.message }}</pre>{% else %}<button hx-post="/api/leads/{{ lead.id }}/generate-outreach" hx-vals='{"channel":"email","force_regenerate":false}' hx-headers='{"Content-Type":"application/json"}' hx-swap="none">Gerar rascunho</button><p class="hint">Nenhuma mensagem será enviada.</p>{% endif %}</section>
 {% endblock %}

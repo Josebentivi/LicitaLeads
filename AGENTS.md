@@ -3,8 +3,8 @@
 LicitaLead Monitor: local FastAPI app that monitors Brazilian public procurement
 (PNCP + Compras.gov.br), extracts official documents/events/deadlines, and
 produces audit-ready **draft** legal leads. Portuguese domain terms and CLI/UI
-output. See `README.md`, `docs/implementation_plan.md`,
-`docs/data_source_capability_matrix.md`.
+output. See `README.md`, `docs/plano_de_implementacao.md`,
+`docs/matriz_de_fontes.md`.
 
 Workspace-level `/AGENTS.md` in the parent dir has generic conventions; this file
 holds the repo-specific rules.

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
 from types import SimpleNamespace
 from uuid import UUID
@@ -150,6 +150,19 @@ _TECHNICAL_SOURCE_LABELS = {
     "llm": "Análise por IA",
     "manual": "Registro manual",
 }
+_REVIEW_DECISION_LABELS = {
+    "approved": "Aprovado",
+    "rejected": "Rejeitado",
+    "needs_changes": "Ajustes solicitados",
+}
+
+
+def _day_bounds(day: date) -> tuple[datetime, datetime]:
+    """Convert a local calendar day into an inclusive UTC range."""
+    local_timezone = ZoneInfo(get_settings().timezone)
+    start = datetime.combine(day, time.min, tzinfo=local_timezone).astimezone(UTC)
+    end = datetime.combine(day, time.max, tzinfo=local_timezone).astimezone(UTC)
+    return start, end
 
 
 def _local_datetime(value: datetime | None) -> str:
@@ -296,6 +309,8 @@ def _participant_view(participant: Participant) -> SimpleNamespace:
     return SimpleNamespace(
         company_name=_display_text(company.legal_name or company.normalized_name),
         cnpj=_format_cnpj(company.cnpj),
+        website=company.website,
+        domain=company.domain,
         item_number=_display_text(participant.item.item_number if participant.item else None),
         role=_label(participant.participation_role, _PARTICIPANT_ROLE_LABELS),
         proposal_value=_brl(participant.proposal_value),
@@ -635,6 +650,7 @@ async def dashboard(request: Request, db: AsyncSession = Depends(get_db)):
             company_name=item.company.legal_name or item.company.normalized_name,
             event_type=item.triggering_event.event_type.value,
             score=item.score,
+            created_at=_local_datetime(item.created_at),
             deadline_status=item.deadline.status.value if item.deadline else "UNKNOWN",
             requires_manual_review=item.triggering_event.requires_manual_review,
         )
@@ -775,6 +791,8 @@ async def leads_page(
     min_score: int | None = Query(None, ge=0, le=100),
     event_type: str | None = None,
     requires_review: bool = False,
+    created_from: date | None = Query(None),
+    created_to: date | None = Query(None),
     db: AsyncSession = Depends(get_db),
 ):
     statement = select(Lead).options(
@@ -790,6 +808,12 @@ async def leads_page(
         statement = statement.join(Lead.triggering_event).where(
             ProcurementEvent.requires_manual_review.is_(True)
         )
+    if created_from is not None:
+        start, _ = _day_bounds(created_from)
+        statement = statement.where(Lead.created_at >= start)
+    if created_to is not None:
+        _, end = _day_bounds(created_to)
+        statement = statement.where(Lead.created_at <= end)
     rows = (
         (await db.scalars(statement.order_by(Lead.score.desc(), Lead.created_at.desc()).limit(200)))
         .unique()
@@ -802,13 +826,18 @@ async def leads_page(
             cnpj=item.company.cnpj,
             event_type=item.triggering_event.event_type.value,
             score=item.score,
+            created_at=_local_datetime(item.created_at),
             deadline_status=item.deadline.status.value if item.deadline else "UNKNOWN",
             lead_status=item.lead_status.value,
         )
         for item in rows
     ]
     filters = SimpleNamespace(
-        min_score=min_score, event_type=event_type, requires_review=requires_review
+        min_score=min_score,
+        event_type=event_type,
+        requires_review=requires_review,
+        created_from=created_from.isoformat() if created_from else "",
+        created_to=created_to.isoformat() if created_to else "",
     )
     return templates.TemplateResponse(request, "leads.html", {"leads": leads, "filters": filters})
 
@@ -823,19 +852,36 @@ async def lead_page(request: Request, lead_id: UUID, db: AsyncSession = Depends(
             selectinload(Lead.triggering_event).selectinload(ProcurementEvent.evidence),
             selectinload(Lead.deadline),
             selectinload(Lead.outreach_drafts),
+            selectinload(Lead.reviews),
         )
     )
     if lead is None:
         raise HTTPException(status_code=404, detail="Lead não encontrado")
-    view = SimpleNamespace(
-        **model_dict(lead),
+    draft = lead.outreach_drafts[-1] if lead.outreach_drafts else None
+    data = model_dict(lead)
+    data.update(
         company_name=lead.company.legal_name or lead.company.normalized_name,
         cnpj=lead.company.cnpj,
+        created_at=_local_datetime(lead.created_at),
+        updated_at=_local_datetime(lead.updated_at),
+        draft_created_at=_local_datetime(draft.created_at) if draft else None,
     )
+    view = SimpleNamespace(**data)
+    reviews = [
+        SimpleNamespace(
+            decision=_label(review.decision, _REVIEW_DECISION_LABELS),
+            reviewer=review.reviewer,
+            previous_status=review.previous_status,
+            notes=review.notes,
+            reviewed_at=_local_datetime(review.reviewed_at),
+        )
+        for review in lead.reviews
+    ]
     evidences = [lead.triggering_event.evidence] if lead.triggering_event.evidence else []
-    draft = lead.outreach_drafts[-1] if lead.outreach_drafts else None
     return templates.TemplateResponse(
-        request, "lead_detail.html", {"lead": view, "evidences": evidences, "draft": draft}
+        request,
+        "lead_detail.html",
+        {"lead": view, "evidences": evidences, "draft": draft, "reviews": reviews},
     )
 
 

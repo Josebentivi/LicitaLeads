@@ -41,6 +41,12 @@ from app.models import (
 from app.models import (
     DocumentChunk as StoredDocumentChunk,
 )
+from app.services.contacts.domains import (
+    EmailCandidate,
+    context_window,
+    derive_company_domain,
+    extract_email_candidates,
+)
 from app.services.deadlines import BrazilBusinessCalendar, DeadlineEngine, DeadlineRequest
 from app.services.documents import DocumentExtractor
 from app.services.documents.security import ArchiveLimits
@@ -52,6 +58,7 @@ from app.services.event_detection import (
     DocumentEvidence,
     EventDetector,
     ParticipantDetector,
+    associate_company,
 )
 from app.services.identifiers import is_valid_cnpj, normalize_cnpj, normalize_company_name
 from app.services.ingestion.documents import SecureDocumentDownloader, store_by_hash
@@ -458,7 +465,120 @@ class DocumentProcessingService:
                 )
                 event_count += llm_events
                 lead_count += llm_leads
+
+            if self.settings.contact_domain_discovery_enabled:
+                await self._discover_company_domains(
+                    session, procurement, document, chunk, references
+                )
         return event_count, participant_count, lead_count
+
+    async def _discover_company_domains(
+        self,
+        session: AsyncSession,
+        procurement: Procurement,
+        document: Document,
+        chunk: StoredDocumentChunk,
+        known_companies: list[CompanyReference],
+    ) -> int:
+        """Fill a company domain from an e-mail evidenced in an official document.
+
+        The domain is only stored when the receipt is attributed to a company by
+        exact CNPJ or unambiguous name and the company name is inside the
+        domain. An existing different domain is never overwritten; the conflict
+        is recorded for human review instead.
+        """
+
+        discovered = 0
+        for candidate in extract_email_candidates(chunk.text):
+            window, _ = context_window(chunk.text, candidate.start, candidate.end)
+            reference, method, ambiguous = associate_company(window, known_companies)
+            if reference is None or ambiguous or not reference.external_id:
+                continue
+            if method not in {"exact_cnpj", "exact_normalized_name"}:
+                continue
+            try:
+                company = await session.get(Company, UUID(reference.external_id))
+            except ValueError:
+                continue
+            if company is None:
+                continue
+            domain = derive_company_domain(candidate, normalize_company_name(company.legal_name))
+            if domain is None:
+                continue
+            if company.domain and company.domain != domain:
+                await self._observe_company_domain(
+                    session, procurement, document, chunk, company, candidate, domain, conflict=True
+                )
+                continue
+            if company.domain == domain:
+                continue
+            company.domain = domain
+            if not company.website:
+                company.website = f"https://{domain}"
+            await self._observe_company_domain(
+                session, procurement, document, chunk, company, candidate, domain, conflict=False
+            )
+            discovered += 1
+        return discovered
+
+    async def _observe_company_domain(
+        self,
+        session: AsyncSession,
+        procurement: Procurement,
+        document: Document,
+        chunk: StoredDocumentChunk,
+        company: Company,
+        candidate: EmailCandidate,
+        domain: str,
+        *,
+        conflict: bool,
+    ) -> None:
+        evidence = await self._evidence(
+            session,
+            procurement,
+            document,
+            chunk,
+            DocumentEvidence(
+                text=candidate.email,
+                source_url=document.original_url,
+                page_number=chunk.page_number,
+                locator=chunk.locator,
+                document_type=document.document_type,
+                published_at=document.published_at,
+                start_offset=candidate.start,
+                end_offset=candidate.end,
+            ),
+        )
+        fingerprint = stable_fingerprint("company_domain", company.id, domain, candidate.email)
+        exists = await session.scalar(
+            select(FieldObservation.id).where(FieldObservation.fingerprint == fingerprint)
+        )
+        if exists is not None:
+            return
+        session.add(
+            FieldObservation(
+                entity_type="company",
+                entity_id=company.id,
+                field_name="domain",
+                value={
+                    "domain": domain,
+                    "website": f"https://{domain}",
+                    "email": candidate.email,
+                    "conflict": conflict,
+                },
+                value_status=(
+                    FieldValueStatus.REQUIRES_MANUAL_REVIEW
+                    if conflict
+                    else FieldValueStatus.OBSERVED
+                ),
+                source="document",
+                evidence_id=evidence.id,
+                confidence=Decimal("0.50") if conflict else Decimal("0.85"),
+                collected_at=datetime.now(UTC),
+                fingerprint=fingerprint,
+            )
+        )
+        await session.flush()
 
     def _llm_should_run(self, chunk: StoredDocumentChunk, used: int) -> bool:
         if not self.settings.llm_enabled:
