@@ -1,0 +1,13 @@
+{% extends "base.html" %}
+{% block title %}Coletas · LicitaLead Monitor{% endblock %}
+{% block content %}
+<div class="page-heading">
+  <div>
+    <p class="eyebrow">Operação</p>
+    <h1>Coletas</h1>
+    <p class="hint">Resultados válidos são preservados mesmo quando uma fonte fica indisponível. A lista é atualizada automaticamente enquanto houver coleta em andamento.</p>
+  </div>
+</div>
+
+{% include "_crawl_table.html" %}
+{% endblock %}

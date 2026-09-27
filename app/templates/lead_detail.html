@@ -1,0 +1,9 @@
+{% extends "base.html" %}
+{% block title %}Lead · LicitaLead Monitor{% endblock %}
+{% block content %}
+<p><a href="/leads">← Leads</a></p>
+<div class="page-heading"><div><p class="eyebrow">Score {{ lead.score }}/100</p><h1>{{ lead.company_name or 'Empresa não confirmada' }}</h1><p>{{ lead.cnpj or 'CNPJ não disponível' }}</p></div><span class="badge">{{ lead.lead_status }}</span></div>
+<section class="panel"><h2>Oportunidade</h2><p>{{ lead.reason_summary or 'Motivo requer revisão manual.' }}</p><p><strong>Ação recomendada:</strong> {{ lead.recommended_action or 'Revisar evidências.' }}</p></section>
+<section class="panel"><h2>Rastreabilidade</h2>{% for evidence in evidences %}<article class="evidence"><blockquote>{{ evidence.text_excerpt }}</blockquote><a href="/api/evidence/{{ evidence.id }}">Abrir evidência{% if evidence.page_number %}, página {{ evidence.page_number }}{% endif %}</a></article>{% else %}<p class="empty">Nenhuma evidência vinculada.</p>{% endfor %}</section>
+<section class="panel"><h2>Rascunho</h2>{% if draft %}<h3>{{ draft.subject }}</h3><pre class="draft">{{ draft.message }}</pre>{% else %}<button hx-post="/api/leads/{{ lead.id }}/generate-outreach" hx-vals='{"channel":"email","force_regenerate":false}' hx-headers='{"Content-Type":"application/json"}' hx-swap="none">Gerar rascunho</button><p class="hint">Nenhuma mensagem será enviada.</p>{% endif %}</section>
+{% endblock %}

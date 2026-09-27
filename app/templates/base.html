@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}LicitaLead Monitor{% endblock %}</title>
+  <link rel="stylesheet" href="{{ url_for('static', path='app.css') }}">
+  <script src="https://unpkg.com/htmx.org@2.0.4" defer></script>
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="/dashboard">LicitaLead Monitor</a>
+    <nav aria-label="Navegação principal">
+      <a href="/dashboard">Dashboard</a>
+      <a href="/procurements">Contratações</a>
+      <a href="/leads">Leads</a>
+      <a href="/crawls">Coletas</a>
+      <a href="/source-capabilities">Fontes</a>
+      <a href="/settings">Configurações</a>
+    </nav>
+  </header>
+  <main class="container">
+    {% block content %}{% endblock %}
+  </main>
+  <footer>
+    Dados públicos com rastreabilidade. Confirme prazos e fatos na fonte oficial.
+  </footer>
+</body>
+</html>
+

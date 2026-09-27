@@ -1,0 +1,135 @@
+{% extends "base.html" %}
+{% macro origin_details(origin) %}
+<details class="technical-details">
+  <summary>Ver origem técnica</summary>
+  <dl class="technical-facts">
+    <div><dt>Fonte</dt><dd>{{ origin.source_label }}</dd></div>
+    {% if origin.official_url %}<div><dt>Link oficial</dt><dd><a href="{{ origin.official_url }}" target="_blank" rel="noopener">Abrir fonte</a></dd></div>{% endif %}
+    {% if origin.external_id %}<div><dt>Identificador externo</dt><dd><code>{{ origin.external_id }}</code></dd></div>{% endif %}
+    {% if origin.source_record_id %}<div><dt>Registro de origem</dt><dd><code>{{ origin.source_record_id }}</code></dd></div>{% endif %}
+    {% if origin.evidence_id %}<div><dt>Evidência</dt><dd><a href="{{ origin.evidence_url }}">Abrir evidência</a></dd></div>{% endif %}
+  </dl>
+</details>
+{% endmacro %}
+{% block title %}{{ procurement.title }} · LicitaLead Monitor{% endblock %}
+{% block content %}
+<p><a href="/procurements">← Contratações</a></p>
+{% if link_feedback == 'ok' %}<p class="hint">Empresa vinculada ao evento e lead recalculado com a mesma trilha de evidência.</p>{% endif %}
+
+<header class="procurement-header">
+  <div>
+    <p class="eyebrow">{{ procurement.modality }}</p>
+    <h1>{{ procurement.title }}</h1>
+    {% if procurement.object_description != procurement.title %}<p class="object-description">{{ procurement.object_description }}</p>{% endif %}
+  </div>
+  <div class="header-actions">
+    <span class="badge">{{ procurement.status }}</span>
+    {% if procurement.official_url %}<a class="button secondary" href="{{ procurement.official_url }}" target="_blank" rel="noopener">Abrir fonte oficial</a>{% endif %}
+  </div>
+</header>
+
+<section class="procurement-summary" aria-label="Resumo da contratação">
+  <dl class="facts">
+    <div><dt>Órgão</dt><dd>{{ procurement.agency_name }}</dd></div>
+    <div><dt>Processo</dt><dd>{{ procurement.process }}</dd></div>
+    <div><dt>Controle PNCP</dt><dd>{{ procurement.pncp_control_number }}</dd></div>
+    <div><dt>Local</dt><dd>{{ procurement.location }}</dd></div>
+    <div><dt>Situação</dt><dd>{{ procurement.status }}</dd></div>
+    <div><dt>Valor estimado</dt><dd>{{ procurement.estimated_value }}</dd></div>
+  </dl>
+  {% if procurement.dates %}
+  <div class="relevant-dates">
+    {% for date in procurement.dates %}<span><strong>{{ date.label }}</strong>{{ date.value }}</span>{% endfor %}
+  </div>
+  {% endif %}
+  {{ origin_details(procurement.origin) }}
+  {% if procurement.sources|length > 1 %}
+  <details class="technical-details additional-sources">
+    <summary>Ver fontes adicionais</summary>
+    <ul class="technical-source-list">
+      {% for source in procurement.sources %}<li><strong>{{ source.source_label }}</strong>{% if source.official_url %} · <a href="{{ source.official_url }}" target="_blank" rel="noopener">Abrir fonte</a>{% endif %}{% if source.external_id %}<small>Identificador externo: <code>{{ source.external_id }}</code></small>{% endif %}</li>{% endfor %}
+    </ul>
+  </details>
+  {% endif %}
+</section>
+
+<section class="panel procurement-section">
+  <div class="section-heading">
+    <div><h2>Itens</h2><p class="hint">{{ item_count }} {{ 'item encontrado' if item_count == 1 else 'itens encontrados' }}.</p></div>
+    <form class="item-search" method="get" role="search">
+      <label for="item_query">Buscar item</label>
+      <div><input id="item_query" name="item_query" value="{{ item_query }}" placeholder="Número ou descrição"><button type="submit">Buscar</button></div>
+    </form>
+  </div>
+  {% if items %}
+  <div class="table-wrap"><table class="detail-table item-table">
+    <thead><tr><th>Nº</th><th>Descrição</th><th>Quantidade</th><th>Valor unitário</th><th>Valor total</th><th>Situação</th><th>Origem</th></tr></thead>
+    <tbody>{% for item in items %}<tr>
+      <td class="item-number">{{ item.item_number }}</td>
+      <td class="item-description">{% if item.description_is_long %}<details class="description-details"><summary>{{ item.description_summary }}</summary><p>{{ item.description }}</p></details>{% else %}{{ item.description }}{% endif %}</td>
+      <td>{{ item.quantity }}</td><td>{{ item.unit_value }}</td><td>{{ item.total_value }}</td>
+      <td><span class="badge">{{ item.status }}</span></td><td>{{ origin_details(item.origin) }}</td>
+    </tr>{% endfor %}</tbody>
+  </table></div>
+  {% elif item_query %}<p class="empty">Nenhum item corresponde à busca “{{ item_query }}”.</p>
+  {% else %}<p class="empty">Nenhum item publicado.</p>{% endif %}
+</section>
+
+<section class="panel procurement-section">
+  <h2>Documentos</h2>
+  {% if documents %}
+  <div class="table-wrap"><table class="detail-table document-table">
+    <thead><tr><th>Documento</th><th>Tipo</th><th>Data</th><th>Extração</th><th>Link oficial</th><th>Origem</th></tr></thead>
+    <tbody>{% for document in documents %}<tr>
+      <td>{{ document.title }}</td><td>{{ document.document_type }}</td><td>{{ document.published_at }}</td>
+      <td><span class="badge extraction-{{ document.extraction_state }}">{{ document.extraction_status }}</span></td>
+      <td><a href="{{ document.official_url }}" target="_blank" rel="noopener">Abrir documento</a></td><td>{{ origin_details(document.origin) }}</td>
+    </tr>{% endfor %}</tbody>
+  </table></div>
+  {% else %}<p class="empty">Nenhum documento publicado.</p>{% endif %}
+</section>
+
+<section class="panel procurement-section">
+  <h2>Participantes confirmados</h2>
+  {% if participants %}
+  <div class="table-wrap"><table class="detail-table participant-table">
+    <thead><tr><th>Empresa</th><th>Item</th><th>Papel</th><th>Valores</th><th>Situação</th><th>Confiança</th><th>Evidência</th><th>Origem</th></tr></thead>
+    <tbody>{% for participant in participants %}<tr>
+      <td><strong>{{ participant.company_name }}</strong><small>CNPJ {{ participant.cnpj }}</small></td><td>{{ participant.item_number }}</td><td>{{ participant.role }}</td>
+      <td><dl class="cell-list"><div><dt>Proposta</dt><dd>{{ participant.proposal_value }}</dd></div><div><dt>Final</dt><dd>{{ participant.final_value }}</dd></div></dl></td>
+      <td><span class="badge">{{ participant.status }}</span></td><td>{{ participant.confidence }}</td>
+      <td>{% if participant.evidence_url %}<a href="{{ participant.evidence_url }}">Abrir evidência</a>{% else %}Não informado{% endif %}</td><td>{{ origin_details(participant.origin) }}</td>
+    </tr>{% endfor %}</tbody>
+  </table></div>
+  {% else %}<p class="empty">Nenhum participante confirmado por evidência oficial.</p>{% endif %}
+</section>
+
+<section class="panel procurement-section">
+  <h2>Eventos</h2>
+  {% if events %}
+  <div class="table-wrap"><table class="detail-table event-table">
+    <thead><tr><th>Evento</th><th>Empresa</th><th>Item</th><th>Motivo</th><th>Data</th><th>Confiança</th><th>Revisão</th><th>Evidência</th><th>Origem</th></tr></thead>
+    <tbody>{% for event in events %}<tr>
+      <td><strong>{{ event.event_type }}</strong></td>
+      <td>
+        {{ event.company_name }}
+        {% if not event.company_identified and candidate_companies %}
+        <form method="post" action="/procurements/{{ event.procurement_id }}/events/{{ event.id }}/link-company" class="link-company-form">
+          <select name="company_id" required>
+            <option value="">Vincular empresa…</option>
+            {% for company in candidate_companies %}<option value="{{ company.id }}">{{ company.name }} · {{ company.cnpj }}</option>{% endfor %}
+          </select>
+          <input name="reviewer" placeholder="Revisor" maxlength="255">
+          <input name="note" placeholder="Observação" maxlength="500">
+          <button type="submit" class="button compact">Vincular e gerar lead</button>
+        </form>
+        {% endif %}
+      </td>
+      <td>{{ event.item_number }}</td><td class="reason-cell">{{ event.reason }}</td>
+      <td>{{ event.occurred_at }}</td><td>{{ event.confidence }}</td><td><span class="badge {% if event.requires_manual_review %}review-required{% endif %}">{{ event.review_label }}</span></td>
+      <td>{% if event.evidence_url %}<a href="{{ event.evidence_url }}">Abrir evidência</a>{% else %}Não informado{% endif %}</td><td>{{ origin_details(event.origin) }}</td>
+    </tr>{% endfor %}</tbody>
+  </table></div>
+  {% else %}<p class="empty">Nenhum evento detectado.</p>{% endif %}
+</section>
+{% endblock %}

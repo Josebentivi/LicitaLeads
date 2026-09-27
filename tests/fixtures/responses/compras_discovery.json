@@ -1,0 +1,26 @@
+{
+  "resultado": [
+    {
+      "idCompra": "98092105900012026",
+      "numeroControlePNCP": "00000000000191-1-000001/2026",
+      "anoCompraPncp": 2026,
+      "sequencialCompraPncp": 1,
+      "orgaoEntidadeCnpj": "00000000000191",
+      "orgaoEntidadeRazaoSocial": "Prefeitura de Exemplo",
+      "unidadeOrgaoCodigoUnidade": "980921",
+      "unidadeOrgaoNomeUnidade": "Prefeitura de Exemplo",
+      "unidadeOrgaoUfSigla": "MA",
+      "unidadeOrgaoMunicipioNome": "São Luís",
+      "numeroCompra": "90001",
+      "modalidadeIdPncp": 6,
+      "codigoModalidade": 5,
+      "modalidadeNome": "Pregão - Eletrônico",
+      "objetoCompra": "Aquisição de equipamentos de informática",
+      "dataPublicacaoPncp": "2026-09-15T10:00:00",
+      "situacaoCompraNomePncp": "Divulgada"
+    }
+  ],
+  "totalRegistros": 1,
+  "totalPaginas": 1,
+  "paginasRestantes": 0
+}

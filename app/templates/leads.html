@@ -1,0 +1,14 @@
+{% extends "base.html" %}
+{% block title %}Leads · LicitaLead Monitor{% endblock %}
+{% block content %}
+<div class="page-heading"><div><p class="eyebrow">Atendimento jurídico</p><h1>Leads</h1></div></div>
+<form method="get" class="filters">
+  <label>Score mínimo <input name="min_score" type="number" min="0" max="100" value="{{ filters.min_score or '' }}"></label>
+  <label>Evento <input name="event_type" value="{{ filters.event_type or '' }}"></label>
+  <label><input name="requires_review" type="checkbox" value="true" {% if filters.requires_review %}checked{% endif %}> Revisão pendente</label>
+  <button type="submit">Filtrar</button>
+</form>
+<section class="panel table-wrap"><table><thead><tr><th>Empresa</th><th>Evento</th><th>Score</th><th>Urgência</th><th>Status</th></tr></thead>
+<tbody>{% for lead in leads %}<tr><td><a href="/leads/{{ lead.id }}">{{ lead.company_name or 'Empresa não confirmada' }}</a><small>{{ lead.cnpj or '' }}</small></td><td>{{ lead.event_type or 'unknown' }}</td><td><span class="score">{{ lead.score }}</span></td><td>{{ lead.deadline_status or 'unknown' }}</td><td>{{ lead.lead_status }}</td></tr>{% else %}<tr><td colspan="5" class="empty">Nenhum lead encontrado.</td></tr>{% endfor %}</tbody></table></section>
+{% endblock %}
+

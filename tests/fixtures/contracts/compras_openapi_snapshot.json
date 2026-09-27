@@ -1,0 +1,28 @@
+{
+  "captured_at": "2026-09-16",
+  "source": "https://dadosabertos.compras.gov.br/swagger-ui/index.html",
+  "openapi": "3.0.1",
+  "paths": {
+    "/modulo-contratacoes/1_consultarContratacoes_PNCP_14133": {
+      "get": {
+        "parameters": [
+          "dataPublicacaoPncpInicial",
+          "dataPublicacaoPncpFinal",
+          "codigoModalidade",
+          "unidadeOrgaoUfSigla",
+          "pagina",
+          "tamanhoPagina"
+        ]
+      }
+    },
+    "/modulo-contratacoes/1.1_consultarContratacoes_PNCP_14133_Id": {
+      "get": {"parameters": ["tipo", "codigo"]}
+    },
+    "/modulo-contratacoes/2.1_consultarItensContratacoes_PNCP_14133_Id": {
+      "get": {"parameters": ["tipo", "codigo"]}
+    },
+    "/modulo-contratacoes/3.1_consultarResultadoItensContratacoes_PNCP_14133_Id": {
+      "get": {"parameters": ["tipo", "codigo"]}
+    }
+  }
+}

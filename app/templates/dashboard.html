@@ -1,0 +1,39 @@
+{% extends "base.html" %}
+{% block title %}Dashboard · LicitaLead Monitor{% endblock %}
+{% block content %}
+<div class="page-heading">
+  <div>
+    <p class="eyebrow">Visão geral</p>
+    <h1>Monitor de oportunidades</h1>
+  </div>
+  <form method="post" action="/crawls/run" class="inline-form">
+    <input type="hidden" name="connector" value="all">
+    <label>UF <input name="uf" value="MA" maxlength="2" size="3"></label>
+    <label>Dias <input name="days" type="number" min="1" max="365" value="7" size="4"></label>
+    <label>Documentos por lote <input name="batch_size" type="number" min="1" max="500" value="30" size="4"></label>
+    <button type="submit">Executar coleta</button>
+  </form>
+</div>
+<section class="metrics" aria-label="Indicadores">
+  {% for label, value in metrics.items() %}
+  <article class="metric">
+    <span>{{ label }}</span>
+    <strong>{{ value }}</strong>
+  </article>
+  {% endfor %}
+</section>
+<section class="panel">
+  <h2>Leads recentes</h2>
+  {% if leads %}
+  <div class="table-wrap"><table>
+    <thead><tr><th>Empresa</th><th>Evento</th><th>Score</th><th>Prazo</th><th>Revisão</th></tr></thead>
+    <tbody>{% for lead in leads %}<tr>
+      <td><a href="/leads/{{ lead.id }}">{{ lead.company_name or 'Empresa não confirmada' }}</a></td>
+      <td>{{ lead.event_type or 'unknown' }}</td><td>{{ lead.score }}</td>
+      <td>{{ lead.deadline_status or 'unknown' }}</td>
+      <td>{{ 'Sim' if lead.requires_manual_review else 'Não' }}</td>
+    </tr>{% endfor %}</tbody>
+  </table></div>
+  {% else %}<p class="empty">Nenhum lead criado. Execute o pipeline para começar.</p>{% endif %}
+</section>
+{% endblock %}

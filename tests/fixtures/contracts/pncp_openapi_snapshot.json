@@ -1,0 +1,28 @@
+{
+  "captured_at": "2026-09-16",
+  "source": "https://pncp.gov.br/api/consulta/swagger-ui/index.html",
+  "openapi": "3.0.1",
+  "paths": {
+    "/api/consulta/v1/contratacoes/publicacao": {
+      "get": {
+        "parameters": [
+          "dataInicial",
+          "dataFinal",
+          "codigoModalidadeContratacao",
+          "uf",
+          "pagina",
+          "tamanhoPagina"
+        ]
+      }
+    },
+    "/api/pncp/v1/orgaos/{cnpj}/compras/{ano}/{sequencial}/itens": {
+      "get": {"parameters": ["cnpj", "ano", "sequencial"]}
+    },
+    "/api/pncp/v1/orgaos/{cnpj}/compras/{ano}/{sequencial}/arquivos": {
+      "get": {"parameters": ["cnpj", "ano", "sequencial"]}
+    },
+    "/api/pncp/v1/orgaos/{cnpj}/compras/{ano}/{sequencial}/itens/{item}/resultados": {
+      "get": {"parameters": ["cnpj", "ano", "sequencial", "item"]}
+    }
+  }
+}

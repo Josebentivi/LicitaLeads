@@ -1,0 +1,6 @@
+{% extends "base.html" %}
+{% block title %}Fontes · LicitaLead Monitor{% endblock %}
+{% block content %}<div class="page-heading"><div><p class="eyebrow">Auditoria</p><h1>Capacidades das fontes</h1></div></div>
+{% for source in capabilities %}<section class="panel"><h2>{{ source.name }}</h2><p><a href="{{ source.documentation_url }}" target="_blank" rel="noopener">Documentação oficial</a></p><div class="table-wrap"><table><thead><tr><th>Capacidade</th><th>Disponibilidade</th><th>Observação</th></tr></thead><tbody>{% for capability in source.capabilities %}<tr><td>{{ capability.name }}</td><td><span class="badge {{ capability.availability }}">{{ capability.availability }}</span></td><td>{{ capability.notes }}</td></tr>{% endfor %}</tbody></table></div></section>{% endfor %}
+{% endblock %}
+

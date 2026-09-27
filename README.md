@@ -1,0 +1,154 @@
+# LicitaLead Monitor
+
+Aplicação local e auditável para monitorar contratações públicas, processar
+documentos oficiais e produzir oportunidades de atendimento jurídico em modo
+**rascunho**. O sistema usa PNCP e Dados Abertos do Compras.gov.br, preserva a
+origem de cada conclusão e nunca inventa participantes, eventos ou prazos.
+
+> MVP para apoio à análise. Uma estimativa de prazo não substitui a conferência
+> do edital, da ata, da plataforma oficial e da legislação aplicável.
+
+## Requisitos
+
+- Python 3.12
+- `pip` e `venv`
+- SQLite, incluído no Python
+- Sem Docker, Node.js ou banco externo obrigatório
+
+## Instalação no Windows
+
+```powershell
+py -3.12 -m venv .venv
+.venv\Scripts\activate
+python -m pip install --upgrade pip
+pip install -e ".[dev]"
+copy .env.example .env
+python scripts/setup.py
+python run.py
+```
+
+## Instalação no Linux/macOS
+
+```bash
+python3.12 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+pip install -e '.[dev]'
+cp .env.example .env
+python scripts/setup.py
+python run.py
+```
+
+A interface estará em <http://localhost:8000>, o Swagger em
+<http://localhost:8000/docs> e a verificação em
+<http://localhost:8000/health>.
+
+## Arquitetura
+
+O fluxo é dividido em conectores, normalização/persistência, documentos,
+eventos, prazos, contatos, leads e apresentação. `SourceRecord`, vínculos de
+fonte e evidências permitem responder de onde veio cada campo. SQLite é usado
+por padrão; PostgreSQL é habilitado somente ao configurar `DATABASE_URL`.
+
+Consulte a [matriz de fontes](docs/data_source_capability_matrix.md) e o
+[plano de implementação](docs/implementation_plan.md).
+
+## Comandos principais
+
+```bash
+python -m app.cli audit-sources
+python -m app.cli crawl pncp --uf MA --days 7
+python -m app.cli crawl compras-gov --uf MA --days 7
+python -m app.cli process-documents
+python -m app.cli detect-events
+python -m app.cli calculate-deadlines
+python -m app.cli enrich-contacts
+python -m app.cli create-leads
+python -m app.cli run-pipeline --uf MA --days 7
+python -m app.cli export-leads leads.csv
+```
+
+O scheduler é deliberadamente separado da API:
+
+```bash
+python -m app.jobs.scheduler
+```
+
+## Banco e migrations
+
+O padrão é `sqlite:///./data/licita_lead.db`.
+
+```bash
+alembic upgrade head
+alembic revision --autogenerate -m "descricao"
+```
+
+Para PostgreSQL:
+
+```env
+DATABASE_URL=postgresql+psycopg://user:password@localhost/licita_lead
+```
+
+Se o projeto estiver em uma pasta sincronizada, como Google Drive, evite duas
+instâncias simultâneas usando o mesmo SQLite. Para cargas maiores, mova o banco
+para disco local ou use PostgreSQL.
+
+## Fontes e limitações
+
+- PNCP fornece contratações, itens, documentos e resultados publicados.
+- Compras.gov.br fornece contratações, itens, resultados, fornecedores, atas de registro de preços e
+  contratos, mas não documentos da sessão.
+- Resultado homologado não equivale à lista de participantes.
+- Inabilitação, desclassificação e recursos normalmente dependem de documentos.
+- PDF escaneado é marcado `ocr_required` quando não há OCR configurado.
+- LLM e busca de contatos ficam desligados por padrão.
+- CNPJ numérico e alfanumérico são aceitos; CPF não é usado para prospecção.
+
+## Prazos
+
+O motor prioriza prazo explícito e evidenciado. A regra configurável de três
+dias úteis só é usada para eventos compatíveis e com marco inicial confiável.
+Estimativas registram método, base, calendário, confiança e necessidade de
+revisão. Feriados estaduais/municipais podem ser adicionados em
+`data/holidays.csv` com as colunas `date,name,scope,uf,municipality_ibge`.
+
+## Testes e qualidade
+
+```bash
+pytest
+ruff check .
+ruff format --check .
+mypy app
+```
+
+Testes com APIs reais são opt-in:
+
+```bash
+RUN_LIVE_CONTRACT_TESTS=true pytest tests/contract -m live
+```
+
+## Criação de conectores
+
+Um conector implementa `ProcurementSourceConnector` e retorna
+`ConnectorResult`, incluindo `DataAvailability`, URL e instante de coleta. Uma
+lista vazia não deve ser confundida com capacidade não suportada. Novas fontes
+devem preservar payload bruto, identificador externo e observações de campo.
+
+## Segurança e privacidade
+
+Downloads aceitam apenas HTTP(S) público, validam DNS/IP, tamanho, redirects e
+assinatura do arquivo. Arquivos ZIP são extraídos com limites contra zip-slip e
+zip-bomb. A interface não renderiza HTML bruto. Segredos não aparecem em logs ou
+na página de configurações. O servidor vincula-se a `127.0.0.1` por padrão e o
+MVP não deve ser exposto publicamente sem uma camada de autenticação.
+
+## Troubleshooting
+
+- **Banco desatualizado:** execute `alembic upgrade head`.
+- **SQLite bloqueado:** encerre outra instância e verifique sincronização da pasta.
+- **Fonte temporariamente indisponível:** consulte `/crawls`; a tela separa o resultado por
+  fonte, preserva os registros válidos e permite repetir somente o conector que falhou.
+- **Sem participantes:** verifique documentos e o estado de disponibilidade; o
+  sistema não cria participantes perdedores a partir do vencedor.
+- **Sem prazo:** confirme se há marco inicial ou prazo explícito; casos ambíguos
+  ficam `requires_manual_review`.

@@ -1,0 +1,86 @@
+<div id="crawl-table"
+     {% if has_active %}hx-get="/crawls/table" hx-trigger="every 5s" hx-swap="outerHTML"{% endif %}>
+  <section class="panel table-wrap">
+    <table class="crawl-table">
+      <thead>
+        <tr>
+          <th>Coleta</th>
+          <th>Período</th>
+          <th>Status</th>
+          <th>Fontes</th>
+          <th>Encontrados</th>
+          <th>Duração</th>
+          <th>Diagnóstico e ações</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for run in crawls %}
+        <tr>
+          <td>
+            <strong>{{ run.connector_label }}</strong>
+            <small title="{{ run.id }}">{{ run.id|string|truncate(13, True, '…') }}</small>
+          </td>
+          <td class="date-cell">
+            <span>{{ run.started_at }}</span>
+            <small>até {{ run.finished_at }}</small>
+          </td>
+          <td><span class="badge status-{{ run.status }}">{{ run.status_label }}</span></td>
+          <td>
+            <div class="source-list">
+              {% for source in run.sources %}
+              <div class="source-result">
+                <span class="source-name">{{ source.label }}</span>
+                <span class="badge status-{{ source.status }}">{{ source.status_label }}</span>
+                {% if source.records_found is not none %}
+                <small>{{ source.records_found }} registro(s)</small>
+                {% endif %}
+              </div>
+              {% endfor %}
+            </div>
+          </td>
+          <td><strong class="record-count">{{ run.records_found }}</strong></td>
+          <td>
+            {{ run.duration }}
+            {% if run.documents_progress %}<small>{{ run.documents_progress }}</small>{% endif %}
+          </td>
+          <td class="crawl-actions">
+            {% set diagnostics = namespace(found=false) %}
+            {% for source in run.sources %}
+              {% if source.friendly_error %}
+                {% set diagnostics.found = true %}
+                <div class="source-diagnostic">
+                  <p>{{ source.friendly_error }}</p>
+                  <small>Limite configurado: até {{ source.max_attempts }} tentativa(s) por requisição{% if source.duration != '—' %}; duração da fonte: {{ source.duration }}{% endif %}.</small>
+                  {% if source.retryable %}
+                  <form method="post" action="/crawls/{{ run.id }}/retry" class="retry-form">
+                    <input type="hidden" name="connector" value="{{ source.id }}">
+                    <button type="submit" class="button compact">Tentar {{ source.label }} novamente</button>
+                  </form>
+                  {% endif %}
+                  <details>
+                    <summary>Detalhes técnicos</summary>
+                    <pre>{{ source.technical_detail }}</pre>
+                  </details>
+                </div>
+              {% endif %}
+            {% endfor %}
+            {% if run.general_error %}
+              {% set diagnostics.found = true %}
+              <div class="source-diagnostic">
+                <p>{{ run.general_error }}</p>
+                <details>
+                  <summary>Detalhes técnicos</summary>
+                  <pre>{{ run.general_technical_detail }}</pre>
+                </details>
+              </div>
+            {% endif %}
+            {% if not diagnostics.found %}<span class="hint">Nenhuma falha registrada.</span>{% endif %}
+          </td>
+        </tr>
+        {% else %}
+        <tr><td colspan="7" class="empty">Nenhuma coleta executada.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </section>
+</div>

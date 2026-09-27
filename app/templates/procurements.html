@@ -1,0 +1,20 @@
+{% extends "base.html" %}
+{% block title %}Contratações · LicitaLead Monitor{% endblock %}
+{% block content %}
+<div class="page-heading"><div><p class="eyebrow">Monitoramento</p><h1>Contratações</h1></div></div>
+<form method="get" class="filters">
+  <label>UF <input name="uf" maxlength="2" value="{{ filters.uf or '' }}"></label>
+  <label>Município <input name="municipality" value="{{ filters.municipality or '' }}"></label>
+  <label>Órgão <input name="agency" value="{{ filters.agency or '' }}"></label>
+  <button type="submit">Filtrar</button>
+</form>
+<section class="panel table-wrap">
+<table><thead><tr><th>Processo</th><th>Órgão</th><th>Local</th><th>Modalidade</th><th>Situação</th></tr></thead>
+<tbody>{% for item in procurements %}<tr>
+  <td><a href="/procurements/{{ item.id }}">{{ item.purchase_number or item.external_id or item.id }}</a><small>{{ item.object_description or item.title or '' }}</small></td>
+  <td>{{ item.agency_name or 'not_available' }}</td><td>{{ item.municipality or '' }}/{{ item.uf or '' }}</td>
+  <td>{{ item.modality or 'unknown' }}</td><td>{{ item.status or 'unknown' }}</td>
+</tr>{% else %}<tr><td colspan="5" class="empty">Nenhuma contratação encontrada.</td></tr>{% endfor %}</tbody></table>
+</section>
+{% endblock %}
+

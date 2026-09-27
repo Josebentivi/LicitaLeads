@@ -1,0 +1,5 @@
+{% extends "base.html" %}
+{% block title %}Configurações · LicitaLead Monitor{% endblock %}
+{% block content %}<div class="page-heading"><div><p class="eyebrow">Somente leitura</p><h1>Configurações</h1></div></div>
+<section class="panel"><dl class="facts">{% for key, value in settings.items() %}<div><dt>{{ key }}</dt><dd>{{ value }}</dd></div>{% endfor %}</dl><p class="hint">Segredos são sempre ocultados. Edite o arquivo .env e reinicie os processos para alterar configurações.</p></section>{% endblock %}
+

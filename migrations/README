@@ -1,0 +1,9 @@
+Alembic migrations for the LicitaLead Monitor database.
+
+Apply the current schema with:
+
+    alembic upgrade head
+
+Create a reviewed migration with:
+
+    alembic revision --autogenerate -m "description"
