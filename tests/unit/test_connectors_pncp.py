@@ -20,6 +20,7 @@ def _settings() -> SimpleNamespace:
         timezone="America/Sao_Paulo",
         http_max_retries=0,
         http_max_concurrency=2,
+        http_min_request_interval_seconds=0,
     )
 
 

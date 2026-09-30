@@ -3,7 +3,7 @@
 {% block content %}
 <div class="page-heading"><div><p class="eyebrow">Monitoramento</p><h1>Contratações</h1></div></div>
 <form method="get" class="filters">
-  <label>UF <input name="uf" maxlength="2" value="{{ filters.uf or '' }}"></label>
+  <label>UF <select name="uf"><option value="">Todas</option>{% for code, name in ufs %}<option value="{{ code }}"{% if code == filters.uf %} selected{% endif %}>{{ code }} · {{ name }}</option>{% endfor %}</select></label>
   <label>Município <input name="municipality" value="{{ filters.municipality or '' }}"></label>
   <label>Órgão <input name="agency" value="{{ filters.agency or '' }}"></label>
   <button type="submit">Filtrar</button>

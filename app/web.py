@@ -53,6 +53,35 @@ _STATUS_LABELS = {
 }
 
 _PROCUREMENT_TIMEZONE = ZoneInfo("America/Sao_Paulo")
+_BRAZILIAN_UFS = (
+    ("AC", "Acre"),
+    ("AL", "Alagoas"),
+    ("AP", "Amapá"),
+    ("AM", "Amazonas"),
+    ("BA", "Bahia"),
+    ("CE", "Ceará"),
+    ("DF", "Distrito Federal"),
+    ("ES", "Espírito Santo"),
+    ("GO", "Goiás"),
+    ("MA", "Maranhão"),
+    ("MT", "Mato Grosso"),
+    ("MS", "Mato Grosso do Sul"),
+    ("MG", "Minas Gerais"),
+    ("PA", "Pará"),
+    ("PB", "Paraíba"),
+    ("PR", "Paraná"),
+    ("PE", "Pernambuco"),
+    ("PI", "Piauí"),
+    ("RJ", "Rio de Janeiro"),
+    ("RN", "Rio Grande do Norte"),
+    ("RS", "Rio Grande do Sul"),
+    ("RO", "Rondônia"),
+    ("RR", "Roraima"),
+    ("SC", "Santa Catarina"),
+    ("SP", "São Paulo"),
+    ("SE", "Sergipe"),
+    ("TO", "Tocantins"),
+)
 _PROCUREMENT_MODALITY_LABELS = {
     "pregao_eletronico": "Pregão eletrônico",
     "pregao_presencial": "Pregão presencial",
@@ -657,7 +686,14 @@ async def dashboard(request: Request, db: AsyncSession = Depends(get_db)):
         for item in recent
     ]
     return templates.TemplateResponse(
-        request, "dashboard.html", {"metrics": counts, "leads": leads}
+        request,
+        "dashboard.html",
+        {
+            "metrics": counts,
+            "leads": leads,
+            "ufs": _BRAZILIAN_UFS,
+            "selected_uf": get_settings().default_uf,
+        },
     )
 
 
@@ -670,8 +706,9 @@ async def procurements_page(
     db: AsyncSession = Depends(get_db),
 ):
     statement = select(Procurement)
-    if uf:
-        statement = statement.where(Procurement.uf == uf.upper())
+    selected_uf = uf.upper() if uf else None
+    if selected_uf:
+        statement = statement.where(Procurement.uf == selected_uf)
     if municipality:
         statement = statement.where(Procurement.municipality.ilike(f"%{municipality}%"))
     if agency:
@@ -684,7 +721,8 @@ async def procurements_page(
         "procurements.html",
         {
             "procurements": rows,
-            "filters": SimpleNamespace(uf=uf, municipality=municipality, agency=agency),
+            "ufs": _BRAZILIAN_UFS,
+            "filters": SimpleNamespace(uf=selected_uf, municipality=municipality, agency=agency),
         },
     )
 

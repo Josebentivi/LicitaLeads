@@ -34,6 +34,7 @@ def _settings() -> SimpleNamespace:
         http_timeout_seconds=5,
         http_max_retries=0,
         http_max_concurrency=2,
+        http_min_request_interval_seconds=0,
         http_user_agent="LicitaLeadContractTest/1",
     )
 

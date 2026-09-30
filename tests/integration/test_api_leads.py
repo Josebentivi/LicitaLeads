@@ -290,6 +290,20 @@ async def test_procurement_evidence_and_web_pages(
     dashboard_page = responses[9].text
     assert "Adicionado em" in dashboard_page
     assert expected_created in dashboard_page
+    assert '<select name="uf">' in dashboard_page
+    assert '<option value="MA" selected>MA · Maranhão</option>' in dashboard_page
+    assert '<input name="uf"' not in dashboard_page
+
+    procurements_page = responses[10].text
+    assert '<select name="uf">' in procurements_page
+    assert '<option value="">Todas</option>' in procurements_page
+    assert '<option value="MA">MA · Maranhão</option>' in procurements_page
+    assert '<input name="uf"' not in procurements_page
+
+    filtered_procurements = await api_client.get("/procurements", params={"uf": "ma"})
+    assert filtered_procurements.status_code == 200
+    assert '<option value="MA" selected>MA · Maranhão</option>' in filtered_procurements.text
+    assert f"/procurements/{ids.procurement}" in filtered_procurements.text
 
 
 @pytest.mark.asyncio

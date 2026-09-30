@@ -37,6 +37,15 @@ holds the repo-specific rules.
 
 - **Python 3.12 only** is enforced by `scripts/setup.py` and
   `scripts/check_environment.py` (`run.py` only warns). Don't rely on 3.13+.
+- Windows one-click launcher: `iniciar.bat` → `scripts/launcher.py` (stdlib
+  only; re-executes under 3.12, may install it via winget, recreates a broken
+  `.venv`, installs deps **without** `[dev]`, creates `.env`, migrates, starts
+  API + scheduler and opens the browser). Keep it working when touching
+  `run.py`, `scripts/setup.py`, `scripts/check_environment.py` or `.env.example`;
+  `--check` must stay read-only and the scheduler must never outlive it. On
+  synced drives (Google Drive/OneDrive) it puts the venv under
+  `%LOCALAPPDATA%\LicitaLeads\venv` because pip cannot read its CA bundle from
+  those mounts; `--venv CAMINHO` overrides.
 - Bootstrap: `pip install -e ".[dev]"`, then `python scripts/setup.py` (copies
   `.env` from `.env.example` and runs `alembic upgrade head`), then `python run.py`.
 - `python run.py` refuses to start unless the DB revision equals the Alembic head;

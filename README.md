@@ -33,6 +33,37 @@ A documentação completa está em [`docs/`](docs/README.md):
 
 ## Instalação no Windows
 
+### Início rápido com um clique
+
+1. Clone o repositório e entre na pasta.
+2. (Opcional) Ajuste o `.env`; o launcher cria um a partir do `.env.example` se
+   ele ainda não existir.
+3. Dê duplo clique em `iniciar.bat`.
+
+Na primeira execução o launcher cria a `.venv`, instala as dependências, aplica
+as migrations, sobe a API/UI e o scheduler em segundo plano e abre o navegador
+em <http://localhost:8000>. Nas execuções seguintes ele apenas verifica o
+ambiente e sobe a plataforma. Feche a janela do console (ou pressione `Ctrl+C`)
+para encerrar tudo; o scheduler é encerrado junto. Se a aplicação já estiver em
+execução, o launcher apenas abre o navegador.
+
+Se o Python 3.12 não estiver disponível, o launcher oferece a instalação via
+`winget`. Se o repositório estiver em uma pasta sincronizada (Google Drive,
+OneDrive), o launcher cria a `.venv` fora dela
+(`%LOCALAPPDATA%\LicitaLeads\venv`), porque o pip não consegue ler os
+certificados a partir dessas unidades virtuais. Para um diagnóstico sem alterar
+nada:
+
+```powershell
+python scripts\launcher.py --check
+```
+
+`scripts\launcher.py` também aceita `--venv CAMINHO`, `--repair` (recria a
+`.venv`), `--reinstall`, `--dev`, `--upgrade-pip`, `--no-browser` e
+`--no-scheduler`.
+
+### Instalação manual
+
 ```powershell
 py -3.12 -m venv .venv
 .venv\Scripts\activate

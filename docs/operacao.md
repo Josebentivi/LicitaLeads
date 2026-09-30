@@ -33,6 +33,46 @@ python run.py
 `scripts/setup.py` cria `.env` a partir de `.env.example` (se ausente), cria
 `data/documents` e `data/raw` e aplica `alembic upgrade head`.
 
+## Launcher Windows (`iniciar.bat`)
+
+Alternativa de um clique para usuários Windows (requer Python 3.12; se ausente,
+o próprio launcher oferece a instalação via `winget`):
+
+1. Clone o repositório e, se quiser, ajuste o `.env`.
+2. Duplo clique em `iniciar.bat`.
+
+O launcher (`scripts/launcher.py`, apenas biblioteca padrão):
+
+- cria/reutiliza a `.venv` (recriando se estiver quebrada) e instala as
+  dependências quando o `pyproject.toml` mudar (sem `[dev]`; use `--dev` para
+  incluí-las);
+- em pastas sincronizadas (Google Drive, OneDrive), cria a `.venv` em
+  `%LOCALAPPDATA%\LicitaLeads\venv`, porque carregar o `cacert.pem` do pip a
+  partir dessas unidades virtuais trava; use `--venv CAMINHO` para escolher
+  outro local;
+- cria o `.env` a partir de `.env.example` se estiver ausente e valida a
+  configuração antes de subir o servidor;
+- aplica as migrations e sobe a API/UI (`run.py --migrate`);
+- sobe o scheduler em segundo plano (log em `data/scheduler.log`) e o encerra
+  junto com a aplicação;
+- abre o navegador em <http://localhost:8000> quando `/health` responde;
+- se a aplicação já estiver em execução, apenas abre o navegador.
+
+Flags: `--check` (diagnóstico sem alterações), `--venv CAMINHO`, `--repair`
+(recria a `.venv`), `--reinstall`, `--dev`, `--upgrade-pip`, `--no-browser`,
+`--no-scheduler`.
+
+### Troubleshooting do launcher
+
+- **Python 3.12 ausente:** aceite a instalação via `winget` ou instale
+  manualmente em <https://www.python.org/downloads/windows/> e rode de novo.
+- **Porta ocupada:** ajuste `APP_PORT` no `.env` ou encerre o processo que usa a
+  porta; a mensagem do launcher informa o número.
+- **`.env` inválido:** o launcher mostra o erro de validação e interrompe sem
+  subir o servidor.
+- **Primeira execução demorada:** a instalação das dependências (PyMuPDF etc.)
+  pode levar alguns minutos; as próximas execuções são rápidas.
+
 ## Subir a aplicação
 
 ```bash

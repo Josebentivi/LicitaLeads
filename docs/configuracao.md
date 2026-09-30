@@ -41,6 +41,7 @@ alterações exigem reiniciar o processo.
 | `HTTP_TIMEOUT_SECONDS` | `30` | Timeout por requisição (até 120) |
 | `HTTP_MAX_RETRIES` | `4` | Tentativas adicionais com backoff (0–10) |
 | `HTTP_MAX_CONCURRENCY` | `4` | Requisições simultâneas (1–20) |
+| `HTTP_MIN_REQUEST_INTERVAL_SECONDS` | `0.5` | Intervalo mínimo entre requisições, em segundos (0–10; `0` desliga) |
 | `HTTP_USER_AGENT` | `LicitaLeadMonitor/0.1` | User-Agent |
 
 ## Documentos e arquivos

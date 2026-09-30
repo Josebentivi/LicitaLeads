@@ -8,7 +8,7 @@
   </div>
   <form method="post" action="/crawls/run" class="inline-form">
     <input type="hidden" name="connector" value="all">
-    <label>UF <input name="uf" value="MA" maxlength="2" size="3"></label>
+    <label>UF <select name="uf">{% for code, name in ufs %}<option value="{{ code }}"{% if code == selected_uf %} selected{% endif %}>{{ code }} · {{ name }}</option>{% endfor %}</select></label>
     <label>Dias <input name="days" type="number" min="1" max="365" value="7" size="4"></label>
     <label>Documentos por lote <input name="batch_size" type="number" min="1" max="500" value="30" size="4"></label>
     <button type="submit">Executar coleta</button>

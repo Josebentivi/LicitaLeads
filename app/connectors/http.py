@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import random
+import time
 from collections.abc import Awaitable, Callable, Mapping
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
@@ -88,7 +89,12 @@ class AsyncHTTPClient:
         timeout = float(setting(settings, "http_timeout_seconds", 30.0))
         user_agent = str(setting(settings, "http_user_agent", "LicitaLeadMonitor/0.1"))
         self.max_retries = int(setting(settings, "http_max_retries", 4))
+        self._min_request_interval = max(
+            float(setting(settings, "http_min_request_interval_seconds", 0.5)), 0.0
+        )
         self._semaphore = asyncio.Semaphore(int(setting(settings, "http_max_concurrency", 4)))
+        self._pace_lock = asyncio.Lock()
+        self._next_request_at = 0.0
         self._sleep = sleep
         self._random = random_source
         self._owns_client = client is None
@@ -112,6 +118,7 @@ class AsyncHTTPClient:
 
         request_params = {key: value for key, value in (params or {}).items() if value is not None}
         for attempt in range(self.max_retries + 1):
+            await self._pace()
             try:
                 async with self._semaphore:
                     response = await self._client.request(
@@ -171,11 +178,24 @@ class AsyncHTTPClient:
 
         raise AssertionError("unreachable retry state")
 
+    async def _pace(self) -> None:
+        """Space request starts by a configurable minimum interval."""
+
+        if self._min_request_interval <= 0:
+            return
+        async with self._pace_lock:
+            now = time.monotonic()
+            start = max(now, self._next_request_at)
+            self._next_request_at = start + self._min_request_interval
+        delay = start - now
+        if delay > 0:
+            await self._sleep(delay)
+
     def _backoff_delay(self, attempt: int, retry_after: str | None) -> float:
         if retry_after:
             parsed = self._parse_retry_after(retry_after)
             if parsed is not None:
-                return min(max(parsed, 0.0), 60.0)
+                return min(max(parsed, 0.0), 120.0)
         return min((0.5 * (2**attempt)) + (self._random() * 0.25), 30.0)
 
     @staticmethod

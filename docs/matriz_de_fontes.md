@@ -56,6 +56,6 @@ O OpenAPI também expõe módulos `legado`, `uasg`, `fornecedor`, `arp`, `contra
 - Os códigos de modalidade são específicos de cada fonte: pregão eletrônico é PNCP `6` e Compras.gov.br `5`.
 - CNPJ numérico e alfanumérico de 14 posições são validados com os dígitos verificadores oficiais; CPF não é usado para enriquecimento.
 - `empty`, `not_supported`, `not_published`, `access_restricted` e `temporary_error` têm semânticas distintas no conector.
-- Limites globais de requisição não foram publicados; o cliente trata 429, `Retry-After` e falhas temporárias com backoff conservador.
+- Limites globais de requisição não foram publicados; o cliente trata 429, `Retry-After` e falhas temporárias com backoff conservador e intervalo mínimo configurável entre requisições (`HTTP_MIN_REQUEST_INTERVAL_SECONDS`).
 
 O comando `python -m app.cli audit-sources` compara os OpenAPI vivos com os contratos conhecidos e salva um relatório datado, sem alterar esta matriz automaticamente.

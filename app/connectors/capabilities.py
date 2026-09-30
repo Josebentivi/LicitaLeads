@@ -308,7 +308,8 @@ def render_capability_matrix_markdown(
             "- `empty`, `not_supported`, `not_published`, `access_restricted` e "
             "`temporary_error` têm semânticas distintas no conector.",
             "- Limites globais de requisição não foram publicados; o cliente trata 429, "
-            "`Retry-After` e falhas temporárias com backoff conservador.",
+            "`Retry-After` e falhas temporárias com backoff conservador e ritmo mínimo "
+            "configurável entre requisições.",
             "",
         ]
     )

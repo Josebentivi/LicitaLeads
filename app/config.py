@@ -43,6 +43,7 @@ class Settings(BaseSettings):
     http_timeout_seconds: float = Field(default=30, gt=0, le=120)
     http_max_retries: int = Field(default=4, ge=0, le=10)
     http_max_concurrency: int = Field(default=4, ge=1, le=20)
+    http_min_request_interval_seconds: float = Field(default=0.5, ge=0, le=10)
     http_user_agent: str = "LicitaLeadMonitor/0.1"
 
     document_storage_path: Path = Path("./data/documents")
