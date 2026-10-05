@@ -83,6 +83,16 @@ holds the repo-specific rules.
   `asyncio.to_thread` — the UI-triggered crawl shares the API event loop, and
   sync extraction freezes the whole site. Crawl progress (`cursor.progress`) is
   persisted per record/document so `/crawls` shows movement during long runs.
+- Crawl cancellation is cooperative: `crawl_runs.cancel_requested` is persisted
+  and checked before each record/document; tasks launched by the API are also
+  cancelled directly. Never swallow `PipelineCancelled`/`CancelledError` inside
+  the pipeline — the run must finish as `cancelled` and release its lease.
+- The settings reset (`POST /api/maintenance/clear-data`, `/settings`) is an
+  explicit, destructive operator action: it wipes every domain table and stored
+  file, preserves `.env`/Alembic/holidays, and must refuse while a crawl or
+  scheduler lease is active. Tests must monkeypatch the maintenance module's
+  `get_settings` to temporary paths so real storage directories are never
+  deleted.
 - `app/models/` (SQLAlchemy, provenance entities), `app/repositories/` (queries),
   `app/api/routes/` (`/api`, Swagger at `/docs`), `app/cli/` (Typer),
   `app/jobs/scheduler.py`.

@@ -1,6 +1,8 @@
 """Public Pydantic schemas used by the API and CLI."""
 
 from app.schemas.api import (
+    ClearDataRequest,
+    ClearDataResponse,
     ContactImportResult,
     CrawlRunRequest,
     CrawlRunResponse,
@@ -12,6 +14,8 @@ from app.schemas.api import (
 )
 
 __all__ = [
+    "ClearDataRequest",
+    "ClearDataResponse",
     "ContactImportResult",
     "CrawlRunRequest",
     "CrawlRunResponse",

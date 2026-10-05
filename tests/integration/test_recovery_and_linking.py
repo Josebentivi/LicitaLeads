@@ -121,6 +121,35 @@ async def test_reconcile_stale_crawls_fails_only_interrupted_runs(
 
 
 @pytest.mark.asyncio
+async def test_reconcile_marks_stale_cancelled_runs_as_cancelled(
+    database: DatabaseContext,
+) -> None:
+    now = datetime.now(UTC)
+    async with database.sessions() as session, session.begin():
+        cancelled = CrawlRun(
+            connector="pncp",
+            status=CrawlRunStatus.RUNNING,
+            started_at=now - timedelta(hours=5),
+            created_at=now - timedelta(hours=5),
+            cancel_requested=True,
+            filters={},
+        )
+        session.add(cancelled)
+        await session.flush()
+        cancelled_id = cancelled.id
+
+    reconciled = await reconcile_stale_crawls(
+        session_factory=database.sessions, now=now, stale_after_minutes=180
+    )
+
+    assert reconciled == 1
+    async with database.sessions() as session:
+        stored = await session.get(CrawlRun, cancelled_id)
+    assert stored is not None and stored.status is CrawlRunStatus.CANCELLED
+    assert "cancelada" in (stored.diagnostic or "")
+
+
+@pytest.mark.asyncio
 async def test_crawl_page_reports_running_sources_honestly(
     api_client: httpx.AsyncClient,
     database: DatabaseContext,
@@ -141,6 +170,7 @@ async def test_crawl_page_reports_running_sources_honestly(
     assert page.status_code == 200
     assert "Em andamento" in page.text
     assert "Concluída" not in page.text
+    assert "Encerrar coleta" in page.text
     assert 'hx-get="/crawls/table"' in page.text
     assert fragment.status_code == 200
     assert 'id="crawl-table"' in fragment.text

@@ -339,3 +339,62 @@ async def test_pipeline_persists_incremental_progress(database: DatabaseContext)
     ]
     assert 0 in processed_values
     assert 1 in processed_values
+
+
+@pytest.mark.asyncio
+async def test_pipeline_honors_persisted_cancellation_flag(
+    database: DatabaseContext,
+) -> None:
+    """A persisted cancellation request stops the run and frees the lease."""
+
+    connector = StaticConnector("pncp", _procurement("pncp", CONTROL_NUMBER))
+    pipeline = IngestionPipeline(
+        session_factory=database.sessions,
+        connectors={"pncp": connector},
+    )
+    request = PipelineRequest(connector="pncp", uf="MA", process_documents=False)
+    run = await pipeline.create_run(request)
+    async with database.sessions() as session, session.begin():
+        stored = await session.get(CrawlRun, run.id)
+        assert stored is not None
+        stored.cancel_requested = True
+
+    summary = await pipeline.run(request, run_id=run.id)
+
+    assert summary.status is CrawlRunStatus.CANCELLED
+    assert any("encerrada" in item for item in summary.diagnostics)
+    async with database.sessions() as session:
+        persisted = await session.get(CrawlRun, run.id)
+    assert persisted is not None and persisted.status is CrawlRunStatus.CANCELLED
+    follow_up = await pipeline.run(
+        PipelineRequest(connector="pncp", uf="MA", process_documents=False)
+    )
+    assert follow_up.status is CrawlRunStatus.COMPLETED
+
+
+@pytest.mark.asyncio
+async def test_pipeline_stops_between_records_when_cancelled(
+    database: DatabaseContext,
+) -> None:
+    """The connector loop checks the flag before processing each record."""
+
+    connector = StaticConnector("pncp", _procurement("pncp", CONTROL_NUMBER))
+    pipeline = IngestionPipeline(
+        session_factory=database.sessions,
+        connectors={"pncp": connector},
+    )
+    checks = 0
+
+    async def fake(run_id) -> bool:
+        nonlocal checks
+        checks += 1
+        return checks > 1
+
+    pipeline._cancellation_requested = fake
+    summary = await pipeline.run(
+        PipelineRequest(connector="pncp", uf="MA", process_documents=False)
+    )
+
+    assert summary.status is CrawlRunStatus.CANCELLED
+    assert summary.records_found == 1
+    assert summary.records_created == 0

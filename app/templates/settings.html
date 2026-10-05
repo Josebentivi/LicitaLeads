@@ -1,5 +1,44 @@
 {% extends "base.html" %}
 {% block title %}Configurações · LicitaLead Monitor{% endblock %}
-{% block content %}<div class="page-heading"><div><p class="eyebrow">Somente leitura</p><h1>Configurações</h1></div></div>
-<section class="panel"><dl class="facts">{% for key, value in settings.items() %}<div><dt>{{ key }}</dt><dd>{{ value }}</dd></div>{% endfor %}</dl><p class="hint">Segredos são sempre ocultados. Edite o arquivo .env e reinicie os processos para alterar configurações.</p></section>{% endblock %}
-
+{% block content %}
+<div class="page-heading">
+  <div>
+    <p class="eyebrow">Somente leitura · dados locais</p>
+    <h1>Configurações</h1>
+  </div>
+</div>
+<section class="panel">
+  <dl class="facts">{% for key, value in settings.items() %}<div><dt>{{ key }}</dt><dd>{{ value }}</dd></div>{% endfor %}</dl>
+  <p class="hint">Segredos são sempre ocultados. Edite o arquivo .env e reinicie os processos para alterar configurações.</p>
+</section>
+<section class="panel danger-zone">
+  <h2>Zona de risco</h2>
+  <p>
+    Esta ação apaga <strong>todos os dados coletados</strong> — contratações,
+    documentos, eventos, prazos, leads, contatos, empresas, evidências e o
+    histórico de coletas — além dos arquivos baixados no disco. É
+    <strong>irreversível</strong>. O <code>.env</code> e a configuração do
+    sistema são preservados.
+  </p>
+  {% if reset_status == 'ok' %}
+  <p class="alert success">Dados apagados. O sistema está zerado e pronto para uma nova coleta.</p>
+  {% elif reset_status == 'sem-confirmacao' %}
+  <p class="alert error">Marque a caixa de confirmação para apagar os dados.</p>
+  {% elif reset_status == 'bloqueado' %}
+  <p class="alert error">Não foi possível apagar: {{ block_reason or 'há trabalho em andamento' }}.</p>
+  {% endif %}
+  <ul class="count-list">
+    {% for name, value in counts.items() %}<li>{{ count_labels[name] }}: <strong>{{ value }}</strong></li>{% endfor %}
+  </ul>
+  {% if block_reason %}
+  <p class="alert error">Bloqueado agora: {{ block_reason }}. <a href="/crawls">Ver coletas</a>.</p>
+  <button type="button" class="button danger" disabled>Apagar todos os dados</button>
+  {% else %}
+  <form method="post" action="/settings/clear-data" onsubmit="return confirm('Apagar todos os dados? Esta ação não pode ser desfeita.');">
+    <label class="checkbox"><input type="checkbox" name="confirmo" value="on" required> Entendo que esta ação é irreversível.</label>
+    <button type="submit" class="button danger">Apagar todos os dados</button>
+  </form>
+  {% endif %}
+  <p class="hint">O aplicativo é local (127.0.0.1) e não deve ser exposto publicamente sem autenticação.</p>
+</section>
+{% endblock %}

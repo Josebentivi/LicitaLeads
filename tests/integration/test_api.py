@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+from uuid import uuid4
+
 import httpx
 import pytest
 from sqlalchemy import func, select
 
 from app.api.routes import health as health_route
-from app.models import Company, CompanyContact, Procurement
+from app.models import Company, CompanyContact, CrawlRun, CrawlRunStatus, Procurement
 
 from .conftest import DatabaseContext
 
@@ -139,3 +142,41 @@ async def test_contact_csv_import_is_validated_and_idempotent(
     async with database.sessions() as session:
         count = await session.scalar(select(func.count()).select_from(CompanyContact))
         assert count == 1
+
+
+@pytest.mark.asyncio
+async def test_cancel_endpoint_requests_cancellation_and_rejects_terminal_runs(
+    api_client: httpx.AsyncClient,
+    database: DatabaseContext,
+) -> None:
+    """Cancelling an active run persists the flag; terminal runs return 409."""
+
+    async with database.sessions() as session, session.begin():
+        active = CrawlRun(
+            connector="pncp",
+            status=CrawlRunStatus.RUNNING,
+            started_at=datetime.now(UTC),
+            filters={},
+        )
+        finished = CrawlRun(
+            connector="pncp",
+            status=CrawlRunStatus.COMPLETED,
+            filters={},
+        )
+        session.add_all([active, finished])
+        await session.flush()
+        active_id, finished_id = active.id, finished.id
+
+    accepted = await api_client.post(f"/api/crawls/{active_id}/cancel")
+    conflict = await api_client.post(f"/api/crawls/{finished_id}/cancel")
+    missing = await api_client.post(f"/api/crawls/{uuid4()}/cancel")
+    web = await api_client.post(f"/crawls/{active_id}/cancel", follow_redirects=False)
+
+    assert accepted.status_code == 202
+    assert accepted.json()["status"] == "cancellation_requested"
+    assert conflict.status_code == 409
+    assert missing.status_code == 404
+    assert web.status_code == 303
+    async with database.sessions() as session:
+        stored = await session.get(CrawlRun, active_id)
+    assert stored is not None and stored.cancel_requested is True

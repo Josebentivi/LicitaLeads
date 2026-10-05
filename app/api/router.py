@@ -10,6 +10,7 @@ from app.api.routes import (
     evidence,
     health,
     leads,
+    maintenance,
     procurements,
 )
 
@@ -22,3 +23,4 @@ api_router.include_router(contacts.router, prefix="/api")
 api_router.include_router(capabilities.router, prefix="/api")
 api_router.include_router(evidence.router, prefix="/api")
 api_router.include_router(events.router, prefix="/api")
+api_router.include_router(maintenance.router, prefix="/api")

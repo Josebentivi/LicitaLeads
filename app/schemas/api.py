@@ -115,3 +115,16 @@ class ContactImportResult(ApiModel):
     updated: int = 0
     skipped: int = 0
     errors: list[ContactImportError] = Field(default_factory=list)
+
+
+class ClearDataRequest(ApiModel):
+    """Explicit confirmation for the destructive maintenance endpoint."""
+
+    confirm: bool = False
+
+
+class ClearDataResponse(ApiModel):
+    """Rows and files removed by the maintenance reset."""
+
+    counts: dict[str, int] = Field(default_factory=dict)
+    files_removed: int = 0

@@ -35,6 +35,15 @@ body { margin: 0; min-height: 100vh; }
 button, .button { border: 0; border-radius: 0.5rem; background: var(--brand); color: #fff; padding: 0.7rem 1rem; font-weight: 700; text-decoration: none; cursor: pointer; }
 .button.secondary { background: #fff; color: var(--brand); border: 1px solid var(--brand); }
 .button.compact { padding: 0.5rem 0.7rem; font-size: 0.78rem; }
+.button.danger { background: var(--danger); color: #fff; }
+.button.danger:disabled { opacity: 0.55; cursor: not-allowed; }
+.danger-zone { border-color: #f2c9c1; }
+.alert { border-radius: 0.5rem; padding: 0.7rem 0.9rem; margin: 0.75rem 0; font-weight: 600; }
+.alert.success { background: #dcece8; color: #075a50; }
+.alert.error { background: #f7e4df; color: var(--danger); }
+.count-list { display: flex; flex-wrap: wrap; gap: 0.4rem 1.4rem; list-style: none; padding: 0; margin: 1rem 0; color: var(--muted); }
+.count-list strong { color: var(--ink); }
+.checkbox { display: inline-flex; align-items: center; gap: 0.45rem; margin-right: 0.75rem; }
 .filters, .inline-form { display: flex; gap: 0.75rem; align-items: end; flex-wrap: wrap; margin: 1rem 0; }
 .filters label, .inline-form label { display: grid; gap: 0.3rem; font-size: 0.8rem; color: var(--muted); }
 input, select, textarea { border: 1px solid #bdc8c5; border-radius: 0.45rem; padding: 0.65rem; background: #fff; color: var(--ink); }
@@ -54,6 +63,7 @@ td small { display: block; color: var(--muted); max-width: 52rem; margin-top: 0.
 .badge.status-partial, .badge.status-temporary_error { background: #fff0cf; color: #81520b; }
 .badge.status-running { background: #dfeafa; color: #24558a; }
 .badge.status-pending { background: #eceeed; color: #586563; }
+.badge.status-cancelled { background: #eceeed; color: #586563; }
 .record pre, .draft { white-space: pre-wrap; word-break: break-word; background: #f2f6f4; padding: 1rem; border-radius: 0.5rem; }
 .evidence { border-left: 4px solid var(--accent); padding-left: 1rem; margin: 1rem 0; }
 .evidence blockquote { margin: 0.5rem 0; font-family: Georgia, serif; }

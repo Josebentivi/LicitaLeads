@@ -15,6 +15,7 @@ _STALE_MESSAGE = (
     "coleta interrompida antes de concluir (processo encerrado); "
     "marcada como falha para permitir nova tentativa"
 )
+_CANCELLED_MESSAGE = "coleta cancelada pelo usuário antes de concluir"
 
 
 def _as_utc(value: datetime | None) -> datetime | None:
@@ -58,10 +59,15 @@ async def reconcile_stale_crawls(
             reference = _as_utc(run.started_at) or _as_utc(run.created_at)
             if reference is not None and reference >= threshold:
                 continue
-            run.status = CrawlRunStatus.FAILED
+            if run.cancel_requested:
+                run.status = CrawlRunStatus.CANCELLED
+                run.diagnostic = _CANCELLED_MESSAGE
+                run.errors = [{"message": _CANCELLED_MESSAGE}]
+            else:
+                run.status = CrawlRunStatus.FAILED
+                run.diagnostic = _STALE_MESSAGE
+                run.errors = [{"message": _STALE_MESSAGE}]
             run.started_at = run.started_at or moment
             run.finished_at = moment
-            run.diagnostic = _STALE_MESSAGE
-            run.errors = [{"message": _STALE_MESSAGE}]
             reconciled += 1
     return reconciled

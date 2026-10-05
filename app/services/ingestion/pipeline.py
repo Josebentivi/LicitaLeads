@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import time
@@ -67,6 +68,10 @@ def stable_fingerprint(*parts: object) -> str:
         default=str,
     ).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
+
+
+class PipelineCancelled(RuntimeError):
+    """Raised cooperatively when an operator cancels a crawl run."""
 
 
 def _json_value(value: Any) -> Any:
@@ -199,6 +204,8 @@ class IngestionPipeline:
         connectors: list[ProcurementSourceConnector] = []
         try:
             await self._mark_running(run_id)
+            if await self._cancellation_requested(run_id):
+                raise PipelineCancelled
             connectors = self._selected_connectors(request.connector)
             for connector in connectors:
                 source_started = time.perf_counter()
@@ -209,6 +216,8 @@ class IngestionPipeline:
                 source_status = "completed"
                 try:
                     await self._run_connector(connector, request, summary)
+                except (asyncio.CancelledError, PipelineCancelled):
+                    raise
                 except Exception as exc:
                     source_status = "failed"
                     summary.diagnostics.append(f"{connector.name}: {type(exc).__name__}: {exc}")
@@ -246,6 +255,8 @@ class IngestionPipeline:
                 await self._update_progress(summary)
 
                 async def report_documents(processed_count: int, total: int) -> None:
+                    if await self._cancellation_requested(summary.run_id):
+                        raise PipelineCancelled
                     documents_entry["documents_processed"] = processed_count
                     documents_entry["documents_total"] = total
                     await self._update_progress(summary)
@@ -268,6 +279,11 @@ class IngestionPipeline:
                 await self._update_progress(summary)
             if summary.diagnostics:
                 summary.status = CrawlRunStatus.PARTIAL
+        except (asyncio.CancelledError, PipelineCancelled) as exc:
+            summary.status = CrawlRunStatus.CANCELLED
+            summary.diagnostics.append("coleta encerrada pelo usuário")
+            if isinstance(exc, asyncio.CancelledError):
+                raise
         except Exception as exc:
             summary.status = CrawlRunStatus.FAILED
             summary.diagnostics.append(f"{type(exc).__name__}: {exc}")
@@ -343,6 +359,8 @@ class IngestionPipeline:
         }
         await self._update_progress(summary)
         for position, raw in enumerate(records, start=1):
+            if await self._cancellation_requested(summary.run_id):
+                raise PipelineCancelled
             detail = await connector.fetch_procurement(raw.external_id)
             items = await connector.fetch_items(raw.external_id)
             documents = await connector.fetch_documents(raw.external_id)
@@ -724,6 +742,14 @@ class IngestionPipeline:
                 participant.final_value = raw.total_value or participant.final_value
                 participant.rank = raw.rank or participant.rank
                 participant.status = raw.result_status or participant.status
+
+    async def _cancellation_requested(self, run_id: UUID) -> bool:
+        """Return True when an operator asked to stop this run."""
+
+        async with self.session_factory() as session:
+            return bool(
+                await session.scalar(select(CrawlRun.cancel_requested).where(CrawlRun.id == run_id))
+            )
 
     async def _acquire_lease(self, name: str, owner: str) -> bool:
         now = datetime.now(UTC)

@@ -11,12 +11,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.serialization import model_dict
 from app.dependencies import get_db
-from app.models import CrawlRun
+from app.models import CrawlRun, CrawlRunStatus
 from app.schemas import CrawlRunRequest
 from app.services.ingestion import IngestionPipeline, PipelineRequest
 
 router = APIRouter(prefix="/crawls", tags=["crawls"])
-_running_tasks: set[asyncio.Task[None]] = set()
+_running_tasks: dict[UUID, asyncio.Task[None]] = {}
 
 
 def pipeline_request(value: CrawlRunRequest) -> PipelineRequest:
@@ -44,8 +44,33 @@ def launch_crawl(run_id: UUID, request: PipelineRequest) -> None:
     """Schedule work on the server loop while retaining a strong task reference."""
 
     task = asyncio.create_task(_execute(run_id, request), name=f"crawl:{run_id}")
-    _running_tasks.add(task)
-    task.add_done_callback(_running_tasks.discard)
+    _running_tasks[run_id] = task
+
+    def _discard(finished: asyncio.Task[None], run_id: UUID = run_id) -> None:
+        del finished
+        _running_tasks.pop(run_id, None)
+
+    task.add_done_callback(_discard)
+
+
+async def cancel_crawl(run_id: UUID, db: AsyncSession) -> bool:
+    """Persist a cancellation request and stop the local task, when present.
+
+    Returns ``False`` when the run is already terminal; raises 404 when the
+    identifier does not exist.
+    """
+
+    run = await db.get(CrawlRun, run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="Crawl run not found")
+    if run.status not in {CrawlRunStatus.PENDING, CrawlRunStatus.RUNNING}:
+        return False
+    run.cancel_requested = True
+    await db.commit()
+    task = _running_tasks.get(run_id)
+    if task is not None and not task.done():
+        task.cancel()
+    return True
 
 
 @router.post("/run", status_code=status.HTTP_202_ACCEPTED)
@@ -63,6 +88,22 @@ async def run_crawl(
         "connector": run.connector,
         "created_at": run.created_at.isoformat(),
     }
+
+
+@router.post("/{run_id}/cancel", status_code=status.HTTP_202_ACCEPTED)
+async def cancel_crawl_endpoint(
+    run_id: UUID,
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, object]:
+    """Request cooperative cancellation of a pending/running crawl."""
+
+    accepted = await cancel_crawl(run_id, db)
+    if not accepted:
+        raise HTTPException(
+            status_code=409,
+            detail="Crawl run is not pending or running",
+        )
+    return {"id": str(run_id), "status": "cancellation_requested"}
 
 
 @router.get("")

@@ -87,6 +87,38 @@ Flags: `--check` (diagnóstico sem alterações), `--venv CAMINHO`, `--repair`
 - **`.env` é por máquina:** não vai para o Git; um clone novo usa os padrões do
   `.env.example`. Confira os valores efetivos em <http://localhost:8000/settings>.
 
+## Encerrar uma coleta
+
+A página `/crawls` mostra o botão **Encerrar coleta** para execuções pendentes ou
+em andamento (com confirmação). O encerramento é cooperativo:
+
+- a requisição grava `cancel_requested` no banco e cancela imediatamente a task
+  quando ela roda no processo da API;
+- coletas do scheduler são interrompidas no próximo ponto de checagem — antes do
+  próximo registro da fonte ou do próximo documento do lote (segundos a ~1 min;
+  requisições HTTP e extrações já em andamento terminam antes);
+- a execução vira `Cancelada`, libera o lease `crawl:{conector}:{uf}` e permite
+  iniciar outra coleta na sequência;
+- a API também expõe `POST /api/crawls/{id}/cancel` (`202`/`409`).
+
+## Apagar todos os dados (reset)
+
+A página `/settings` tem uma **Zona de risco** com as contagens atuais e o botão
+**Apagar todos os dados**. A ação é **destrutiva e irreversível**:
+
+- apaga todas as tabelas de domínio (contratações, documentos, trechos,
+  evidências, eventos, prazos, leads, revisões, rascunhos, contatos, empresas,
+  participantes, registros de fonte, observações de campo, coletas e leases);
+- remove os arquivos baixados em `DOCUMENT_STORAGE_PATH` e
+  `RAW_DATA_STORAGE_PATH` (preservando `.gitkeep`) e trunca o
+  `data/scheduler.log` (best-effort);
+- preserva o `.env`, o schema/migrations Alembic e o calendário de feriados;
+- exige a marcação da caixa de confirmação; sem ela, nada é apagado;
+- se houver coleta ativa ou job do scheduler em andamento, a página **bloqueia**
+  e pede para encerrar antes (use o botão em `/crawls`);
+- a API também expõe `POST /api/maintenance/clear-data` com `{"confirm": true}`
+  (`422` sem confirmação, `409` bloqueado).
+
 ## Subir a aplicação
 
 ```bash

@@ -162,6 +162,7 @@ class CrawlRun(UUIDPrimaryKeyMixin, Base):
         MutableDict.as_mutable(JSON), default=dict, nullable=False
     )
     diagnostic: Mapped[str | None] = mapped_column(Text)
+    cancel_requested: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utc_now, nullable=False)
 
     source_records: Mapped[list[SourceRecord]] = relationship(

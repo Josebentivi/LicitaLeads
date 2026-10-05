@@ -15,7 +15,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app.api.routes.crawls import launch_crawl
+from app.api.routes.crawls import cancel_crawl, launch_crawl
 from app.api.serialization import model_dict
 from app.config import get_settings
 from app.connectors.capabilities import get_source_capabilities
@@ -36,6 +36,13 @@ from app.models import (
 )
 from app.services.ingestion import IngestionPipeline, PipelineRequest
 from app.services.ingestion.processor import DocumentProcessingService
+from app.services.maintenance import (
+    COUNT_TABLE_LABELS,
+    MaintenanceBlocked,
+    clear_all_data,
+    data_counts,
+    maintenance_blocked_reason,
+)
 
 router = APIRouter(include_in_schema=False)
 templates = Jinja2Templates(directory="app/templates")
@@ -570,6 +577,9 @@ def _crawl_view(run: CrawlRun) -> SimpleNamespace:
     if run.started_at and run.finished_at:
         duration = max((run.finished_at - run.started_at).total_seconds(), 0)
     status = run.status.value
+    status_label = _STATUS_LABELS.get(status, status.title())
+    if run.status in {CrawlRunStatus.PENDING, CrawlRunStatus.RUNNING} and run.cancel_requested:
+        status_label = "Cancelando"
     general_diagnostics = [
         message
         for message in _diagnostic_messages(run)
@@ -605,7 +615,7 @@ def _crawl_view(run: CrawlRun) -> SimpleNamespace:
         started_at=_local_datetime(run.started_at),
         finished_at=_local_datetime(run.finished_at),
         status=status,
-        status_label=_STATUS_LABELS.get(status, status.title()),
+        status_label=status_label,
         active=run.status in {CrawlRunStatus.PENDING, CrawlRunStatus.RUNNING},
         records_found=run.records_found,
         duration=_duration_label(duration),
@@ -993,6 +1003,17 @@ async def run_crawl_from_web(
     return RedirectResponse("/crawls", status_code=303)
 
 
+@router.post("/crawls/{run_id}/cancel")
+async def cancel_crawl_from_web(
+    run_id: UUID,
+    db: AsyncSession = Depends(get_db),
+) -> RedirectResponse:
+    """Stop an active crawl started by the API or by the scheduler."""
+
+    await cancel_crawl(run_id, db)
+    return RedirectResponse("/crawls", status_code=303)
+
+
 @router.post("/crawls/{run_id}/retry")
 async def retry_failed_crawl_source(
     run_id: UUID,
@@ -1030,10 +1051,34 @@ async def retry_failed_crawl_source(
 
 
 @router.get("/settings")
-async def settings_page(request: Request):
+async def settings_page(request: Request, db: AsyncSession = Depends(get_db)):
     return templates.TemplateResponse(
-        request, "settings.html", {"settings": get_settings().public_view()}
+        request,
+        "settings.html",
+        {
+            "settings": get_settings().public_view(),
+            "counts": await data_counts(db),
+            "count_labels": COUNT_TABLE_LABELS,
+            "block_reason": await maintenance_blocked_reason(db),
+            "reset_status": request.query_params.get("reset"),
+        },
     )
+
+
+@router.post("/settings/clear-data")
+async def clear_data_from_web(
+    confirmo: str | None = Form(None),
+    db: AsyncSession = Depends(get_db),
+) -> RedirectResponse:
+    """Delete all collected data after an explicit confirmation checkbox."""
+
+    if confirmo is None:
+        return RedirectResponse("/settings?reset=sem-confirmacao", status_code=303)
+    try:
+        await clear_all_data(db)
+    except MaintenanceBlocked:
+        return RedirectResponse("/settings?reset=bloqueado", status_code=303)
+    return RedirectResponse("/settings?reset=ok", status_code=303)
 
 
 @router.get("/source-capabilities")

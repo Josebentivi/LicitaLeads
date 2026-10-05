@@ -56,6 +56,7 @@ Sem URL pública rastreável, responde `409`.
 | Método e rota | Descrição |
 |---|---|
 | `POST /api/crawls/run` | Cria e agenda uma coleta; responde `202` |
+| `POST /api/crawls/{id}/cancel` | Solicita o encerramento de uma coleta pendente/em andamento; responde `202`, `404` se não existir ou `409` se já terminou |
 | `GET /api/crawls` | Lista execuções (`connector`, `status`) |
 | `GET /api/crawls/{id}` | Detalhe de uma execução |
 
@@ -99,6 +100,16 @@ contratação; a operação registra uma decisão humana e nunca inventa víncul
 |---|---|
 | `GET /api/source-capabilities` | Capacidades auditadas por fonte (mesmo registro da matriz) |
 
+## Manutenção
+
+| Método e rota | Descrição |
+|---|---|
+| `POST /api/maintenance/clear-data` | Apaga todos os dados coletados e arquivos baixados (ação destrutiva e irreversível) |
+
+Corpo: `confirm` (`true` obrigatório). Responde `200` com `counts` (linhas por
+tabela) e `files_removed`; `422` sem confirmação; `409` quando há coleta ou job
+do scheduler em andamento. Configuração (`.env`) e migrations são preservadas.
+
 ## Páginas web (Jinja2/HTMX)
 
 As páginas não aparecem no Swagger (`include_in_schema=False`).
@@ -112,5 +123,7 @@ As páginas não aparecem no Swagger (`include_in_schema=False`).
 | `/leads` | Lista com filtros de score, tipo de evento e revisão pendente |
 | `/leads/{id}` | Detalhe do lead, evidências e último rascunho |
 | `/crawls` e `/crawls/table` | Execuções por fonte, com fragmento HTMX repollado e retry por fonte |
-| `/settings` | Visão pública das configurações (sem segredos) |
+| `/crawls/{id}/cancel` | Encerra uma coleta ativa (form; redireciona de volta) |
+| `/settings` | Visão pública das configurações e zona de risco (reset) |
+| `/settings/clear-data` | Apaga todos os dados após confirmação explícita (form) |
 | `/source-capabilities` | Matriz de capacidades das fontes |

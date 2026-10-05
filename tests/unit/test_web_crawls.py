@@ -47,3 +47,32 @@ def test_crawl_view_explains_general_lease_failure() -> None:
     assert view.duration == "—"
     assert view.general_error == "Outra coleta equivalente já estava em andamento."
     assert all(source.retryable is False for source in view.sources)
+
+
+def test_crawl_view_marks_cancelled_runs_terminal() -> None:
+    run = CrawlRun(
+        connector="pncp",
+        status=CrawlRunStatus.CANCELLED,
+        cancel_requested=True,
+        filters={},
+    )
+
+    view = _crawl_view(run)
+
+    assert view.status_label == "Cancelada"
+    assert view.active is False
+    assert all(source.retryable is False for source in view.sources)
+
+
+def test_crawl_view_shows_cancelling_state_while_active() -> None:
+    run = CrawlRun(
+        connector="pncp",
+        status=CrawlRunStatus.RUNNING,
+        cancel_requested=True,
+        filters={},
+    )
+
+    view = _crawl_view(run)
+
+    assert view.status_label == "Cancelando"
+    assert view.active is True
