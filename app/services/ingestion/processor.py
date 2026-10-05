@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -94,6 +96,9 @@ class ProcessingSummary:
     leads_created: int = 0
 
 
+ProgressCallback = Callable[[int, int], Awaitable[None]]
+
+
 class DocumentProcessingService:
     """Turn downloaded official documents into traceable, reviewable facts."""
 
@@ -145,7 +150,12 @@ class DocumentProcessingService:
         if callable(provider_close):
             await provider_close()
 
-    async def process_pending(self, *, limit: int | None = None) -> ProcessingSummary:
+    async def process_pending(
+        self,
+        *,
+        limit: int | None = None,
+        on_progress: ProgressCallback | None = None,
+    ) -> ProcessingSummary:
         """Process a stable snapshot of pending documents, one transaction each."""
 
         statement = (
@@ -160,13 +170,15 @@ class DocumentProcessingService:
 
         summary = ProcessingSummary()
         try:
-            for document_id in identifiers:
+            for position, document_id in enumerate(identifiers, start=1):
                 try:
                     await self._process_one(document_id, summary)
                     summary.documents_processed += 1
                 except Exception as exc:
                     summary.documents_failed += 1
                     await self._mark_failed(document_id, exc)
+                if on_progress is not None:
+                    await on_progress(position, len(identifiers))
         finally:
             await self.aclose()
         return summary
@@ -230,12 +242,14 @@ class DocumentProcessingService:
             declared_mime = document.mime_type
 
         downloaded = await self.downloader.download(original_url)
-        extraction = self.extractor.extract(
+        extraction = await asyncio.to_thread(
+            self.extractor.extract,
             downloaded.content,
             filename=downloaded.filename,
             mime_type=downloaded.declared_mime or declared_mime,
         )
-        local_path = store_by_hash(
+        local_path = await asyncio.to_thread(
+            store_by_hash,
             downloaded.content,
             extraction.sha256,
             self.settings.document_storage_path,

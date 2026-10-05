@@ -549,6 +549,22 @@ def _source_views(run: CrawlRun) -> list[SimpleNamespace]:
     return views
 
 
+def _crawl_progress_label(stored_sources: dict[str, object]) -> str | None:
+    """Return a human-readable in-flight progress label, when available."""
+
+    for result in stored_sources.values():
+        if not isinstance(result, dict):
+            continue
+        progress = result.get("progress")
+        if not isinstance(progress, dict):
+            continue
+        processed = int(progress.get("processed", 0) or 0)
+        total = int(progress.get("total", 0) or 0)
+        if total and processed < total:
+            return f"{processed}/{total} registro(s)"
+    return None
+
+
 def _crawl_view(run: CrawlRun) -> SimpleNamespace:
     duration: float | None = None
     if run.started_at and run.finished_at:
@@ -569,15 +585,20 @@ def _crawl_view(run: CrawlRun) -> SimpleNamespace:
         else:
             general_error = "A coleta terminou com uma pendência que requer atenção."
     documents_progress: str | None = None
+    progress_label: str | None = None
     stored_sources = (run.cursor or {}).get("sources", {})
     if isinstance(stored_sources, dict):
         documents_result = stored_sources.get("documents")
         if isinstance(documents_result, dict):
+            processed_count = int(documents_result.get("documents_processed", 0))
+            total_count = documents_result.get("documents_total")
+            total_label = f"/{int(total_count)}" if isinstance(total_count, int) else ""
             documents_progress = (
-                f"{int(documents_result.get('documents_processed', 0))} documento(s) neste lote · "
+                f"{processed_count}{total_label} documento(s) neste lote · "
                 f"{int(documents_result.get('events_created', 0))} evento(s) · "
                 f"{int(documents_result.get('leads_created', 0))} lead(s)"
             )
+        progress_label = _crawl_progress_label(stored_sources)
     return SimpleNamespace(
         id=run.id,
         connector_label=_CONNECTOR_LABELS.get(run.connector, run.connector),
@@ -588,6 +609,7 @@ def _crawl_view(run: CrawlRun) -> SimpleNamespace:
         active=run.status in {CrawlRunStatus.PENDING, CrawlRunStatus.RUNNING},
         records_found=run.records_found,
         duration=_duration_label(duration),
+        progress=progress_label,
         documents_progress=documents_progress,
         sources=_source_views(run),
         general_error=general_error,
@@ -955,6 +977,7 @@ async def run_crawl_from_web(
     uf: str = Form("MA"),
     days: int = Form(7),
     batch_size: int = Form(30),
+    process_documents: bool = Form(False),
 ) -> RedirectResponse:
     """Start a default crawl from the dashboard without exposing JSON details."""
 
@@ -962,6 +985,7 @@ async def run_crawl_from_web(
         connector=connector,
         uf=uf,
         days=days,
+        process_documents=process_documents,
         document_batch_size=max(1, batch_size),
     )
     run = await IngestionPipeline().create_run(request)

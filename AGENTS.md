@@ -45,7 +45,10 @@ holds the repo-specific rules.
   `--check` must stay read-only and the scheduler must never outlive it. On
   synced drives (Google Drive/OneDrive) it puts the venv under
   `%LOCALAPPDATA%\LicitaLeads\venv` because pip cannot read its CA bundle from
-  those mounts; `--venv CAMINHO` overrides.
+  those mounts; `--venv CAMINHO` overrides. It also redirects the default
+  relative `DATABASE_URL` to `%LOCALAPPDATA%\LicitaLeads\data\` on synced
+  drives (migrating an existing repo DB once); absolute URLs and PostgreSQL
+  from `.env` are respected.
 - Bootstrap: `pip install -e ".[dev]"`, then `python scripts/setup.py` (copies
   `.env` from `.env.example` and runs `alembic upgrade head`), then `python run.py`.
 - `python run.py` refuses to start unless the DB revision equals the Alembic head;
@@ -76,6 +79,10 @@ holds the repo-specific rules.
   `services/documents/` (secure download/extract) → `event_detection/` →
   `deadlines/` → `contacts/` → `lead_scoring/` → `outreach/`. Optional
   `services/llm/`.
+- CPU-bound document extraction (PyMuPDF/BS4/openpyxl) must run via
+  `asyncio.to_thread` — the UI-triggered crawl shares the API event loop, and
+  sync extraction freezes the whole site. Crawl progress (`cursor.progress`) is
+  persisted per record/document so `/crawls` shows movement during long runs.
 - `app/models/` (SQLAlchemy, provenance entities), `app/repositories/` (queries),
   `app/api/routes/` (`/api`, Swagger at `/docs`), `app/cli/` (Typer),
   `app/jobs/scheduler.py`.

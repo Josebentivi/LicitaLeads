@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import sqlite3
 from pathlib import Path
 
 LAUNCHER_PATH = Path(__file__).resolve().parents[2] / "scripts" / "launcher.py"
@@ -88,6 +89,48 @@ def test_synced_location_detection() -> None:
     assert launcher._looks_like_cloud_sync_path(Path("C:/Users/x/My Drive/LicitaLeads"))
     assert launcher._looks_like_cloud_sync_path(Path("D:/Google Drive/LicitaLeads"))
     assert not launcher._looks_like_cloud_sync_path(Path("C:/dev/licitaleads"))
+
+
+def test_relative_sqlite_filename_detection() -> None:
+    assert launcher._relative_sqlite_filename("sqlite:///./data/app.db") == "app.db"
+    assert launcher._relative_sqlite_filename("sqlite+aiosqlite:///./data/app.db") == "app.db"
+    assert launcher._relative_sqlite_filename("postgresql+psycopg://u:p@host/db") is None
+    assert launcher._relative_sqlite_filename("sqlite:///:memory:") is None
+    assert launcher._relative_sqlite_filename("sqlite://") is None
+    absolute = Path("C:/app/app.db") if os.name == "nt" else Path("/opt/app/app.db")
+    assert launcher._relative_sqlite_filename(f"sqlite:///{absolute.as_posix()}") is None
+
+
+def test_database_override_redirects_only_relative_sqlite(monkeypatch) -> None:
+    monkeypatch.setattr(launcher, "_is_synced_location", lambda root: True)
+    override, notice = launcher._database_override(
+        {"database_url": "sqlite:///./data/app.db"},
+        migrate=False,
+    )
+    assert override["DATABASE_URL"].endswith("/app.db")
+    assert notice and "disco local" in notice
+    assert launcher._database_override(
+        {"database_url": "postgresql+psycopg://u:p@host/db"},
+        migrate=False,
+    ) == ({}, None)
+    absolute = Path("C:/app/app.db") if os.name == "nt" else Path("/opt/app/app.db")
+    assert launcher._database_override(
+        {"database_url": f"sqlite:///{absolute.as_posix()}"},
+        migrate=False,
+    ) == ({}, None)
+
+
+def test_migrate_database_copies_without_overwriting(tmp_path: Path) -> None:
+    source = tmp_path / "repo.db"
+    with sqlite3.connect(source) as connection:
+        connection.execute("CREATE TABLE sample (value TEXT)")
+        connection.execute("INSERT INTO sample (value) VALUES ('dados')")
+    destination = tmp_path / "local" / "local.db"
+    assert launcher._migrate_database(source, destination)
+    with sqlite3.connect(destination) as connection:
+        assert connection.execute("SELECT value FROM sample").fetchone() == ("dados",)
+    assert not launcher._migrate_database(source, destination)
+    assert not launcher._migrate_database(tmp_path / "missing.db", tmp_path / "other.db")
 
 
 def test_parse_args_defaults_and_flags() -> None:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 from datetime import UTC, datetime
 from decimal import Decimal
 
@@ -306,3 +307,35 @@ async def test_equivalent_concurrent_pipeline_is_rejected_by_database_lease(
         persisted_second = await session.get(CrawlRun, second_run.id)
     assert persisted_first is not None and persisted_first.status is CrawlRunStatus.COMPLETED
     assert persisted_second is not None and persisted_second.status is CrawlRunStatus.FAILED
+
+
+@pytest.mark.asyncio
+async def test_pipeline_persists_incremental_progress(database: DatabaseContext) -> None:
+    """The crawl cursor exposes partial progress while records are processed."""
+
+    connector = StaticConnector("pncp", _procurement("pncp", CONTROL_NUMBER))
+    pipeline = IngestionPipeline(
+        session_factory=database.sessions,
+        connectors={"pncp": connector},
+    )
+    snapshots: list[dict] = []
+    original = pipeline._update_progress
+
+    async def spy(summary) -> None:
+        snapshots.append(copy.deepcopy(summary.source_results))
+        await original(summary)
+
+    pipeline._update_progress = spy
+    summary = await pipeline.run(
+        PipelineRequest(connector="pncp", uf="MA", process_documents=False)
+    )
+
+    assert summary.status is CrawlRunStatus.COMPLETED
+    processed_values = [
+        entry["progress"]["processed"]
+        for snapshot in snapshots
+        for entry in snapshot.values()
+        if isinstance(entry, dict) and isinstance(entry.get("progress"), dict)
+    ]
+    assert 0 in processed_values
+    assert 1 in processed_values

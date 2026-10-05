@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import io
+import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -213,3 +215,32 @@ async def test_zip_members_are_children_and_not_path_extracted(
     assert children[0].title == "atas/ata.txt"
     assert children[0].local_path is None
     assert children[0].extraction_status is ExtractionStatus.EXTRACTED
+
+
+@pytest.mark.asyncio
+async def test_extraction_runs_off_the_event_loop(
+    database: DatabaseContext,
+    tmp_path: Path,
+) -> None:
+    """Heavy document extraction must not freeze the API event loop."""
+
+    await _pending_document(database)
+    service = DocumentProcessingService(
+        _settings(tmp_path),
+        session_factory=database.sessions,
+        downloader=FakeDownloader(b"documento sem evento relevante"),
+    )
+    real_extract = service.extractor.extract
+
+    def slow_extract(*args: object, **kwargs: object):
+        time.sleep(0.4)
+        return real_extract(*args, **kwargs)
+
+    service.extractor.extract = slow_extract
+    processing = asyncio.create_task(service.process_pending())
+    started = time.monotonic()
+    await asyncio.sleep(0.05)
+    elapsed = time.monotonic() - started
+    assert elapsed < 0.3, "extraction must not block the event loop"
+    summary = await asyncio.wait_for(processing, timeout=10)
+    assert summary.documents_processed == 1

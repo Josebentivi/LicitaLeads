@@ -17,6 +17,7 @@ import os
 import shutil
 import signal
 import socket
+import sqlite3
 import subprocess
 import sys
 import threading
@@ -24,7 +25,7 @@ import time
 import urllib.error
 import urllib.request
 import webbrowser
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from contextlib import suppress
 from pathlib import Path
 from typing import IO
@@ -179,6 +180,78 @@ def _state_file(venv_dir: Path) -> Path:
     return venv_dir / ".bootstrap-state.json"
 
 
+def _local_data_dir() -> Path:
+    """Return the local data directory used for the SQLite database."""
+
+    return _local_venv_fallback().parent / "data"
+
+
+def _relative_sqlite_filename(database_url: str) -> str | None:
+    """Return the filename of a relative SQLite URL, when applicable."""
+
+    if not database_url.startswith("sqlite") or ":memory:" in database_url:
+        return None
+    if "///" not in database_url:
+        return None
+    fragment = database_url.split("///", 1)[1].split("?", 1)[0]
+    if not fragment:
+        return None
+    path = Path(fragment)
+    if path.is_absolute():
+        return None
+    return path.name
+
+
+def _migrate_database(source: Path, destination: Path) -> bool:
+    """Copy an existing SQLite database with its transactional backup API."""
+
+    if not source.exists() or destination.exists():
+        return False
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with sqlite3.connect(str(source), timeout=15) as source_db:
+            with sqlite3.connect(str(destination)) as target_db:
+                source_db.backup(target_db)
+    except sqlite3.Error as exc:
+        print(f"Aviso: nao foi possivel migrar o banco existente ({exc}).")
+        with suppress(OSError):
+            destination.unlink(missing_ok=True)
+        return False
+    return True
+
+
+def _database_override(
+    settings: dict[str, object],
+    *,
+    migrate: bool,
+) -> tuple[dict[str, str], str | None]:
+    """Move the SQLite database to local disk when the repository is synced.
+
+    User-configured absolute paths (or PostgreSQL) are respected; only the
+    default repository-relative SQLite URL is redirected.
+    """
+
+    if not _is_synced_location(REPO_ROOT):
+        return {}, None
+    database_url = str(settings.get("database_url", ""))
+    filename = _relative_sqlite_filename(database_url)
+    if filename is None:
+        return {}, None
+    local_path = _local_data_dir() / filename
+    notice = (
+        "Pasta sincronizada detectada: banco SQLite no disco local em "
+        f"{local_path} (evita travamentos do Google Drive/OneDrive)."
+    )
+    if migrate and not local_path.exists():
+        legacy = _sqlite_database_path(database_url, REPO_ROOT)
+        if legacy is not None and legacy != local_path and legacy.exists():
+            if _migrate_database(legacy, local_path):
+                notice += f" Dados existentes migrados de {legacy}."
+            else:
+                notice += f" O banco anterior permanece em {legacy}."
+    return {"DATABASE_URL": f"sqlite:///{local_path.as_posix()}"}, notice
+
+
 def _hash_inputs(pyproject: Path, python_version: tuple[int, int, int]) -> str:
     """Hash the inputs that require a dependency reinstall when changed."""
 
@@ -234,22 +307,33 @@ def _sqlite_database_path(database_url: str, root: Path) -> Path | None:
     return path if path.is_absolute() else root / path
 
 
-def _run_snippet(venv_python: Path, snippet: str) -> subprocess.CompletedProcess[str]:
+def _run_snippet(
+    venv_python: Path,
+    snippet: str,
+    *,
+    env: Mapping[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
     """Run an inline program with the project interpreter."""
 
+    environment = {**os.environ, **(env or {})}
     return subprocess.run(
         [str(venv_python), "-c", snippet],
         cwd=REPO_ROOT,
         capture_output=True,
         text=True,
         check=False,
+        env=environment,
     )
 
 
-def _load_settings(venv_python: Path) -> dict[str, object]:
+def _load_settings(
+    venv_python: Path,
+    *,
+    env: Mapping[str, str] | None = None,
+) -> dict[str, object]:
     """Read validated application settings or explain what is wrong."""
 
-    result = _run_snippet(venv_python, SETTINGS_SNIPPET)
+    result = _run_snippet(venv_python, SETTINGS_SNIPPET, env=env)
     if result.returncode != 0:
         detail = (result.stderr or result.stdout).strip()
         raise LauncherError(
@@ -610,7 +694,7 @@ class _Scheduler:
         self.job: object | None = None
         self.stopped = False
 
-    def start(self, venv_python: Path) -> None:
+    def start(self, venv_python: Path, *, env: Mapping[str, str] | None = None) -> None:
         SCHEDULER_LOG.parent.mkdir(parents=True, exist_ok=True)
         self.log = SCHEDULER_LOG.open("ab")
         flags = 0
@@ -622,6 +706,7 @@ class _Scheduler:
             stdout=self.log,
             stderr=self.log,
             creationflags=flags,
+            env={**os.environ, **(env or {})},
         )
         self.job = _assign_kill_on_close_job(self.process)
 
@@ -654,10 +739,11 @@ def _install_signal_handlers(stop_callback: Callable[[], None]) -> None:
             signal.signal(number, handler)
 
 
-def _run_server(venv_python: Path) -> int:
+def _run_server(venv_python: Path, *, env: Mapping[str, str] | None = None) -> int:
     """Run the API in the foreground until it exits."""
 
     environment = os.environ.copy()
+    environment.update(env or {})
     scripts_dir = str(Path(venv_python).parent)
     environment["PATH"] = scripts_dir + os.pathsep + environment.get("PATH", "")
     process = subprocess.Popen(
@@ -675,10 +761,10 @@ def _run_server(venv_python: Path) -> int:
         return process.returncode or 0
 
 
-def _check_database_revision(venv_python: Path) -> None:
+def _check_database_revision(venv_python: Path, *, env: Mapping[str, str] | None = None) -> None:
     """Print the database revision status without changing anything."""
 
-    result = _run_snippet(venv_python, DATABASE_SNIPPET)
+    result = _run_snippet(venv_python, DATABASE_SNIPPET, env=env)
     output = (result.stdout or result.stderr).strip().splitlines()
     detail = output[-1] if output else "sem resposta"
     if result.returncode == 0:
@@ -718,12 +804,15 @@ def _run_checks(venv_dir: Path) -> int:
             print("[ok] configuracao valida")
             host = str(settings.get("host", "127.0.0.1"))
             port = int(str(settings.get("port", 8000)))
-            database_url = str(settings.get("database_url", ""))
+            override, notice = _database_override(settings, migrate=False)
+            if notice:
+                print(f"[--] {notice}")
+            database_url = str(override.get("DATABASE_URL", settings.get("database_url", "")))
             sqlite_path = _sqlite_database_path(database_url, REPO_ROOT)
             if sqlite_path is not None and not sqlite_path.exists():
                 print("[--] banco ainda nao criado: as migrations rodam no primeiro clique")
             else:
-                _check_database_revision(venv_python)
+                _check_database_revision(venv_python, env=override)
             if _probe_health(host, port):
                 print(
                     f"[--] a aplicacao ja esta em execucao em http://{_browser_host(host)}:{port}"
@@ -845,10 +934,14 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "Ajuste APP_PORT no .env ou encerre o outro programa."
             )
 
+        override, database_notice = _database_override(settings, migrate=True)
+        if database_notice:
+            print(database_notice)
+
         if args.no_scheduler or not bool(settings.get("scheduler_enabled", True)):
             print("Scheduler desativado nesta execucao.")
         else:
-            scheduler.start(venv_python)
+            scheduler.start(venv_python, env=override)
             print(
                 f"Scheduler iniciado em segundo plano (log: {SCHEDULER_LOG.relative_to(REPO_ROOT)})."
             )
@@ -859,7 +952,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             _start_browser_thread(host, port, base_url)
         print(f"\nIniciando a interface em {base_url} (pode levar alguns segundos)...")
         print("Pressione Ctrl+C ou feche esta janela para encerrar.\n")
-        return _run_server(venv_python)
+        return _run_server(venv_python, env=override)
     except LauncherError as exc:
         print(f"\nERRO: {exc}", file=sys.stderr)
         return 1

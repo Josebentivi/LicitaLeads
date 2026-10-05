@@ -38,7 +38,7 @@
               {% endfor %}
             </div>
           </td>
-          <td><strong class="record-count">{{ run.records_found }}</strong></td>
+          <td><strong class="record-count">{{ run.records_found }}</strong>{% if run.progress %}<small>{{ run.progress }}</small>{% endif %}</td>
           <td>
             {{ run.duration }}
             {% if run.documents_progress %}<small>{{ run.documents_progress }}</small>{% endif %}

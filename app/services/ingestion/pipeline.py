@@ -233,22 +233,38 @@ class IngestionPipeline:
                 from app.services.ingestion.processor import DocumentProcessingService
 
                 batch_size = request.document_batch_size or self.settings.document_batch_size
+                documents_entry: dict[str, Any] = {
+                    "status": "running",
+                    "documents_processed": 0,
+                    "documents_total": None,
+                    "events_created": 0,
+                    "participants_created": 0,
+                    "leads_created": 0,
+                    "batch_size": batch_size,
+                }
+                summary.source_results["documents"] = documents_entry
+                await self._update_progress(summary)
+
+                async def report_documents(processed_count: int, total: int) -> None:
+                    documents_entry["documents_processed"] = processed_count
+                    documents_entry["documents_total"] = total
+                    await self._update_progress(summary)
+
                 processed = await DocumentProcessingService(
                     self.settings,
                     session_factory=self.session_factory,
-                ).process_pending(limit=batch_size)
+                ).process_pending(limit=batch_size, on_progress=report_documents)
                 if processed.documents_failed:
                     summary.diagnostics.append(
                         f"documentos: {processed.documents_failed} falha(s) de processamento"
                     )
-                summary.source_results["documents"] = {
-                    "status": "completed" if not processed.documents_failed else "partial",
-                    "documents_processed": processed.documents_processed,
-                    "events_created": processed.events_created,
-                    "participants_created": processed.participants_created,
-                    "leads_created": processed.leads_created,
-                    "batch_size": batch_size,
-                }
+                documents_entry["status"] = (
+                    "completed" if not processed.documents_failed else "partial"
+                )
+                documents_entry["documents_processed"] = processed.documents_processed
+                documents_entry["events_created"] = processed.events_created
+                documents_entry["participants_created"] = processed.participants_created
+                documents_entry["leads_created"] = processed.leads_created
                 await self._update_progress(summary)
             if summary.diagnostics:
                 summary.status = CrawlRunStatus.PARTIAL
@@ -315,7 +331,18 @@ class IngestionPipeline:
             )
             records = records[:max_records]
         summary.records_found += len(records)
-        for raw in records:
+        progress: dict[str, Any] = {
+            "source": connector.name,
+            "processed": 0,
+            "total": len(records),
+        }
+        summary.source_results[connector.name] = {
+            "status": "running",
+            "records_found": len(records),
+            "progress": progress,
+        }
+        await self._update_progress(summary)
+        for position, raw in enumerate(records, start=1):
             detail = await connector.fetch_procurement(raw.external_id)
             items = await connector.fetch_items(raw.external_id)
             documents = await connector.fetch_documents(raw.external_id)
@@ -345,6 +372,8 @@ class IngestionPipeline:
                 summary.records_created += 1
             else:
                 summary.records_updated += 1
+            progress["processed"] = position
+            await self._update_progress(summary)
 
     async def _persist_source_records(
         self,

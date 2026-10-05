@@ -50,6 +50,12 @@ O launcher (`scripts/launcher.py`, apenas biblioteca padrão):
   `%LOCALAPPDATA%\LicitaLeads\venv`, porque carregar o `cacert.pem` do pip a
   partir dessas unidades virtuais trava; use `--venv CAMINHO` para escolher
   outro local;
+- também em pastas sincronizadas, move o banco SQLite para
+  `%LOCALAPPDATA%\LicitaLeads\data\` (o SQLite trava nessas unidades virtuais).
+  Só o `DATABASE_URL` padrão relativo é redirecionado; caminhos absolutos e
+  PostgreSQL configurados no `.env` são respeitados. Se existir um banco em
+  `data/licita_lead.db`, ele é migrado uma única vez, com a API de backup do
+  SQLite;
 - cria o `.env` a partir de `.env.example` se estiver ausente e valida a
   configuração antes de subir o servidor;
 - aplica as migrations e sobe a API/UI (`run.py --migrate`);
@@ -72,6 +78,14 @@ Flags: `--check` (diagnóstico sem alterações), `--venv CAMINHO`, `--repair`
   subir o servidor.
 - **Primeira execução demorada:** a instalação das dependências (PyMuPDF etc.)
   pode levar alguns minutos; as próximas execuções são rápidas.
+- **Coleta demorada:** os limites padrão são 50 registros por fonte, 20 páginas
+  e 0,5s entre requisições; o PNCP pode responder HTTP 429 e o cliente aplica
+  backoff. A tela `/crawls` mostra o progresso `x/y` a cada 5s.
+- **Interface congelada durante a coleta:** verifique se o `.env` aponta o
+  `DATABASE_URL` para uma pasta sincronizada; o launcher move o banco
+  automaticamente quando iniciado por `iniciar.bat`.
+- **`.env` é por máquina:** não vai para o Git; um clone novo usa os padrões do
+  `.env.example`. Confira os valores efetivos em <http://localhost:8000/settings>.
 
 ## Subir a aplicação
 
@@ -88,6 +102,8 @@ A interface fica em <http://localhost:8000>, o Swagger em
 ## Banco e migrations
 
 - Padrão: `sqlite:///./data/licita_lead.db`.
+- Em pastas sincronizadas iniciadas pelo `iniciar.bat`, o banco efetivo fica em
+  `%LOCALAPPDATA%\LicitaLeads\data\licita_lead.db` (ver seção do launcher).
 - SQLite usa WAL, `busy_timeout=30000`, `foreign_keys=ON` e
   `synchronous=NORMAL` por conexão.
 - PostgreSQL opcional:

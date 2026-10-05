@@ -38,8 +38,8 @@ alterações exigem reiniciar o processo.
 
 | Variável | Padrão | Descrição |
 |---|---|---|
-| `HTTP_TIMEOUT_SECONDS` | `30` | Timeout por requisição (até 120) |
-| `HTTP_MAX_RETRIES` | `4` | Tentativas adicionais com backoff (0–10) |
+| `HTTP_TIMEOUT_SECONDS` | `60` | Timeout por requisição (até 120) |
+| `HTTP_MAX_RETRIES` | `5` | Tentativas adicionais com backoff (0–10) |
 | `HTTP_MAX_CONCURRENCY` | `4` | Requisições simultâneas (1–20) |
 | `HTTP_MIN_REQUEST_INTERVAL_SECONDS` | `0.5` | Intervalo mínimo entre requisições, em segundos (0–10; `0` desliga) |
 | `HTTP_USER_AGENT` | `LicitaLeadMonitor/0.1` | User-Agent |
@@ -102,8 +102,8 @@ qualquer citação, CNPJ ou nome não existir no documento.
 | Variável | Padrão | Descrição |
 |---|---|---|
 | `DOCUMENT_BATCH_SIZE` | `30` | Documentos por lote (1–500) |
-| `CRAWL_MAX_RECORDS_PER_SOURCE` | `0` | Limite de registros por fonte (0 = sem limite) |
-| `CRAWL_MAX_PAGES` | `0` | Limite de páginas por coleta (0 = sem limite) |
+| `CRAWL_MAX_RECORDS_PER_SOURCE` | `50` | Limite de registros por fonte (0 = sem limite) |
+| `CRAWL_MAX_PAGES` | `20` | Limite de páginas por coleta (0 = sem limite) |
 | `CRAWL_STALE_AFTER_MINUTES` | `180` | Janela para marcar coleta travada como falha |
 | `MIN_LEAD_SCORE` | `50` | Score mínimo para lead `new` |
 | `MANUAL_REVIEW_CONFIDENCE_THRESHOLD` | `0.75` | Confiança mínima sem revisão |

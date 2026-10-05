@@ -49,10 +49,11 @@ execução, o launcher apenas abre o navegador.
 
 Se o Python 3.12 não estiver disponível, o launcher oferece a instalação via
 `winget`. Se o repositório estiver em uma pasta sincronizada (Google Drive,
-OneDrive), o launcher cria a `.venv` fora dela
-(`%LOCALAPPDATA%\LicitaLeads\venv`), porque o pip não consegue ler os
-certificados a partir dessas unidades virtuais. Para um diagnóstico sem alterar
-nada:
+OneDrive), o launcher move a `.venv` e o banco SQLite para o disco local
+(`%LOCALAPPDATA%\LicitaLeads\`), porque o pip e o SQLite travam nessas unidades
+virtuais; na primeira vez, um banco existente na pasta do repositório é
+migrado automaticamente. O `.env` é por máquina (não vai para o Git): rode o
+diagnóstico para ver os valores efetivos e o caminho do banco:
 
 ```powershell
 python scripts\launcher.py --check
