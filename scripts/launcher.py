@@ -26,7 +26,7 @@ import urllib.error
 import urllib.request
 import webbrowser
 from collections.abc import Callable, Mapping, Sequence
-from contextlib import suppress
+from contextlib import closing, suppress
 from pathlib import Path
 from typing import IO
 
@@ -36,7 +36,7 @@ SCHEDULER_LOG = REPO_ROOT / "data" / "scheduler.log"
 PYTHON_DOWNLOAD_URL = "https://www.python.org/downloads/windows/"
 JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x2000
 JOB_OBJECT_EXTENDED_LIMIT_INFORMATION = 9
-CLOUD_SYNC_MARKERS = ("My Drive", "Meu Drive", "Google Drive")
+CLOUD_SYNC_MARKERS = ("My Drive", "Meu Drive", "Google Drive", "OneDrive")
 
 SETTINGS_SNIPPET = """\
 import json
@@ -118,7 +118,12 @@ def _venv_python_path(venv_dir: Path) -> Path:
 def _looks_like_cloud_sync_path(path: Path) -> bool:
     """Detect Google Drive/OneDrive style folders by their path segments."""
 
-    return any(part in CLOUD_SYNC_MARKERS for part in path.parts)
+    markers = tuple(marker.casefold() for marker in CLOUD_SYNC_MARKERS)
+    for part in path.parts:
+        folded = part.casefold()
+        if any(folded == marker or folded.startswith(f"{marker} - ") for marker in markers):
+            return True
+    return False
 
 
 def _volume_label(drive: str) -> str | None:
@@ -149,11 +154,32 @@ def _volume_label(drive: str) -> str | None:
     return None
 
 
+def _onedrive_roots() -> list[Path]:
+    """Return the OneDrive sync roots declared for the current user."""
+
+    roots: list[Path] = []
+    for variable in ("OneDrive", "OneDriveConsumer", "OneDriveCommercial"):
+        value = os.environ.get(variable)
+        if not value:
+            continue
+        with suppress(OSError, ValueError):
+            roots.append(Path(value).resolve())
+    return roots
+
+
 def _is_synced_location(root: Path) -> bool:
     """Detect streamed drives where pip cannot read its CA bundle reliably."""
 
     if _looks_like_cloud_sync_path(root):
         return True
+    try:
+        resolved = root.resolve()
+    except OSError:
+        resolved = root
+    for candidate in _onedrive_roots():
+        with suppress(ValueError):
+            if resolved.is_relative_to(candidate):
+                return True
     drive, _ = os.path.splitdrive(str(root))
     label = _volume_label(drive + "\\") if drive else None
     return bool(label) and label.strip().lower() == "google drive"
@@ -202,22 +228,160 @@ def _relative_sqlite_filename(database_url: str) -> str | None:
     return path.name
 
 
+def _sqlite_integrity_ok(path: Path) -> bool:
+    """Return True when SQLite can read the database without corruption.
+
+    A locked database is treated as usable: another process may be writing it
+    and the caller must never quarantine a database that is simply in use.
+    """
+
+    if not path.exists():
+        return False
+    try:
+        with closing(sqlite3.connect(str(path), timeout=15)) as connection:
+            connection.execute("PRAGMA query_only=ON")
+            row = connection.execute("PRAGMA quick_check").fetchone()
+    except sqlite3.Error as exc:
+        return "locked" in str(exc).casefold()
+    return bool(row) and row[0] == "ok"
+
+
+def _recover_with_cli(source: Path, destination: Path) -> bool:
+    """Use the optional ``sqlite3`` shell ``.recover`` command."""
+
+    dump = subprocess.run(
+        ["sqlite3", str(source), ".recover"],
+        capture_output=True,
+        check=False,
+    )
+    if dump.returncode != 0 or not dump.stdout.strip():
+        return False
+    restore = subprocess.run(
+        ["sqlite3", str(destination)],
+        input=dump.stdout,
+        capture_output=True,
+        check=False,
+    )
+    return restore.returncode == 0
+
+
+def _recover_with_dump(source: Path, destination: Path) -> bool:
+    """Recover readable pages with the stdlib ``iterdump`` fallback."""
+
+    try:
+        with closing(sqlite3.connect(str(source), timeout=15)) as connection:
+            statements = list(connection.iterdump())
+    except sqlite3.Error:
+        return False
+    if not any(statement.startswith("CREATE TABLE") for statement in statements):
+        return False
+    try:
+        with closing(sqlite3.connect(str(destination))) as target:
+            target.executescript("\n".join(statements))
+    except sqlite3.Error:
+        return False
+    return _sqlite_integrity_ok(destination)
+
+
+def _recover_sqlite(source: Path, destination: Path) -> bool:
+    """Best-effort recovery of a corrupt SQLite database.
+
+    Returns True only when ``destination`` holds a readable copy; a failed
+    attempt never leaves a partial file behind.
+    """
+
+    if not source.exists():
+        return False
+    with suppress(OSError):
+        destination.unlink(missing_ok=True)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    if shutil.which("sqlite3") and _recover_with_cli(source, destination):
+        if _sqlite_integrity_ok(destination):
+            return True
+        with suppress(OSError):
+            destination.unlink(missing_ok=True)
+    if _recover_with_dump(source, destination):
+        return True
+    with suppress(OSError):
+        destination.unlink(missing_ok=True)
+    return False
+
+
+def _quarantine_database(path: Path) -> Path | None:
+    """Move a corrupt SQLite database (and its sidecars) aside."""
+
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    target = path.with_name(f"{path.stem}.corrupt-{stamp}{path.suffix}")
+    try:
+        path.replace(target)
+    except OSError:
+        return None
+    for suffix in ("-wal", "-shm"):
+        sidecar = path.with_name(path.name + suffix)
+        if sidecar.exists():
+            with suppress(OSError):
+                sidecar.replace(target.with_name(target.name + suffix))
+    return target
+
+
+def _repair_local_database(path: Path) -> str | None:
+    """Recover or quarantine an unusable SQLite database before startup."""
+
+    if not path.exists() or _sqlite_integrity_ok(path):
+        return None
+    recovered = path.with_name(path.name + ".recovered")
+    if _recover_sqlite(path, recovered):
+        quarantined = _quarantine_database(path)
+        try:
+            recovered.replace(path)
+        except OSError:
+            return (
+                f"Banco corrompido em {path} foi recuperado em {recovered}, "
+                "mas nao foi possivel substituir o arquivo original."
+            )
+        suffix = f" Copia do arquivo anterior em {quarantined}." if quarantined else ""
+        return f"Banco corrompido em {path} foi reparado.{suffix}"
+    with suppress(OSError):
+        recovered.unlink(missing_ok=True)
+    quarantined = _quarantine_database(path)
+    if quarantined is None:
+        return (
+            f"Banco corrompido em {path} nao pode ser recuperado nem preservado. "
+            "Remova o arquivo manualmente para que um banco novo seja criado."
+        )
+    return (
+        f"Banco corrompido em {path} nao pode ser recuperado; copia preservada em "
+        f"{quarantined}. Um banco novo sera criado."
+    )
+
+
 def _migrate_database(source: Path, destination: Path) -> bool:
-    """Copy an existing SQLite database with its transactional backup API."""
+    """Copy a SQLite database to local disk, recovering a corrupt source.
+
+    Healthy databases are copied with SQLite's transactional backup API;
+    corrupt ones are rebuilt from readable pages before the copy. Returns True
+    only when ``destination`` ends up with a readable database.
+    """
 
     if not source.exists() or destination.exists():
         return False
     destination.parent.mkdir(parents=True, exist_ok=True)
+    if not _sqlite_integrity_ok(source):
+        return _recover_sqlite(source, destination)
     try:
-        with sqlite3.connect(str(source), timeout=15) as source_db:
-            with sqlite3.connect(str(destination)) as target_db:
+        with closing(sqlite3.connect(str(source), timeout=15)) as source_db:
+            with closing(sqlite3.connect(str(destination))) as target_db:
                 source_db.backup(target_db)
     except sqlite3.Error as exc:
         print(f"Aviso: nao foi possivel migrar o banco existente ({exc}).")
         with suppress(OSError):
             destination.unlink(missing_ok=True)
         return False
-    return True
+    if _sqlite_integrity_ok(destination):
+        return True
+    with suppress(OSError):
+        destination.unlink(missing_ok=True)
+    return False
 
 
 def _database_override(
@@ -247,6 +411,13 @@ def _database_override(
         if legacy is not None and legacy != local_path and legacy.exists():
             if _migrate_database(legacy, local_path):
                 notice += f" Dados existentes migrados de {legacy}."
+            elif not _sqlite_integrity_ok(legacy):
+                quarantined = _quarantine_database(legacy)
+                preserved = quarantined if quarantined is not None else legacy
+                notice += (
+                    " O banco anterior estava corrompido e nao pode ser recuperado; "
+                    f"copia preservada em {preserved}. Um banco novo sera criado."
+                )
             else:
                 notice += f" O banco anterior permanece em {legacy}."
     return {"DATABASE_URL": f"sqlite:///{local_path.as_posix()}"}, notice
@@ -937,6 +1108,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         override, database_notice = _database_override(settings, migrate=True)
         if database_notice:
             print(database_notice)
+        database_url = str(override.get("DATABASE_URL", settings.get("database_url", "")))
+        database_path = _sqlite_database_path(database_url, REPO_ROOT)
+        if database_path is not None:
+            repair_notice = _repair_local_database(database_path)
+            if repair_notice:
+                print(repair_notice)
 
         if args.no_scheduler or not bool(settings.get("scheduler_enabled", True)):
             print("Scheduler desativado nesta execucao.")
