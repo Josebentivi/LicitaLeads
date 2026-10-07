@@ -45,6 +45,7 @@ from app.models.enums import (
     LeadStatus,
     OutreachChannel,
     ParticipantRole,
+    ParticipantStatus,
     ProcurementEventType,
     ReasonCategory,
     ReviewDecision,
@@ -70,6 +71,8 @@ class Procurement(UUIDPrimaryKeyMixin, TimestampMixin, FingerprintMixin, Base):
             "modality_key",
         ),
         Index("ix_procurements_dates", "publication_at", "proposal_end_at"),
+        Index("ix_procurements_estimated_value", "estimated_value"),
+        Index("ix_procurements_procurement_type", "procurement_type"),
     )
 
     source: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
@@ -81,6 +84,8 @@ class Procurement(UUIDPrimaryKeyMixin, TimestampMixin, FingerprintMixin, Base):
     modality: Mapped[str | None] = mapped_column(String(100), index=True)
     modality_key: Mapped[str | None] = mapped_column(String(100), index=True)
     procurement_type: Mapped[str | None] = mapped_column(String(100))
+    is_srp: Mapped[bool | None] = mapped_column(Boolean)
+    legal_basis: Mapped[str | None] = mapped_column(String(255))
     title: Mapped[str | None] = mapped_column(String(500))
     object_description: Mapped[str | None] = mapped_column(Text)
     agency_name: Mapped[str | None] = mapped_column(String(500), index=True)
@@ -452,6 +457,7 @@ class Participant(UUIDPrimaryKeyMixin, FingerprintMixin, Base):
         ),
         CheckConstraint("final_value IS NULL OR final_value >= 0", name="final_value_nonnegative"),
         Index("ix_participants_procurement_company", "procurement_id", "company_id"),
+        Index("ix_participants_company_status", "company_id", "status_code"),
     )
 
     procurement_id: Mapped[UUID] = mapped_column(
@@ -470,6 +476,9 @@ class Participant(UUIDPrimaryKeyMixin, FingerprintMixin, Base):
     final_value: Mapped[Decimal | None] = mapped_column(Numeric(19, 2))
     rank: Mapped[int | None] = mapped_column(Integer)
     status: Mapped[str | None] = mapped_column(String(100))
+    status_code: Mapped[ParticipantStatus | None] = mapped_column(
+        database_enum(ParticipantStatus), index=True
+    )
     source: Mapped[str] = mapped_column(String(50), nullable=False)
     source_evidence_id: Mapped[UUID | None] = mapped_column(
         GUID(), ForeignKey("evidence.id", ondelete="SET NULL"), index=True
@@ -728,3 +737,81 @@ class JobLease(Base):
     payload: Mapped[dict[str, Any]] = mapped_column(
         MutableDict.as_mutable(JSON), default=dict, nullable=False, server_default=text("'{}'")
     )
+
+
+class PriceRegistry(UUIDPrimaryKeyMixin, TimestampMixin, FingerprintMixin, Base):
+    """Official price registry (ata de registro de preços) from PNCP/Compras.gov.br."""
+
+    __tablename__ = "price_registries"
+    __table_args__ = (
+        UniqueConstraint("source", "external_id", name="uq_price_registries_source_external_id"),
+        Index("ix_price_registries_validity", "valid_from", "valid_until"),
+        Index("ix_price_registries_agency", "agency_cnpj"),
+    )
+
+    source: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
+    external_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    pncp_control_number: Mapped[str | None] = mapped_column(String(100), unique=True, index=True)
+    linked_pncp_control_number: Mapped[str | None] = mapped_column(String(100), index=True)
+    procurement_id: Mapped[UUID | None] = mapped_column(
+        GUID(), ForeignKey("procurements.id", ondelete="SET NULL"), index=True
+    )
+    registry_number: Mapped[str | None] = mapped_column(String(100), index=True)
+    year: Mapped[int | None] = mapped_column(Integer)
+    agency_name: Mapped[str | None] = mapped_column(String(500), index=True)
+    agency_cnpj: Mapped[str | None] = mapped_column(String(14), index=True)
+    uasg: Mapped[str | None] = mapped_column(String(30))
+    object_description: Mapped[str | None] = mapped_column(Text)
+    status: Mapped[str | None] = mapped_column(String(100), index=True)
+    signed_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    published_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    valid_from: Mapped[datetime | None] = mapped_column(UTCDateTime(), index=True)
+    valid_until: Mapped[datetime | None] = mapped_column(UTCDateTime(), index=True)
+    total_value: Mapped[Decimal | None] = mapped_column(Numeric(19, 2))
+    allows_adhesion: Mapped[bool | None] = mapped_column(Boolean)
+    source_url: Mapped[str | None] = mapped_column(Text)
+
+    procurement: Mapped[Procurement | None] = relationship()
+    items: Mapped[list[PriceRegistryItem]] = relationship(
+        back_populates="price_registry", cascade="all, delete-orphan", passive_deletes=True
+    )
+
+
+class PriceRegistryItem(UUIDPrimaryKeyMixin, FingerprintMixin, Base):
+    """One item of a price registry, with its registered supplier when published."""
+
+    __tablename__ = "price_registry_items"
+    __table_args__ = (
+        UniqueConstraint(
+            "price_registry_id",
+            "item_number",
+            "supplier_cnpj",
+            name="uq_price_registry_items_registry_item_supplier",
+        ),
+        Index("ix_price_registry_items_supplier", "supplier_cnpj"),
+        Index("ix_price_registry_items_company", "company_id"),
+    )
+
+    price_registry_id: Mapped[UUID] = mapped_column(
+        GUID(), ForeignKey("price_registries.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    company_id: Mapped[UUID | None] = mapped_column(
+        GUID(), ForeignKey("companies.id", ondelete="SET NULL"), index=True
+    )
+    source_record_id: Mapped[UUID | None] = mapped_column(
+        GUID(), ForeignKey("source_records.id", ondelete="SET NULL"), index=True
+    )
+    item_number: Mapped[str] = mapped_column(String(100), nullable=False)
+    description: Mapped[str | None] = mapped_column(Text)
+    unit: Mapped[str | None] = mapped_column(String(100))
+    quantity: Mapped[Decimal | None] = mapped_column(Numeric(19, 4))
+    unit_value: Mapped[Decimal | None] = mapped_column(Numeric(19, 4))
+    total_value: Mapped[Decimal | None] = mapped_column(Numeric(19, 2))
+    max_adhesion_quantity: Mapped[Decimal | None] = mapped_column(Numeric(19, 4))
+    supplier_cnpj: Mapped[str | None] = mapped_column(String(14), index=True)
+    supplier_name: Mapped[str | None] = mapped_column(String(500))
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utc_now, nullable=False)
+
+    price_registry: Mapped[PriceRegistry] = relationship(back_populates="items")
+    company: Mapped[Company | None] = relationship()
+    source_record: Mapped[SourceRecord | None] = relationship(foreign_keys=[source_record_id])

@@ -62,7 +62,12 @@ from app.services.event_detection import (
     ParticipantDetector,
     associate_company,
 )
-from app.services.identifiers import is_valid_cnpj, normalize_cnpj, normalize_company_name
+from app.services.identifiers import (
+    is_valid_cnpj,
+    normalize_cnpj,
+    normalize_company_name,
+    participant_status_code,
+)
 from app.services.ingestion.documents import SecureDocumentDownloader, store_by_hash
 from app.services.ingestion.pipeline import stable_fingerprint
 from app.services.lead_scoring import LeadScoreInput, LeadScorer
@@ -990,6 +995,7 @@ class DocumentProcessingService:
                 item_id=item.id if item else None,
                 participation_role=role,
                 status=detected.status,
+                status_code=participant_status_code(detected.role.value, detected.status),
                 source="document",
                 source_evidence_id=evidence.id,
                 confidence=Decimal(str(detected.confidence)),

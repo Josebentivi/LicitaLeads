@@ -25,6 +25,8 @@ COUNT_TABLE_LABELS: dict[str, str] = {
     "companies": "Empresas",
     "company_contacts": "Contatos",
     "participants": "Participantes",
+    "price_registries": "Atas de registro de preços",
+    "price_registry_items": "Itens de ata",
     "evidence": "Evidências",
     "source_records": "Registros de fonte",
     "field_observations": "Observações de campo",

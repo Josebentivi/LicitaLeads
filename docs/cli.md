@@ -14,6 +14,8 @@ licita-lead --help
 |---|---|
 | `audit-sources` | Compara os OpenAPI vivos com os contratos conhecidos e grava `docs/source_audit_AAAA-MM-DD.md` |
 | `crawl <pncp\|compras-gov>` | Coleta registros estruturados sem baixar documentos |
+| `crawl-atas [pncp\|compras-gov\|all]` | Coleta atas de registro de preços (ARP) e itens publicados |
+| `backfill-fields` | Recupera SRP/amparo legal/rota de contratação de payloads brutos já coletados |
 | `process-documents` | Baixa e extrai documentos pendentes, detecta eventos e cria leads |
 | `detect-events` | Reprocessa a detecção determinística sobre textos já extraídos |
 | `calculate-deadlines` | Recalcula status de prazos e o efeito no scoring/leads |
@@ -26,6 +28,10 @@ licita-lead --help
 
 - `crawl`: `--uf` (padrão `MA`), `--days` (1–365, padrão 7), `--modality`
   (repetível), `--max-pages`.
+- `crawl-atas`: `--days` (1–3650, padrão 365), `--max-pages`; a janela filtra
+  a vigência inicial das atas no Compras.gov.br e a publicação no PNCP.
+- `backfill-fields`: `--limit` (máximo de respostas brutas examinadas);
+  processa em lotes de 200 respostas, sem carregar todo o histórico em memória.
 - `process-documents` e `detect-events`: `--limit`.
 - `enrich-contacts`: `--force` (executa mesmo com
   `CONTACT_SEARCH_ENABLED=false`).
@@ -38,6 +44,8 @@ licita-lead --help
 ```bash
 python -m app.cli crawl pncp --uf MA --days 7
 python -m app.cli crawl compras-gov --uf MA --days 7
+python -m app.cli crawl-atas all --days 365
+python -m app.cli backfill-fields
 python -m app.cli run-pipeline --uf MA --days 7
 python -m app.cli process-documents --limit 30
 python -m app.cli export-leads leads.csv

@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from enum import Enum
-from typing import Any
+from typing import Any, cast
 from uuid import UUID, uuid4
 
 from sqlalchemy import select
@@ -19,9 +19,12 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app.config import Settings, get_settings
 from app.connectors.base import (
     ConnectorResult,
+    PriceRegistryConnector,
     ProcurementFilters,
     ProcurementSourceConnector,
     RawDocument,
+    RawPriceRegistry,
+    RawPriceRegistryItem,
     RawProcurement,
     RawProcurementItem,
     RawResult,
@@ -42,6 +45,9 @@ from app.models import (
     FieldValueStatus,
     Participant,
     ParticipantRole,
+    ParticipantStatus,
+    PriceRegistry,
+    PriceRegistryItem,
     Procurement,
     ProcurementItem,
     ProcurementSource,
@@ -52,8 +58,10 @@ from app.repositories.procurements import ProcurementRepository
 from app.services.identifiers import (
     canonical_modality,
     is_valid_cnpj,
+    modality_category,
     normalize_cnpj,
     normalize_company_name,
+    participant_status_code,
 )
 
 
@@ -106,6 +114,7 @@ class PipelineRequest:
     max_pages: int | None = None
     process_documents: bool = True
     document_batch_size: int | None = None
+    mode: str = "procurements"
 
     def filters(self) -> ProcurementFilters:
         return ProcurementFilters(
@@ -124,6 +133,7 @@ class PipelineRequest:
         return _json_value(
             {
                 "connector": self.connector,
+                "mode": self.mode,
                 "uf": self.uf.upper(),
                 "days": self.days,
                 "start_date": self.start_date,
@@ -172,6 +182,8 @@ class IngestionPipeline:
         connector = request.connector.lower()
         if connector not in {"pncp", "compras_gov", "all"}:
             raise ValueError("connector must be pncp, compras_gov, or all")
+        if request.mode not in {"procurements", "price_registries"}:
+            raise ValueError("mode must be procurements or price_registries")
         async with self.session_factory() as session, session.begin():
             run = CrawlRun(
                 connector=connector,
@@ -207,6 +219,11 @@ class IngestionPipeline:
             if await self._cancellation_requested(run_id):
                 raise PipelineCancelled
             connectors = self._selected_connectors(request.connector)
+            runner = (
+                self._run_price_registry_connector
+                if request.mode == "price_registries"
+                else self._run_connector
+            )
             for connector in connectors:
                 source_started = time.perf_counter()
                 found_before = summary.records_found
@@ -215,7 +232,7 @@ class IngestionPipeline:
                 diagnostics_before = len(summary.diagnostics)
                 source_status = "completed"
                 try:
-                    await self._run_connector(connector, request, summary)
+                    await runner(connector, request, summary)
                 except (asyncio.CancelledError, PipelineCancelled):
                     raise
                 except Exception as exc:
@@ -238,7 +255,7 @@ class IngestionPipeline:
                     "diagnostics": source_diagnostics,
                 }
                 await self._update_progress(summary)
-            if request.process_documents:
+            if request.process_documents and request.mode == "procurements":
                 from app.services.ingestion.processor import DocumentProcessingService
 
                 batch_size = request.document_batch_size or self.settings.document_batch_size
@@ -393,6 +410,199 @@ class IngestionPipeline:
             progress["processed"] = position
             await self._update_progress(summary)
 
+    async def _run_price_registry_connector(
+        self,
+        connector: ProcurementSourceConnector,
+        request: PipelineRequest,
+        summary: PipelineSummary,
+    ) -> None:
+        """Collect price registries (ARP/atas) and their published items."""
+
+        price_connector = cast(PriceRegistryConnector, connector)
+        filters = request.filters()
+        if filters.max_pages is None and self.settings.crawl_max_pages:
+            filters.max_pages = self.settings.crawl_max_pages
+        discovery = await price_connector.discover_price_registries(filters)
+        discovery_record_ids = await self._persist_source_records(summary.run_id, discovery)
+        if discovery.availability is ConnectorAvailability.TEMPORARY_ERROR:
+            summary.diagnostics.append(
+                f"{connector.name}: {discovery.diagnostic or 'temporary source error'}"
+            )
+            return
+        if discovery.availability not in {
+            ConnectorAvailability.AVAILABLE,
+            ConnectorAvailability.EMPTY,
+        }:
+            summary.diagnostics.append(f"{connector.name}: {discovery.availability.value}")
+            return
+
+        records = discovery.data
+        max_records = self.settings.crawl_max_records_per_source
+        if max_records and len(records) > max_records:
+            summary.diagnostics.append(
+                f"{connector.name}: limitado a {max_records} ata(s) por fonte "
+                f"({len(records)} encontradas)"
+            )
+            records = records[:max_records]
+        summary.records_found += len(records)
+        progress: dict[str, Any] = {
+            "source": connector.name,
+            "mode": "price_registries",
+            "processed": 0,
+            "total": len(records),
+        }
+        summary.source_results[f"{connector.name}:price_registries"] = {
+            "status": "running",
+            "records_found": len(records),
+            "progress": progress,
+        }
+        await self._update_progress(summary)
+        for position, raw in enumerate(records, start=1):
+            if await self._cancellation_requested(summary.run_id):
+                raise PipelineCancelled
+            items = await price_connector.fetch_price_registry_items(raw.external_id)
+            persisted_items = await self._persist_source_records(summary.run_id, items)
+            if items.availability is ConnectorAvailability.TEMPORARY_ERROR:
+                summary.diagnostics.append(
+                    f"{connector.name}/{raw.external_id}: "
+                    f"{items.diagnostic or 'temporary source error'}"
+                )
+            created = await self._persist_price_registry_bundle(
+                raw,
+                items.data if items.is_available else [],
+                source_record_id=discovery_record_ids[0] if discovery_record_ids else None,
+                item_source_record_id=persisted_items[0] if persisted_items else None,
+            )
+            if created:
+                summary.records_created += 1
+            else:
+                summary.records_updated += 1
+            progress["processed"] = position
+            await self._update_progress(summary)
+
+    async def _persist_price_registry_bundle(
+        self,
+        raw: RawPriceRegistry,
+        items: list[RawPriceRegistryItem],
+        *,
+        source_record_id: UUID | None,
+        item_source_record_id: UUID | None,
+    ) -> bool:
+        del source_record_id  # retained on SourceRecord; registry links via items/source_url
+        async with self.session_factory() as session, session.begin():
+            registry = await session.scalar(
+                select(PriceRegistry).where(
+                    PriceRegistry.source == raw.source,
+                    PriceRegistry.external_id == raw.external_id,
+                )
+            )
+            if registry is None and raw.pncp_control_number:
+                registry = await session.scalar(
+                    select(PriceRegistry).where(
+                        PriceRegistry.pncp_control_number == raw.pncp_control_number
+                    )
+                )
+            created = registry is None
+            if registry is None:
+                registry = PriceRegistry(
+                    source=raw.source,
+                    external_id=raw.external_id,
+                    fingerprint=stable_fingerprint("price_registry", raw.source, raw.external_id),
+                )
+                session.add(registry)
+                await session.flush()
+            values = {
+                "pncp_control_number": raw.pncp_control_number,
+                "linked_pncp_control_number": raw.linked_pncp_control_number,
+                "registry_number": raw.registry_number,
+                "year": raw.year,
+                "agency_name": raw.agency_name,
+                "agency_cnpj": normalize_cnpj(raw.agency_cnpj),
+                "uasg": raw.uasg,
+                "object_description": raw.object_description,
+                "status": raw.status,
+                "signed_at": raw.signed_at,
+                "published_at": raw.published_at,
+                "valid_from": raw.valid_from,
+                "valid_until": raw.valid_until,
+                "total_value": raw.total_value,
+                "allows_adhesion": raw.allows_adhesion,
+                "source_url": raw.source_url,
+            }
+            for name, value in values.items():
+                if value is not None:
+                    setattr(registry, name, value)
+            if raw.linked_pncp_control_number:
+                procurement = await session.scalar(
+                    select(Procurement).where(
+                        Procurement.pncp_control_number == raw.linked_pncp_control_number
+                    )
+                )
+                if procurement is not None:
+                    registry.procurement_id = procurement.id
+            await session.flush()
+            for raw_item in items:
+                number = raw_item.item_number or raw_item.external_id or "1"
+                cnpj = normalize_cnpj(raw_item.supplier_cnpj)
+                entity = await session.scalar(
+                    select(PriceRegistryItem).where(
+                        PriceRegistryItem.price_registry_id == registry.id,
+                        PriceRegistryItem.item_number == number,
+                        PriceRegistryItem.supplier_cnpj == cnpj,
+                    )
+                )
+                company_id: UUID | None = None
+                if cnpj and is_valid_cnpj(cnpj):
+                    company = await self._get_or_create_company(
+                        session, cnpj, raw_item.supplier_name
+                    )
+                    company_id = company.id
+                if entity is None:
+                    entity = PriceRegistryItem(
+                        price_registry_id=registry.id,
+                        item_number=number,
+                        fingerprint=stable_fingerprint(
+                            "price_registry_item", registry.id, number, cnpj
+                        ),
+                    )
+                    session.add(entity)
+                entity.company_id = company_id or entity.company_id
+                entity.source_record_id = item_source_record_id
+                entity.description = raw_item.description or entity.description
+                entity.unit = raw_item.unit or entity.unit
+                entity.quantity = raw_item.quantity or entity.quantity
+                entity.unit_value = raw_item.unit_value or entity.unit_value
+                entity.total_value = raw_item.total_value or entity.total_value
+                entity.max_adhesion_quantity = (
+                    raw_item.max_adhesion_quantity or entity.max_adhesion_quantity
+                )
+                entity.supplier_cnpj = cnpj or entity.supplier_cnpj
+                entity.supplier_name = raw_item.supplier_name or entity.supplier_name
+            return created
+
+    @staticmethod
+    async def _get_or_create_company(
+        session: AsyncSession,
+        cnpj: str,
+        name: str | None,
+    ) -> Company:
+        """Resolve a company by validated CNPJ, never by textual similarity."""
+
+        company = await session.scalar(select(Company).where(Company.cnpj == cnpj))
+        if company is None:
+            company = Company(
+                cnpj=cnpj,
+                legal_name=name,
+                normalized_name=normalize_company_name(name) or cnpj,
+                fingerprint=stable_fingerprint("company", cnpj),
+            )
+            session.add(company)
+            await session.flush()
+        elif name and not company.legal_name:
+            company.legal_name = name
+            company.normalized_name = normalize_company_name(name) or cnpj
+        return company
+
     async def _persist_source_records(
         self,
         run_id: UUID,
@@ -532,6 +742,9 @@ class IngestionPipeline:
             "purchase_year": raw.purchase_year,
             "modality": raw.modality,
             "modality_key": canonical_modality(raw.modality),
+            "procurement_type": modality_category(raw.modality),
+            "is_srp": raw.is_srp,
+            "legal_basis": raw.legal_basis,
             "title": raw.title,
             "object_description": raw.object_description,
             "agency_name": raw.agency_name,
@@ -567,6 +780,9 @@ class IngestionPipeline:
             "purchase_year": raw.purchase_year,
             "modality": raw.modality,
             "modality_key": canonical_modality(raw.modality),
+            "procurement_type": modality_category(raw.modality),
+            "is_srp": raw.is_srp,
+            "legal_basis": raw.legal_basis,
             "object_description": raw.object_description,
             "agency_name": raw.agency_name,
             "agency_cnpj": normalize_cnpj(raw.agency_cnpj),
@@ -692,19 +908,7 @@ class IngestionPipeline:
             cnpj = normalize_cnpj(raw.supplier_cnpj)
             if not cnpj or not is_valid_cnpj(cnpj):
                 continue
-            company = await session.scalar(select(Company).where(Company.cnpj == cnpj))
-            if company is None:
-                company = Company(
-                    cnpj=cnpj,
-                    legal_name=raw.supplier_name,
-                    normalized_name=normalize_company_name(raw.supplier_name) or cnpj,
-                    fingerprint=stable_fingerprint("company", cnpj),
-                )
-                session.add(company)
-                await session.flush()
-            elif raw.supplier_name and not company.legal_name:
-                company.legal_name = raw.supplier_name
-                company.normalized_name = normalize_company_name(raw.supplier_name) or cnpj
+            company = await self._get_or_create_company(session, cnpj, raw.supplier_name)
 
             item = item_map.get(raw.item_external_id or "") or item_map.get(raw.item_number or "")
             role = (
@@ -731,6 +935,7 @@ class IngestionPipeline:
                         final_value=raw.total_value,
                         rank=raw.rank,
                         status=raw.result_status,
+                        status_code=participant_status_code(role.value, raw.result_status),
                         source=raw.source,
                         source_record_id=source_record_id,
                         confidence=Decimal("1"),
@@ -742,6 +947,11 @@ class IngestionPipeline:
                 participant.final_value = raw.total_value or participant.final_value
                 participant.rank = raw.rank or participant.rank
                 participant.status = raw.result_status or participant.status
+                new_code = participant_status_code(
+                    participant.participation_role.value, participant.status
+                )
+                if new_code is not ParticipantStatus.UNKNOWN or participant.status_code is None:
+                    participant.status_code = new_code
 
     async def _cancellation_requested(self, run_id: UUID) -> bool:
         """Return True when an operator asked to stop this run."""

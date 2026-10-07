@@ -34,6 +34,14 @@ from app.models import (
     ProcurementEvent,
     ProcurementItem,
 )
+from app.repositories.price_registries import PriceRegistryRepository
+from app.repositories.procurements import (
+    CompanyRepository,
+    ParticipantRepository,
+    ProcurementEventRepository,
+    ProcurementRepository,
+)
+from app.services.identifiers import canonical_modality, normalize_cnpj
 from app.services.ingestion import IngestionPipeline, PipelineRequest
 from app.services.ingestion.processor import DocumentProcessingService
 from app.services.maintenance import (
@@ -93,12 +101,46 @@ _PROCUREMENT_MODALITY_LABELS = {
     "pregao_eletronico": "Pregão eletrônico",
     "pregao_presencial": "Pregão presencial",
     "concorrencia_eletronica": "Concorrência eletrônica",
+    "concorrencia_presencial": "Concorrência presencial",
     "concorrencia": "Concorrência",
     "dispensa": "Dispensa de licitação",
+    "dispensa_eletronica": "Dispensa eletrônica",
     "inexigibilidade": "Inexigibilidade",
     "leilao": "Leilão",
+    "leilao_eletronico": "Leilão eletrônico",
+    "leilao_presencial": "Leilão presencial",
     "concurso": "Concurso",
     "dialogo_competitivo": "Diálogo competitivo",
+    "credenciamento": "Credenciamento",
+    "pre_qualificacao": "Pré-qualificação",
+    "manifestacao_de_interesse": "Manifestação de interesse",
+}
+_PROFILTER_MODALITY_KEYS = (
+    "pregao_eletronico",
+    "pregao_presencial",
+    "concorrencia_eletronica",
+    "concorrencia_presencial",
+    "concurso",
+    "leilao_eletronico",
+    "leilao_presencial",
+    "dialogo_competitivo",
+    "dispensa",
+    "inexigibilidade",
+    "credenciamento",
+    "pre_qualificacao",
+    "manifestacao_de_interesse",
+)
+_PROCUREMENT_TYPE_LABELS = {
+    "licitacao": "Licitação",
+    "contratacao_direta": "Contratação direta",
+    "procedimento_auxiliar": "Procedimento auxiliar",
+}
+_PROCUREMENT_STATUS_CATEGORY_LABELS = {
+    "aberta": "Proposta aberta",
+    "encerrada": "Encerrada",
+    "cancelada": "Cancelada",
+    "suspensa": "Suspensa",
+    "desconhecida": "Sem prazo conhecido",
 }
 _PROCUREMENT_STATUS_LABELS = {
     "em andamento": "Em andamento",
@@ -141,6 +183,14 @@ _PARTICIPANT_ROLE_LABELS = {
     "winner": "Vencedora",
     "awarded": "Adjudicatária",
     "contractor": "Contratada",
+    "unknown": "Não informado",
+}
+_PARTICIPANT_STATUS_LABELS = {
+    "winner": "Vencedora",
+    "awarded": "Adjudicatária",
+    "participant": "Participante",
+    "disqualified": "Desclassificada",
+    "ineligible": "Inabilitada",
     "unknown": "Não informado",
 }
 _EVENT_TYPE_LABELS = {
@@ -243,11 +293,24 @@ def _procurement_datetime(value: datetime | None) -> str:
     return value.astimezone(_PROCUREMENT_TIMEZONE).strftime("%d/%m/%Y %H:%M BRT")
 
 
+def _stats_datetime(stats: dict[str, object]) -> str:
+    value = stats.get("last_participation_at")
+    return _procurement_datetime(value if isinstance(value, datetime) else None)
+
+
 def _brl(value: Decimal | None) -> str:
     if value is None:
         return "Não informado"
     rendered = f"{value:,.2f}".replace(",", "_").replace(".", ",").replace("_", ".")
     return f"R$ {rendered}"
+
+
+templates.env.filters["brl"] = _brl
+templates.env.filters["display_text"] = _display_text
+templates.env.filters["modality_label"] = lambda value: _label(value, _PROCUREMENT_MODALITY_LABELS)
+templates.env.filters["procurement_type_label"] = lambda value: _label(
+    value, _PROCUREMENT_TYPE_LABELS
+)
 
 
 def _quantity_with_unit(quantity: Decimal | None, unit: str | None) -> str:
@@ -502,7 +565,9 @@ def _source_views(run: CrawlRun) -> list[SimpleNamespace]:
 
     views: list[SimpleNamespace] = []
     for source_id in requested:
-        stored = stored_sources.get(source_id, {})
+        stored = stored_sources.get(source_id) or stored_sources.get(
+            f"{source_id}:price_registries"
+        )
         if not isinstance(stored, dict):
             stored = {}
         diagnostics_value = stored.get("diagnostics", [])
@@ -612,6 +677,11 @@ def _crawl_view(run: CrawlRun) -> SimpleNamespace:
     return SimpleNamespace(
         id=run.id,
         connector_label=_CONNECTOR_LABELS.get(run.connector, run.connector),
+        mode_label=(
+            "Atas (ARP)"
+            if isinstance(run.filters, dict) and run.filters.get("mode") == "price_registries"
+            else None
+        ),
         started_at=_local_datetime(run.started_at),
         finished_at=_local_datetime(run.finished_at),
         status=status,
@@ -735,26 +805,61 @@ async def procurements_page(
     uf: str | None = Query(None, min_length=2, max_length=2),
     municipality: str | None = None,
     agency: str | None = None,
+    modality: list[str] | None = Query(None),
+    procurement_type: str | None = None,
+    status_category: str | None = None,
+    is_srp: str | None = None,
+    value_min: Decimal | None = Query(None, ge=0),
+    value_max: Decimal | None = Query(None, ge=0),
     db: AsyncSession = Depends(get_db),
 ):
-    statement = select(Procurement)
-    selected_uf = uf.upper() if uf else None
-    if selected_uf:
-        statement = statement.where(Procurement.uf == selected_uf)
-    if municipality:
-        statement = statement.where(Procurement.municipality.ilike(f"%{municipality}%"))
-    if agency:
-        statement = statement.where(Procurement.agency_name.ilike(f"%{agency}%"))
-    rows = (
-        await db.scalars(statement.order_by(Procurement.publication_at.desc()).limit(200))
-    ).all()
+    selected_modalities = [
+        value for value in (modality or []) if canonical_modality(value) is not None
+    ]
+    selected_type = procurement_type if procurement_type in _PROCUREMENT_TYPE_LABELS else None
+    selected_category = (
+        status_category if status_category in _PROCUREMENT_STATUS_CATEGORY_LABELS else None
+    )
+    parsed_srp: bool | None = None
+    if is_srp in {"true", "1", "sim"}:
+        parsed_srp = True
+    elif is_srp in {"false", "0", "nao", "não"}:
+        parsed_srp = False
+    page = await ProcurementRepository(db).list_filtered(
+        page=1,
+        page_size=200,
+        uf=uf,
+        municipality=municipality,
+        agency=agency,
+        modalities=selected_modalities,
+        procurement_type=selected_type,
+        status_category=selected_category,
+        is_srp=parsed_srp,
+        value_min=value_min,
+        value_max=value_max,
+    )
     return templates.TemplateResponse(
         request,
         "procurements.html",
         {
-            "procurements": rows,
+            "procurements": page.items,
             "ufs": _BRAZILIAN_UFS,
-            "filters": SimpleNamespace(uf=selected_uf, municipality=municipality, agency=agency),
+            "filters": SimpleNamespace(
+                uf=uf.upper() if uf else None,
+                municipality=municipality,
+                agency=agency,
+                modalities=selected_modalities,
+                procurement_type=selected_type,
+                status_category=selected_category,
+                is_srp=is_srp if parsed_srp is not None else None,
+                value_min=value_min,
+                value_max=value_max,
+            ),
+            "modality_options": [
+                (key, _PROCUREMENT_MODALITY_LABELS[key]) for key in _PROFILTER_MODALITY_KEYS
+            ],
+            "type_options": list(_PROCUREMENT_TYPE_LABELS.items()),
+            "status_category_options": list(_PROCUREMENT_STATUS_CATEGORY_LABELS.items()),
         },
     )
 
@@ -853,6 +958,235 @@ async def link_event_company(
     finally:
         await service.aclose()
     return RedirectResponse(f"/procurements/{procurement_id}?link=ok", status_code=303)
+
+
+@router.get("/empresas")
+async def companies_page(
+    request: Request,
+    search: str | None = Query(None, max_length=120),
+    uf: str | None = Query(None, min_length=2, max_length=2),
+    db: AsyncSession = Depends(get_db),
+):
+    """List companies with auditable participation counters."""
+
+    result = await CompanyRepository(db).list_with_stats(
+        page=1, page_size=200, search=search, uf=uf
+    )
+    companies = [
+        SimpleNamespace(
+            cnpj=company.cnpj,
+            cnpj_label=_format_cnpj(company.cnpj),
+            name=_display_text(company.legal_name or company.normalized_name),
+            location="/".join(value for value in (company.municipality, company.uf) if value)
+            or "—",
+            participations=stats["participations"],
+            awarded=stats["awarded"],
+            disqualified=stats["disqualified"],
+            ineligible=stats["ineligible"],
+            last_participation_at=_stats_datetime(stats),
+        )
+        for company, stats in result.items
+    ]
+    return templates.TemplateResponse(
+        request,
+        "companies.html",
+        {
+            "companies": companies,
+            "ufs": _BRAZILIAN_UFS,
+            "filters": SimpleNamespace(uf=uf.upper() if uf else None, search=search),
+        },
+    )
+
+
+@router.get("/empresas/{cnpj}")
+async def company_page(
+    request: Request,
+    cnpj: str,
+    status: str | None = Query(None),
+    active_only: bool = False,
+    db: AsyncSession = Depends(get_db),
+):
+    """Show one company's participation and event history with provenance."""
+
+    normalized = normalize_cnpj(cnpj)
+    company = (
+        await CompanyRepository(db).find_by_cnpj(normalized) if normalized is not None else None
+    )
+    if company is None:
+        raise HTTPException(status_code=404, detail="Empresa não encontrada")
+    selected_status = status if status in _PARTICIPANT_STATUS_LABELS else None
+    stats = await CompanyRepository(db).stats_for_company(company.id)
+    participations = await ParticipantRepository(db).list_for_company(
+        company.id,
+        page=1,
+        page_size=200,
+        statuses=[selected_status] if selected_status else None,
+        active_only=active_only,
+    )
+    events = await ProcurementEventRepository(db).list_for_company(
+        company.id, page=1, page_size=200
+    )
+    return templates.TemplateResponse(
+        request,
+        "company_detail.html",
+        {
+            "company": SimpleNamespace(
+                cnpj=company.cnpj,
+                cnpj_label=_format_cnpj(company.cnpj),
+                name=_display_text(company.legal_name or company.normalized_name),
+                trade_name=_display_text(company.trade_name),
+                location="/".join(value for value in (company.municipality, company.uf) if value)
+                or "—",
+                website=company.website,
+                domain=company.domain,
+            ),
+            "stats": stats,
+            "stats_last_participation_at": _stats_datetime(stats),
+            "participations": [
+                SimpleNamespace(
+                    procurement_id=item.procurement_id,
+                    process=item.procurement.purchase_number
+                    or item.procurement.pncp_control_number
+                    or item.procurement.external_id,
+                    agency=_display_text(item.procurement.agency_name),
+                    modality=_label(
+                        item.procurement.modality_key or item.procurement.modality,
+                        _PROCUREMENT_MODALITY_LABELS,
+                    ),
+                    type_label=_label(item.procurement.procurement_type, _PROCUREMENT_TYPE_LABELS),
+                    is_srp=item.procurement.is_srp,
+                    estimated_value=_brl(item.procurement.estimated_value),
+                    status=_display_text(item.procurement.status),
+                    role=_label(item.participation_role, _PARTICIPANT_ROLE_LABELS),
+                    outcome=_label(item.status_code, _PARTICIPANT_STATUS_LABELS),
+                    final_value=_brl(item.final_value),
+                    confidence=_confidence(item.confidence),
+                    origin=_technical_origin(
+                        source=item.source,
+                        official_url=item.procurement.source_url,
+                        source_record_id=item.source_record_id,
+                        evidence_id=item.source_evidence_id,
+                    ),
+                )
+                for item in participations.items
+            ],
+            "events": [_event_view(event) for event in events.items],
+            "status_options": list(_PARTICIPANT_STATUS_LABELS.items()),
+            "filters": SimpleNamespace(status=selected_status, active_only=active_only),
+        },
+    )
+
+
+@router.get("/atas")
+async def price_registries_page(
+    request: Request,
+    search: str | None = Query(None, max_length=120),
+    agency: str | None = None,
+    registry_number: str | None = None,
+    supplier_cnpj: str | None = None,
+    valid_on: date | None = Query(None),
+    db: AsyncSession = Depends(get_db),
+):
+    """List atas de registro de preços with vigência and supplier filters."""
+
+    normalized_supplier = normalize_cnpj(supplier_cnpj) if supplier_cnpj else None
+    result = await PriceRegistryRepository(db).list_filtered(
+        page=1,
+        page_size=200,
+        search=search,
+        agency=agency,
+        registry_number=registry_number,
+        supplier_cnpj=normalized_supplier,
+        valid_on=valid_on,
+    )
+    registries = [
+        SimpleNamespace(
+            id=item.id,
+            registry_number=_display_text(item.registry_number),
+            year=_display_text(item.year),
+            agency_name=_display_text(item.agency_name),
+            object_description=_display_text(item.object_description),
+            status=_display_text(item.status),
+            valid_from=_procurement_datetime(item.valid_from),
+            valid_until=_procurement_datetime(item.valid_until),
+            total_value=_brl(item.total_value),
+            source=item.source,
+        )
+        for item in result.items
+    ]
+    return templates.TemplateResponse(
+        request,
+        "atas.html",
+        {
+            "registries": registries,
+            "filters": SimpleNamespace(
+                search=search,
+                agency=agency,
+                registry_number=registry_number,
+                supplier_cnpj=supplier_cnpj,
+                valid_on=valid_on.isoformat() if valid_on else "",
+            ),
+        },
+    )
+
+
+@router.get("/atas/{registry_id}")
+async def price_registry_page(
+    request: Request,
+    registry_id: UUID,
+    db: AsyncSession = Depends(get_db),
+):
+    """Show one ata with its registered items/suppliers and provenance."""
+
+    registry = await PriceRegistryRepository(db).get_detail(registry_id)
+    if registry is None:
+        raise HTTPException(status_code=404, detail="Ata não encontrada")
+    return templates.TemplateResponse(
+        request,
+        "ata_detail.html",
+        {
+            "registry": SimpleNamespace(
+                registry_number=_display_text(registry.registry_number),
+                year=_display_text(registry.year),
+                agency_name=_display_text(registry.agency_name),
+                agency_cnpj=_format_cnpj(registry.agency_cnpj),
+                uasg=_display_text(registry.uasg),
+                object_description=_display_text(registry.object_description),
+                status=_display_text(registry.status),
+                signed_at=_procurement_datetime(registry.signed_at),
+                published_at=_procurement_datetime(registry.published_at),
+                valid_from=_procurement_datetime(registry.valid_from),
+                valid_until=_procurement_datetime(registry.valid_until),
+                total_value=_brl(registry.total_value),
+                allows_adhesion=(
+                    "Sim"
+                    if registry.allows_adhesion
+                    else ("Não" if registry.allows_adhesion is not None else "Não informado")
+                ),
+                pncp_control_number=_display_text(registry.pncp_control_number),
+                linked_control_number=_display_text(registry.linked_pncp_control_number),
+                procurement_id=registry.procurement_id,
+                source_url=registry.source_url,
+                source=registry.source,
+            ),
+            "items": [
+                SimpleNamespace(
+                    item_number=_display_text(item.item_number),
+                    description=_display_text(item.description),
+                    unit=_display_text(item.unit),
+                    quantity=_quantity_with_unit(item.quantity, None),
+                    unit_value=_brl(item.unit_value),
+                    total_value=_brl(item.total_value),
+                    max_adhesion=_quantity_with_unit(item.max_adhesion_quantity, None),
+                    supplier_name=_display_text(item.supplier_name),
+                    supplier_cnpj=item.supplier_cnpj,
+                    supplier_cnpj_label=_format_cnpj(item.supplier_cnpj),
+                    company_id=item.company_id,
+                )
+                for item in registry.items
+            ],
+        },
+    )
 
 
 @router.get("/leads")

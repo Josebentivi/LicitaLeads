@@ -1,6 +1,6 @@
 # Matriz de capacidades das fontes oficiais
 
-Auditoria técnica registrada em **2026-09-16**.
+Auditoria técnica registrada em **2026-10-06**.
 Esta matriz é gerada pelo mesmo registro usado por `GET /api/source-capabilities`.
 
 ## PNCP
@@ -13,8 +13,10 @@ Documentação oficial: <https://pncp.gov.br/manual/pt-br/latest/>
 | Contratações com propostas abertas | `partial` | `GET /api/consulta/v1/contratacoes/proposta` | Lista processos que recebem propostas, não propostas ou proponentes. |
 | Detalhe, itens e documentos | `available` | `GET /api/consulta/v1/orgaos/{cnpj}/compras/{ano}/{sequencial}`<br>`GET /api/pncp/v1/orgaos/{cnpj}/compras/{ano}/{sequencial}/itens`<br>`GET /api/pncp/v1/orgaos/{cnpj}/compras/{ano}/{sequencial}/arquivos` | Detalhe usa Consulta; itens e arquivos usam os GET públicos de Integração. |
 | Resultados homologados | `available` | `GET /api/pncp/v1/orgaos/{cnpj}/compras/{ano}/{sequencial}/itens/{numeroItem}/resultados` | Identifica fornecedor adjudicado/homologado; não é o rol de participantes. |
+| SRP e amparo legal da contratação | `available` | — | As respostas de contratação publicam o booleano srp e o amparo legal (código/nome), permitindo filtrar registro de preços e rota de contratação. |
+| Atas de registro de preços | `available` | `GET /api/consulta/v1/atas`<br>`GET /api/consulta/v1/atas/atualizacao` | Consulta pública por período com cnpj/código de unidade opcionais; o detalhe da ata (itens/fornecedor) não é publicado por esta API. |
 | Participantes, inabilitação, desclassificação e recursos | `document_only` | — | Somente documentos oficiais com trecho e localizador podem comprovar esses fatos. |
-| Eventos da sessão | `not_supported` | — | O endpoint histórico registra manutenção técnica, não eventos jurídicos da sessão. |
+| Eventos da sessão | `not_supported` | — | O endpoint historico registra manutenção técnica, não eventos jurídicos da sessão. |
 
 ### Contratos auditados
 
@@ -25,6 +27,8 @@ Documentação oficial: <https://pncp.gov.br/manual/pt-br/latest/>
 - `GET /api/pncp/v1/orgaos/{cnpj}/compras/{ano}/{sequencial}/itens` — parâmetros: nenhum; autenticação de leitura: não.
 - `GET /api/pncp/v1/orgaos/{cnpj}/compras/{ano}/{sequencial}/arquivos` — parâmetros: nenhum; autenticação de leitura: não.
 - `GET /api/pncp/v1/orgaos/{cnpj}/compras/{ano}/{sequencial}/itens/{numeroItem}/resultados` — parâmetros: nenhum; autenticação de leitura: não.
+- `GET /api/consulta/v1/atas` — parâmetros: `dataInicial`, `dataFinal`, `idUsuario`, `cnpj`, `codigoUnidadeAdministrativa`, `pagina`, `tamanhoPagina`; máximo por página: 50; autenticação de leitura: não.
+- `GET /api/consulta/v1/atas/atualizacao` — parâmetros: `dataInicial`, `dataFinal`, `idUsuario`, `cnpj`, `codigoUnidadeAdministrativa`, `pagina`, `tamanhoPagina`; máximo por página: 50; autenticação de leitura: não.
 
 Limitações confirmadas: “propostas abertas” lista processos, e o resultado homologado identifica vencedor/adjudicatário. Participantes perdedores, habilitação, inabilitação, desclassificação, recursos, contrarrazões e estado completo da sessão não possuem feed estruturado público confirmado e exigem documento oficial como evidência. Documentos PNCP também podem ser publicados em ZIP.
 
@@ -38,6 +42,8 @@ Documentação oficial: <https://dadosabertos.compras.gov.br/swagger-ui/index.ht
 | Itens e resultados homologados | `available` | `GET /modulo-contratacoes/2.1_consultarItensContratacoes_PNCP_14133_Id`<br>`GET /modulo-contratacoes/3.1_consultarResultadoItensContratacoes_PNCP_14133_Id` | Fornecedor de resultado é adjudicado/homologado, não participante presumido. |
 | Documentos | `not_supported` | — | Nenhum endpoint de documentos foi encontrado no OpenAPI auditado. |
 | Participantes, propostas, habilitação e recursos | `not_supported` | — | Não há feed estruturado público confirmado; usar documentos oficiais do PNCP. |
+| SRP e amparo legal da contratação | `available` | — | O módulo de contratações publica srp, amparoLegalCodigoPncp, amparoLegalNome e amparoLegalDescricao. |
+| Atas de registro de preços (ARP) | `available` | `GET /modulo-arp/1_consultarARP`<br>`GET /modulo-arp/1.1_consultarARP_Id`<br>`GET /modulo-arp/2_consultarARPItem`<br>`GET /modulo-arp/2.1_consultarARPItem_Id` | Módulo ARP oficial com ata, itens, fornecedor e adesões; não substitui a proveniência do recurso original. |
 | UASG, fornecedores, ARP, contratos e OCDS | `available` | — | Módulos oficiais existem, mas não substituem a proveniência do recurso original. |
 
 ### Contratos auditados
@@ -46,6 +52,10 @@ Documentação oficial: <https://dadosabertos.compras.gov.br/swagger-ui/index.ht
 - `GET /modulo-contratacoes/1.1_consultarContratacoes_PNCP_14133_Id` — parâmetros: `tipo`, `codigo`; autenticação de leitura: não.
 - `GET /modulo-contratacoes/2.1_consultarItensContratacoes_PNCP_14133_Id` — parâmetros: `tipo`, `codigo`; autenticação de leitura: não.
 - `GET /modulo-contratacoes/3.1_consultarResultadoItensContratacoes_PNCP_14133_Id` — parâmetros: `tipo`, `codigo`; autenticação de leitura: não.
+- `GET /modulo-arp/1_consultarARP` — parâmetros: `pagina`, `tamanhoPagina`, `codigoUnidadeGerenciadora`, `codigoModalidadeCompra`, `numeroAtaRegistroPreco`, `dataVigenciaInicialMin`, `dataVigenciaInicialMax`, `dataAssinaturaInicial`, `dataAssinaturaFinal`; máximo por página: 500; autenticação de leitura: não.
+- `GET /modulo-arp/1.1_consultarARP_Id` — parâmetros: `numeroControlePncpAta`, `dataAtualizacao`; autenticação de leitura: não.
+- `GET /modulo-arp/2_consultarARPItem` — parâmetros: `pagina`, `tamanhoPagina`, `codigoUnidadeGerenciadora`, `codigoModalidadeCompra`, `dataVigenciaInicialMin`, `dataVigenciaInicialMax`, `numeroItem`, `codigoItem`, `tipoItem`, `niFornecedor`, `codigoPdm`, `numeroCompra`; máximo por página: 500; autenticação de leitura: não.
+- `GET /modulo-arp/2.1_consultarARPItem_Id` — parâmetros: `numeroControlePncpAta`, `dataAtualizacao`; autenticação de leitura: não.
 
 O OpenAPI também expõe módulos `legado`, `uasg`, `fornecedor`, `arp`, `contratos` e `ocds`. Não há endpoint confirmado para documentos, propostas individuais, participantes completos, habilitação, recursos ou contrarrazões.
 
@@ -56,6 +66,4 @@ O OpenAPI também expõe módulos `legado`, `uasg`, `fornecedor`, `arp`, `contra
 - Os códigos de modalidade são específicos de cada fonte: pregão eletrônico é PNCP `6` e Compras.gov.br `5`.
 - CNPJ numérico e alfanumérico de 14 posições são validados com os dígitos verificadores oficiais; CPF não é usado para enriquecimento.
 - `empty`, `not_supported`, `not_published`, `access_restricted` e `temporary_error` têm semânticas distintas no conector.
-- Limites globais de requisição não foram publicados; o cliente trata 429, `Retry-After` e falhas temporárias com backoff conservador e intervalo mínimo configurável entre requisições (`HTTP_MIN_REQUEST_INTERVAL_SECONDS`).
-
-O comando `python -m app.cli audit-sources` compara os OpenAPI vivos com os contratos conhecidos e salva um relatório datado, sem alterar esta matriz automaticamente.
+- Limites globais de requisição não foram publicados; o cliente trata 429, `Retry-After` e falhas temporárias com backoff conservador e ritmo mínimo configurável entre requisições.

@@ -110,6 +110,8 @@ Consulte a [matriz de fontes](docs/matriz_de_fontes.md) e o
 python -m app.cli audit-sources
 python -m app.cli crawl pncp --uf MA --days 7
 python -m app.cli crawl compras-gov --uf MA --days 7
+python -m app.cli crawl-atas all --days 365
+python -m app.cli backfill-fields
 python -m app.cli process-documents
 python -m app.cli detect-events
 python -m app.cli calculate-deadlines
@@ -146,9 +148,15 @@ para disco local ou use PostgreSQL.
 
 ## Fontes e limitações
 
-- PNCP fornece contratações, itens, documentos e resultados publicados.
-- Compras.gov.br fornece contratações, itens, resultados, fornecedores, atas de registro de preços e
-  contratos, mas não documentos da sessão.
+- PNCP fornece contratações, itens, documentos, resultados publicados e atas de
+  registro de preços (cabeçalho).
+- Compras.gov.br fornece contratações, itens, resultados, fornecedores, atas de registro de preços
+  (com itens e fornecedores) e contratos, mas não documentos da sessão.
+- Filtros de contratações usam a rota da Lei 14.133/2021 (licitação, contratação
+  direta e procedimentos auxiliares), SRP, amparo legal e faixa de valor;
+  `python -m app.cli backfill-fields` recupera esses campos de coletas antigas.
+- A página `/empresas` consolida participações e eventos por CNPJ; desclassificação,
+  inabilitação e recursos dependem de documentos oficiais e podem exigir revisão.
 - Resultado homologado não equivale à lista de participantes.
 - Inabilitação, desclassificação e recursos normalmente dependem de documentos.
 - PDF escaneado é marcado `ocr_required` quando não há OCR configurado.

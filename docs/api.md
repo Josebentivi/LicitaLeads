@@ -30,8 +30,60 @@ Resposta: `status` (`ok`/`degraded`), `version`, `database`, `scheduler`
 | `GET /api/procurements/{id}/events` | Eventos detectados |
 
 Filtros de `GET /api/procurements`: `page`, `page_size` (1–200), `uf`,
-`municipality`, `agency`, `modality`, `published_from`, `published_to` e
-`status` (alias de `procurement_status`).
+`municipality`, `agency`, `modality` (repetível; chave canônica ou rótulo da
+fonte), `published_from`, `published_to`, `status` (alias de
+`procurement_status`), `status_category` (`aberta`, `encerrada`, `cancelada`,
+`suspensa`, `desconhecida`), `procurement_type` (`licitacao`,
+`contratacao_direta`, `procedimento_auxiliar`), `is_srp` (`true`/`false`) e
+`value_min`/`value_max` (valor estimado).
+
+Cada contratação expõe `procurement_type` derivado da modalidade, `is_srp` e
+`legal_basis` (amparo legal publicado pela fonte) — quando a fonte não publica
+o campo, ele permanece nulo, nunca inferido. O comando
+`python -m app.cli backfill-fields` recupera esses campos de respostas brutas
+já armazenadas, sem novo crawl.
+
+## Empresas
+
+| Método e rota | Descrição |
+|---|---|
+| `GET /api/companies` | Lista empresas com contadores auditáveis (`search`, `uf`) |
+| `GET /api/companies/{cnpj}` | Empresa + contadores de participação |
+| `GET /api/companies/{cnpj}/participations` | Histórico de participações com contexto da contratação |
+| `GET /api/companies/{cnpj}/events` | Eventos documentais atribuídos à empresa |
+
+Filtros de `participations`: `status` (repetível; `winner`, `awarded`,
+`participant`, `disqualified`, `ineligible`, `unknown`), `uf`, `agency`,
+`modality`, `procurement_type`, `is_srp`, `value_min`/`value_max`,
+`date_from`/`date_to` e `active_only` (processos com proposta aberta).
+
+Filtros de `events`: `event_type`, `reason_category`, `requires_manual_review`,
+`date_from`/`date_to`.
+
+Os contadores refletem apenas fatos comprovados: resultados homologados das
+APIs e eventos/participações extraídos de documentos oficiais com evidência.
+Cobertura é parcial e a UI sinaliza revisão pendente; ausência de evento nunca
+é interpretada como fato negativo.
+
+## Atas de registro de preços (ARP)
+
+| Método e rota | Descrição |
+|---|---|
+| `GET /api/price-registries` | Lista atas com vigência, órgão e fornecedor |
+| `GET /api/price-registries/{id}` | Ata + itens registrados, fornecedores e contratação vinculada |
+| `GET /api/price-registries/{id}/items` | Itens registrados da ata |
+
+Filtros de `GET /api/price-registries`: `page`, `page_size`, `search`
+(objeto/número/órgão), `agency`, `agency_cnpj`, `registry_number`, `status`,
+`supplier_cnpj` e `valid_on` (atas vigentes na data).
+
+O cabeçalho da ata vem do PNCP (`/v1/atas`); itens e fornecedores vêm do
+módulo ARP do Compras.gov.br quando publicados. O PNCP não publica itens de
+ata: nesse caso o campo permanece ausente, nunca inferido.
+
+Para coletar, use `mode: "price_registries"` em `POST /api/crawls/run` ou
+`python -m app.cli crawl-atas`. O `valid_on`/vigência usam o período
+informado (`days`/`start_date`+`end_date`).
 
 ## Leads
 
@@ -61,8 +113,9 @@ Sem URL pública rastreável, responde `409`.
 | `GET /api/crawls/{id}` | Detalhe de uma execução |
 
 Corpo de `POST /api/crawls/run`: `connector` (`pncp`, `compras_gov`, `all`),
-`uf`, `days` (ou `start_date`+`end_date`), `modalities`, `municipality`,
-`agency`, `keyword`, `document_batch_size`.
+`mode` (`procurements` ou `price_registries`), `uf`, `days` (ou
+`start_date`+`end_date`), `modalities`, `municipality`, `agency`, `keyword`,
+`document_batch_size`.
 
 ## Contatos
 
@@ -118,8 +171,12 @@ As páginas não aparecem no Swagger (`include_in_schema=False`).
 |---|---|
 | `/` | Redireciona para `/dashboard` |
 | `/dashboard` | Métricas operacionais e últimos leads |
-| `/procurements` | Lista com filtros de UF, município e órgão |
+| `/procurements` | Lista com filtros de UF, município, órgão, modalidade, rota de contratação, situação, SRP e faixa de valor |
 | `/procurements/{id}` | Detalhe: itens, documentos, participantes, eventos e vínculo manual de empresa |
+| `/empresas` | Lista de empresas com contadores de participação, adjudicação, desclassificação e inabilitação |
+| `/empresas/{cnpj}` | Histórico de participações e eventos com selo de origem, confiança e revisão |
+| `/atas` | Lista de atas de registro de preços com filtros de órgão, número, fornecedor e vigência |
+| `/atas/{id}` | Detalhe da ata com itens, fornecedores, valores e vínculo com a contratação |
 | `/leads` | Lista com filtros de score, tipo de evento e revisão pendente |
 | `/leads/{id}` | Detalhe do lead, evidências e último rascunho |
 | `/crawls` e `/crawls/table` | Execuções por fonte, com fragmento HTMX repollado e retry por fonte |

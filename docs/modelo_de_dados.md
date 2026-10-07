@@ -43,7 +43,7 @@ CrawlRun --> SourceRecord (payload bruto, hash, endpoint, disponibilidade)
 
 | Entidade | Papel | Pontos-chave |
 |---|---|---|
-| `Procurement` | Contratação canônica | `pncp_control_number` único; dedup por fonte+`external_id`; índice composto (órgão, UASG, número, ano, modalidade) |
+| `Procurement` | Contratação canônica | `pncp_control_number` único; dedup por fonte+`external_id`; índice composto (órgão, UASG, número, ano, modalidade); `procurement_type` (`licitacao`/`contratacao_direta`/`procedimento_auxiliar`), `is_srp` e `legal_basis` observados da fonte |
 | `CrawlRun` | Execução de coleta | status, contadores, filtros e diagnósticos por fonte no `cursor` |
 | `SourceRecord` | Resposta bruta | raiz de auditoria |
 | `ProcurementSource` | Vínculo de origem | um registro por fonte+`external_id` |
@@ -53,12 +53,14 @@ CrawlRun --> SourceRecord (payload bruto, hash, endpoint, disponibilidade)
 | `Document` | Documento oficial | URL original, hash do arquivo, status de extração, caminho local, pai/filho para ZIPs |
 | `DocumentChunk` | Trecho extraído | localizador para citar evidência |
 | `Evidence` | Prova | trecho literal + rastreabilidade obrigatória |
-| `Participant` | Participante/vencedor | papel, item, valor, confiança e evidência |
+| `Participant` | Participante/vencedor | papel, item, valor, confiança e evidência; `status_code` normaliza o desfecho (`winner`/`awarded`/`participant`/`disqualified`/`ineligible`) mantendo o texto bruto em `status` |
 | `ProcurementEvent` | Evento jurídico | tipo, motivo normalizado/categoria, confiança, revisão manual, evidência |
 | `Deadline` | Prazo | método de cálculo, prazo explícito/estimado, status e explicação textual |
 | `CompanyContact` | Contato corporativo | único por empresa+tipo+valor; `is_corporate`/`is_personal` mutuamente exclusivos |
 | `Lead` | Oportunidade | score 0–100 decomposto; vínculo com evento, prazo, empresa e processo |
 | `LeadReview` | Decisão humana | `approved`, `rejected`, `needs_changes`, com autor e notas |
+| `PriceRegistry` | Ata de registro de preços | cabeçalho oficial (PNCP/Compras): número, ano, órgão, vigência, valores, vínculo com a contratação (`linked_pncp_control_number`) |
+| `PriceRegistryItem` | Item registrado da ata | único por ata+item+fornecedor; descrição, quantidades, valores, fornecedor (empresa por CNPJ validado) e adesão máxima |
 | `OutreachDraft` | Rascunho | `facts_hash`/`template_hash` para idempotência; `sent` exige `approved` |
 | `JobLease` | Lease de job | evita execução concorrente do scheduler/pipeline |
 
@@ -84,6 +86,8 @@ CrawlRun --> SourceRecord (payload bruto, hash, endpoint, disponibilidade)
 | `ProcurementEventType` | `PROPOSAL_SUBMITTED`, `PROPOSAL_ACCEPTED`, `PROPOSAL_REJECTED`, `DISQUALIFIED`, `QUALIFIED`, `INELIGIBLE`, `INTENT_TO_APPEAL`, `APPEAL_SUBMITTED`, `COUNTERARGUMENT_OPENED`, `COUNTERARGUMENT_SUBMITTED`, `APPEAL_DECIDED`, `WINNER_DECLARED`, `ADJUDICATED`, `HOMOLOGATED`, `SESSION_SUSPENDED`, `SESSION_REOPENED`, `UNKNOWN` |
 | `ReasonCategory` | `TECHNICAL_SPECIFICATION`, `MISSING_DOCUMENT`, `INVALID_DOCUMENT`, `FISCAL_REGULARITY`, `LABOR_REGULARITY`, `ECONOMIC_FINANCIAL`, `TECHNICAL_QUALIFICATION`, `PRICE_INEXEQUIBILITY`, `PRICE_ABOVE_ESTIMATE`, `LATE_SUBMISSION`, `PROPOSAL_FORMAT`, `SAMPLE_REJECTED`, `BRAND_OR_MODEL_NONCOMPLIANT`, `FAILURE_TO_RESPOND`, `OTHER`, `UNKNOWN` |
 | `ParticipantRole` | `participant`, `winner`, `awarded`, `contractor`, `unknown` |
+| `ParticipantStatus` | `winner`, `awarded`, `participant`, `disqualified`, `ineligible`, `unknown` |
+| `ContractingType` | `licitacao`, `contratacao_direta`, `procedimento_auxiliar` |
 | `ExtractionStatus` | `pending`, `extracted`, `ocr_required`, `failed`, `unsupported` |
 | `DeadlineCalculationMethod` | `EXPLICIT`, `DOCUMENT_EXTRACTED`, `EDITAL_RULE`, `LEGAL_ESTIMATE`, `MANUAL`, `UNKNOWN` |
 | `DeadlineStatus` | `OPEN`, `DUE_TODAY`, `DUE_WITHIN_24H`, `EXPIRED`, `UNKNOWN`, `REQUIRES_REVIEW` |

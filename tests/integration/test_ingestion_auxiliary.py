@@ -32,6 +32,8 @@ async def test_source_audit_merges_pncp_contracts_and_writes_dated_report(
                     "/v1/contratacoes/publicacao": {},
                     "/v1/contratacoes/atualizacao": {},
                     "/v1/contratacoes/proposta": {},
+                    "/v1/atas": {},
+                    "/v1/atas/atualizacao": {},
                     "/v1/orgaos/{cnpj}/compras/{ano}/{sequencial}": {},
                 }
             },
@@ -54,6 +56,10 @@ async def test_source_audit_merges_pncp_contracts_and_writes_dated_report(
         "/modulo-contratacoes/1.1_consultarContratacoes_PNCP_14133_Id": {},
         "/modulo-contratacoes/2.1_consultarItensContratacoes_PNCP_14133_Id": {},
         "/modulo-contratacoes/3.1_consultarResultadoItensContratacoes_PNCP_14133_Id": {},
+        "/modulo-arp/1_consultarARP": {},
+        "/modulo-arp/1.1_consultarARP_Id": {},
+        "/modulo-arp/2_consultarARPItem": {},
+        "/modulo-arp/2.1_consultarARPItem_Id": {},
     }
     respx.get("https://dadosabertos.compras.gov.br/v3/api-docs").mock(
         return_value=httpx.Response(200, json={"paths": compras_paths})

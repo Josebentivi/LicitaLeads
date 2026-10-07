@@ -14,7 +14,11 @@ from sqlalchemy.orm import selectinload
 from app.config import get_settings
 from app.database import async_session_factory
 from app.models import Lead
-from app.services.ingestion import IngestionPipeline, PipelineRequest
+from app.services.ingestion import (
+    IngestionPipeline,
+    PipelineRequest,
+    backfill_procurement_fields,
+)
 from app.services.ingestion.audit import audit_sources as run_source_audit
 from app.services.ingestion.contacts import ContactEnrichmentService
 from app.services.ingestion.processor import DocumentProcessingService
@@ -86,6 +90,51 @@ def crawl(
     typer.echo(
         f"run={result.run_id} status={result.status.value} encontrados={result.records_found} "
         f"criados={result.records_created} atualizados={result.records_updated}"
+    )
+    if result.diagnostics:
+        typer.echo("Diagnósticos: " + " | ".join(result.diagnostics), err=True)
+
+
+@app.command("crawl-atas")
+def crawl_atas(
+    source: Annotated[str, typer.Argument(help="pncp, compras-gov ou all")] = "all",
+    days: Annotated[int, typer.Option("--days", min=1, max=3650)] = 365,
+    max_pages: Annotated[int | None, typer.Option("--max-pages", min=1)] = None,
+) -> None:
+    """Coleta atas de registro de preços (ARP) e itens publicados."""
+
+    normalized = source.strip().lower().replace("-", "_")
+    if normalized != "all":
+        normalized = _source(normalized)
+    request = PipelineRequest(
+        connector=normalized,
+        mode="price_registries",
+        days=days,
+        process_documents=False,
+        max_pages=max_pages,
+    )
+    result = asyncio.run(IngestionPipeline().run(request))
+    typer.echo(
+        f"run={result.run_id} status={result.status.value} encontrados={result.records_found} "
+        f"criados={result.records_created} atualizados={result.records_updated}"
+    )
+    if result.diagnostics:
+        typer.echo("Diagnósticos: " + " | ".join(result.diagnostics), err=True)
+
+
+@app.command("backfill-fields")
+def backfill_fields(
+    limit: Annotated[
+        int | None,
+        typer.Option("--limit", min=1, help="Máximo de respostas brutas a examinar."),
+    ] = None,
+) -> None:
+    """Recupera SRP/amparo legal/rota de contratação dos payloads já coletados."""
+
+    result = asyncio.run(backfill_procurement_fields(limit=limit))
+    typer.echo(
+        f"respostas={result.scanned_records} contratações_atualizadas="
+        f"{result.updated_procurements} ignoradas={result.skipped}"
     )
     if result.diagnostics:
         typer.echo("Diagnósticos: " + " | ".join(result.diagnostics), err=True)

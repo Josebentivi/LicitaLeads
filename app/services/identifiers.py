@@ -5,6 +5,8 @@ from __future__ import annotations
 import re
 import unicodedata
 
+from app.models.enums import ParticipantStatus
+
 _CNPJ_PATTERN = re.compile(r"^[A-Z0-9]{12}[0-9]{2}$")
 _NON_ALNUM = re.compile(r"[^A-Z0-9]+")
 _NAME_NON_ALNUM = re.compile(r"[^A-Z0-9]+")
@@ -103,6 +105,57 @@ def normalize_company_name(value: str | None, *, strip_legal_suffix: bool = True
     return " ".join(tokens) or None
 
 
+PROCUREMENT_TYPE_LICITACAO = "licitacao"
+PROCUREMENT_TYPE_CONTRATACAO_DIRETA = "contratacao_direta"
+PROCUREMENT_TYPE_PROCEDIMENTO_AUXILIAR = "procedimento_auxiliar"
+
+_MODALITY_ALIASES: dict[str, str] = {
+    # Labels with explanatory suffixes are reduced to the shared filter key.
+    "dispensa_de_licitacao": "dispensa",
+    "dispensa_de_licitacao_eletronica": "dispensa_eletronica",
+    "inexigibilidade_de_licitacao": "inexigibilidade",
+}
+
+_MODALITY_CATEGORIES: dict[str, str] = {
+    # Modalidades do art. 28 da Lei 14.133/2021, incluindo as variações
+    # eletrônica/presencial publicadas pelas fontes.
+    "pregao_eletronico": PROCUREMENT_TYPE_LICITACAO,
+    "pregao_presencial": PROCUREMENT_TYPE_LICITACAO,
+    "pregao": PROCUREMENT_TYPE_LICITACAO,
+    "concorrencia": PROCUREMENT_TYPE_LICITACAO,
+    "concorrencia_eletronica": PROCUREMENT_TYPE_LICITACAO,
+    "concorrencia_presencial": PROCUREMENT_TYPE_LICITACAO,
+    "concurso": PROCUREMENT_TYPE_LICITACAO,
+    "leilao": PROCUREMENT_TYPE_LICITACAO,
+    "leilao_eletronico": PROCUREMENT_TYPE_LICITACAO,
+    "leilao_presencial": PROCUREMENT_TYPE_LICITACAO,
+    "dialogo_competitivo": PROCUREMENT_TYPE_LICITACAO,
+    "convite": PROCUREMENT_TYPE_LICITACAO,
+    "tomada_de_precos": PROCUREMENT_TYPE_LICITACAO,
+    # Contratação direta (arts. 74 e 75).
+    "dispensa": PROCUREMENT_TYPE_CONTRATACAO_DIRETA,
+    "dispensa_eletronica": PROCUREMENT_TYPE_CONTRATACAO_DIRETA,
+    "inexigibilidade": PROCUREMENT_TYPE_CONTRATACAO_DIRETA,
+    # Procedimentos auxiliares (art. 78).
+    "credenciamento": PROCUREMENT_TYPE_PROCEDIMENTO_AUXILIAR,
+    "pre_qualificacao": PROCUREMENT_TYPE_PROCEDIMENTO_AUXILIAR,
+    "manifestacao_de_interesse": PROCUREMENT_TYPE_PROCEDIMENTO_AUXILIAR,
+}
+
+
+def modality_category(value: str | None) -> str | None:
+    """Map a raw modality label to the Lei 14.133/2021 contracting category.
+
+    Returns ``None`` for labels that cannot be classified deterministically;
+    callers must preserve that as unknown instead of guessing.
+    """
+
+    key = canonical_modality(value)
+    if key is None:
+        return None
+    return _MODALITY_CATEGORIES.get(key)
+
+
 def canonical_modality(value: str | None) -> str | None:
     """Normalize a source modality label into the shared filter key.
 
@@ -119,7 +172,8 @@ def canonical_modality(value: str | None) -> str | None:
     tokens = [token for token in re.sub(r"[^a-z0-9]+", " ", normalized).split() if token]
     if not tokens:
         return None
-    return "_".join(tokens)
+    key = "_".join(tokens)
+    return _MODALITY_ALIASES.get(key, key)
 
 
 def cnpj_fingerprint(value: str) -> str:
@@ -130,3 +184,27 @@ def cnpj_fingerprint(value: str) -> str:
         raise ValueError("invalid CNPJ")
     assert normalized is not None
     return normalized
+
+
+def participant_status_code(role: str | None, status: str | None) -> ParticipantStatus:
+    """Normalize a participation outcome for auditable filtering.
+
+    The raw source/detection text is preserved in ``Participant.status``; this
+    helper only maps it to the canonical enum used by filters.
+    """
+
+    normalized = _strip_accents(status or "").lower()
+    if "inabilit" in normalized or "ineligible" in normalized:
+        return ParticipantStatus.INELIGIBLE
+    if "desclassific" in normalized or "disqualified" in normalized:
+        return ParticipantStatus.DISQUALIFIED
+    role_key = (role or "").strip().lower()
+    if role_key == "winner":
+        return ParticipantStatus.WINNER
+    if role_key == "awarded":
+        return ParticipantStatus.AWARDED
+    if role_key == "participant":
+        return ParticipantStatus.PARTICIPANT
+    if "vencedor" in normalized or "homologad" in normalized or "adjudicad" in normalized:
+        return ParticipantStatus.AWARDED
+    return ParticipantStatus.UNKNOWN

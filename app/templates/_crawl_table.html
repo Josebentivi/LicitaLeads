@@ -18,6 +18,7 @@
         <tr>
           <td>
             <strong>{{ run.connector_label }}</strong>
+            {% if run.mode_label %}<span class="badge">{{ run.mode_label }}</span>{% endif %}
             <small title="{{ run.id }}">{{ run.id|string|truncate(13, True, '…') }}</small>
           </td>
           <td class="date-cell">

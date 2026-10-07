@@ -49,6 +49,8 @@ async def test_pncp_discovery_paginates_filters_and_deduplicates() -> None:
         "modalidadeId": 6,
         "modalidadeNome": "Pregão - Eletrônico",
         "valorTotalEstimado": 1000.25,
+        "srp": True,
+        "amparoLegal": {"codigo": 1, "nome": "Lei 14.133/2021, art. 75, inciso I"},
         "dataPublicacaoPncp": "2026-09-15T10:00:00",
         "dataAtualizacaoGlobal": "2026-09-15T11:00:00",
         "situacaoCompraNome": "Divulgada no PNCP",
@@ -85,12 +87,70 @@ async def test_pncp_discovery_paginates_filters_and_deduplicates() -> None:
     assert len(result.data) == 1
     assert result.data[0].agency_cnpj == "ABC123450001ZZ"
     assert result.data[0].modality_code == 6
+    assert result.data[0].is_srp is True
+    assert result.data[0].legal_basis == "Lei 14.133/2021, art. 75, inciso I"
     assert result.data[0].publication_at is not None
     assert result.data[0].publication_at.utcoffset().total_seconds() == 0
     assert len(result.raw_records) == 2
     assert result.pagination is not None and result.pagination.fetched_pages == 2
     assert all(request.url.params["codigoModalidadeContratacao"] == "6" for request in requests)
     assert requests[0].url.params["dataInicial"] == "20260915"
+    await raw_client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_pncp_price_registry_discovery_maps_audited_fields() -> None:
+    requests: list[httpx.Request] = []
+    row = {
+        "numeroControlePNCPAta": "12345678000199-1-000001/2026",
+        "numeroControlePNCPCompra": "12345678000199-1-000002/2026",
+        "numeroAtaRegistroPreco": "0001",
+        "anoAta": 2026,
+        "cnpjOrgao": "12345678000199",
+        "nomeOrgao": "Órgão de Exemplo",
+        "codigoUnidadeOrgao": "980921",
+        "objetoContratacao": "Registro de preços de cadeiras",
+        "vigenciaInicio": "2026-01-01",
+        "vigenciaFim": "2026-12-31",
+        "dataAssinatura": "2026-01-01",
+        "dataPublicacaoPncp": "2026-01-02T10:00:00",
+        "possibilidadeAdesao": True,
+        "cancelado": False,
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(
+            200,
+            json={"data": [row], "totalPaginas": 1, "totalRegistros": 1},
+            request=request,
+        )
+
+    raw_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    connector = PNCPConnector(
+        _settings(), http_client=AsyncHTTPClient(_settings(), client=raw_client)
+    )
+    result = await connector.discover_price_registries(
+        ProcurementFilters(start_date=date(2026, 1, 1), end_date=date(2026, 1, 31))
+    )
+
+    assert result.availability is DataAvailability.AVAILABLE
+    assert len(result.data) == 1
+    registry = result.data[0]
+    assert registry.external_id == "12345678000199-1-000001/2026"
+    assert registry.pncp_control_number == "12345678000199-1-000001/2026"
+    assert registry.linked_pncp_control_number == "12345678000199-1-000002/2026"
+    assert registry.registry_number == "0001"
+    assert registry.agency_cnpj == "12345678000199"
+    assert registry.uasg == "980921"
+    assert registry.valid_from is not None and registry.valid_until is not None
+    assert registry.allows_adhesion is True
+    assert registry.status is None
+    assert requests[0].url.params["dataInicial"] == "20260101"
+    assert "codigoModalidadeContratacao" not in requests[0].url.params
+
+    items = await connector.fetch_price_registry_items(registry.external_id)
+    assert items.availability is DataAvailability.NOT_SUPPORTED
     await raw_client.aclose()
 
 

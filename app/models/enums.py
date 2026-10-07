@@ -70,6 +70,25 @@ class ParticipantRole(StrEnum):
     UNKNOWN = "unknown"
 
 
+class ContractingType(StrEnum):
+    """Lei 14.133/2021 contracting route derived from the canonical modality."""
+
+    LICITACAO = "licitacao"
+    CONTRATACAO_DIRETA = "contratacao_direta"
+    PROCEDIMENTO_AUXILIAR = "procedimento_auxiliar"
+
+
+class ParticipantStatus(StrEnum):
+    """Normalized participation outcome; raw source text is kept separately."""
+
+    WINNER = "winner"
+    AWARDED = "awarded"
+    PARTICIPANT = "participant"
+    DISQUALIFIED = "disqualified"
+    INELIGIBLE = "ineligible"
+    UNKNOWN = "unknown"
+
+
 class ExtractionStatus(StrEnum):
     PENDING = "pending"
     EXTRACTED = "extracted"

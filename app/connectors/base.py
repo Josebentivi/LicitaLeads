@@ -192,6 +192,8 @@ class RawProcurement(TraceableModel):
     municipality_code: str | None = None
     estimated_value: Decimal | None = None
     homologated_value: Decimal | None = None
+    is_srp: bool | None = None
+    legal_basis: str | None = None
     proposal_start_at: datetime | None = None
     proposal_end_at: datetime | None = None
     session_start_at: datetime | None = None
@@ -273,6 +275,43 @@ class RawEvent(TraceableModel):
     requires_manual_review: bool = False
 
 
+class RawPriceRegistry(TraceableModel):
+    """Source-shaped price registry (ata de registro de preços) header."""
+
+    external_id: str
+    pncp_control_number: str | None = None
+    linked_pncp_control_number: str | None = None
+    registry_number: str | None = None
+    year: int | None = None
+    agency_name: str | None = None
+    agency_cnpj: str | None = None
+    uasg: str | None = None
+    object_description: str | None = None
+    status: str | None = None
+    signed_at: datetime | None = None
+    published_at: datetime | None = None
+    valid_from: datetime | None = None
+    valid_until: datetime | None = None
+    total_value: Decimal | None = None
+    allows_adhesion: bool | None = None
+
+
+class RawPriceRegistryItem(TraceableModel):
+    """One registered item/supplier of a price registry, when the source publishes it."""
+
+    external_id: str
+    price_registry_external_id: str
+    item_number: str | None = None
+    description: str | None = None
+    unit: str | None = None
+    quantity: Decimal | None = None
+    unit_value: Decimal | None = None
+    total_value: Decimal | None = None
+    max_adhesion_quantity: Decimal | None = None
+    supplier_cnpj: str | None = None
+    supplier_name: str | None = None
+
+
 @runtime_checkable
 class ProcurementSourceConnector(Protocol):
     """Interface implemented by every public procurement source."""
@@ -298,5 +337,22 @@ class ProcurementSourceConnector(Protocol):
     ) -> ConnectorResult[list[RawParticipant]]: ...
 
     async def fetch_events(self, external_id: str) -> ConnectorResult[list[RawEvent]]: ...
+
+    async def aclose(self) -> None: ...
+
+
+@runtime_checkable
+class PriceRegistryConnector(Protocol):
+    """Interface for sources that publish price registries (ARP/atas)."""
+
+    name: str
+
+    async def discover_price_registries(
+        self, filters: ProcurementFilters
+    ) -> ConnectorResult[list[RawPriceRegistry]]: ...
+
+    async def fetch_price_registry_items(
+        self, external_id: str
+    ) -> ConnectorResult[list[RawPriceRegistryItem]]: ...
 
     async def aclose(self) -> None: ...

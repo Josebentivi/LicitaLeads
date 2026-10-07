@@ -1,0 +1,26 @@
+{% extends "base.html" %}
+{% block title %}Atas de Registro de Preços · LicitaLead Monitor{% endblock %}
+{% block content %}
+<div class="page-heading"><div><p class="eyebrow">Monitoramento</p><h1>Atas de Registro de Preços (ARP)</h1></div></div>
+<form method="get" class="filters">
+  <label>Busca <input name="search" value="{{ filters.search or '' }}"></label>
+  <label>Órgão <input name="agency" value="{{ filters.agency or '' }}"></label>
+  <label>Número da ata <input name="registry_number" value="{{ filters.registry_number or '' }}"></label>
+  <label>CNPJ do fornecedor <input name="supplier_cnpj" value="{{ filters.supplier_cnpj or '' }}"></label>
+  <label>Vigente em <input name="valid_on" type="date" value="{{ filters.valid_on }}"></label>
+  <button type="submit">Filtrar</button>
+</form>
+<section class="panel table-wrap">
+<table><thead><tr><th>Ata</th><th>Órgão</th><th>Objeto</th><th>Situação</th><th>Vigência</th><th>Valor total</th><th>Fonte</th></tr></thead>
+<tbody>{% for item in registries %}<tr>
+  <td><a href="/atas/{{ item.id }}">{{ item.registry_number }}/{{ item.year }}</a></td>
+  <td>{{ item.agency_name }}</td>
+  <td><small>{{ item.object_description }}</small></td>
+  <td>{{ item.status }}</td>
+  <td>{{ item.valid_from }} → {{ item.valid_until }}</td>
+  <td>{{ item.total_value }}</td>
+  <td>{{ item.source }}</td>
+</tr>{% else %}<tr><td colspan="7" class="empty">Nenhuma ata de registro de preços encontrada. Rode uma coleta com modo price_registries.</td></tr>{% endfor %}</tbody></table>
+</section>
+<p class="hint">Dados publicados oficialmente pelo PNCP (cabeçalho da ata) e pelo módulo ARP do Compras.gov.br (itens e fornecedores). Itens podem estar ausentes quando a fonte não os publica.</p>
+{% endblock %}

@@ -28,6 +28,7 @@ class CrawlRunRequest(ApiModel):
     """Parameters for a manually-triggered crawl."""
 
     connector: Literal["pncp", "compras_gov", "all"] = "all"
+    mode: Literal["procurements", "price_registries"] = "procurements"
     uf: str = Field(default="MA", min_length=2, max_length=2)
     days: int | None = Field(default=7, ge=1, le=365)
     start_date: date | None = None

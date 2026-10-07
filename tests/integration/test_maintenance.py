@@ -16,6 +16,8 @@ from app.models import (
     Document,
     ExtractionStatus,
     JobLease,
+    PriceRegistry,
+    PriceRegistryItem,
     Procurement,
 )
 from app.services import maintenance
@@ -91,6 +93,42 @@ async def test_clear_data_endpoint_wipes_database_and_files(
         assert await session.scalar(select(func.count()).select_from(Procurement)) == 0
         assert await session.scalar(select(func.count()).select_from(Document)) == 0
         assert await session.scalar(select(func.count()).select_from(CrawlRun)) == 0
+
+
+@pytest.mark.asyncio
+async def test_maintenance_counts_and_clears_price_registries(
+    database: DatabaseContext,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The reset danger zone reports and wipes ARP/ata rows."""
+
+    settings = _settings(tmp_path)
+    monkeypatch.setattr(maintenance, "get_settings", lambda: settings)
+    async with database.sessions() as session, session.begin():
+        registry = PriceRegistry(source="compras_gov", external_id="ata-1", fingerprint="p" * 64)
+        session.add(registry)
+        await session.flush()
+        session.add(
+            PriceRegistryItem(
+                price_registry_id=registry.id,
+                item_number="1",
+                fingerprint="q" * 64,
+            )
+        )
+
+    async with database.sessions() as session:
+        counts = await maintenance.data_counts(session)
+    assert counts["price_registries"] == 1
+    assert counts["price_registry_items"] == 1
+
+    async with database.sessions() as session:
+        result = await maintenance.clear_all_data(session, settings=settings)
+    assert result.counts["price_registries"] == 1
+    assert result.counts["price_registry_items"] == 1
+    async with database.sessions() as session:
+        assert await session.scalar(select(func.count()).select_from(PriceRegistry)) == 0
+        assert await session.scalar(select(func.count()).select_from(PriceRegistryItem)) == 0
 
 
 @pytest.mark.asyncio

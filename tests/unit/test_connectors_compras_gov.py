@@ -42,6 +42,8 @@ async def test_compras_discovery_uses_own_modality_domain_and_paginates() -> Non
         "codigoModalidade": 5,
         "modalidadeNome": "Pregão - Eletrônico",
         "objetoCompra": "Aquisição de cadeiras",
+        "srp": False,
+        "amparoLegalNome": "Lei 14.133/2021, art. 74, inciso III",
         "dataPublicacaoPncp": "2026-09-15T10:00:00",
     }
 
@@ -76,10 +78,83 @@ async def test_compras_discovery_uses_own_modality_domain_and_paginates() -> Non
     assert result.availability is DataAvailability.AVAILABLE
     assert len(result.data) == 1
     assert result.data[0].modality_code == 5
+    assert result.data[0].is_srp is False
+    assert result.data[0].legal_basis == "Lei 14.133/2021, art. 74, inciso III"
     assert result.data[0].pncp_control_number == "ABC123450001ZZ-1-000001/2026"
     assert len(requests) == 2
     assert all(request.url.params["codigoModalidade"] == "5" for request in requests)
     assert requests[0].url.params["dataPublicacaoPncpInicial"] == "2026-09-15"
+    await raw_client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_compras_arp_discovery_and_items_map_official_fields() -> None:
+    requests: list[httpx.Request] = []
+    registry_row = {
+        "numeroControlePncpAta": "12345678000199-1-000001/2026",
+        "numeroControlePncpCompra": "12345678000199-1-000002/2026",
+        "numeroAtaRegistroPreco": "0001",
+        "anoCompra": "2026",
+        "codigoUnidadeGerenciadora": "980921",
+        "nomeOrgao": "Órgão de Exemplo",
+        "objeto": "Registro de preços de cadeiras",
+        "statusAta": "Vigente",
+        "dataAssinatura": "2026-01-01",
+        "dataVigenciaInicial": "2026-01-01",
+        "dataVigenciaFinal": "2026-12-31",
+        "valorTotal": 100000.5,
+        "ataExcluido": False,
+        "linkAtaPNCP": "https://pncp.gov.br/app/atas/12345678000199/2026/1",
+    }
+    item_row = {
+        "numeroItem": "1",
+        "descricaoItem": "Cadeira escolar",
+        "quantidadeHomologadaItem": 100,
+        "valorUnitario": 150.25,
+        "valorTotal": 15025.0,
+        "maximoAdesao": 200,
+        "niFornecedor": "12345678000199",
+        "nomeRazaoSocialFornecedor": "Empresa Registrada Ltda.",
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if "2.1_consultarARPItem_Id" in str(request.url):
+            return httpx.Response(
+                200, json={"resultado": [item_row], "totalPaginas": 1}, request=request
+            )
+        return httpx.Response(
+            200,
+            json={"resultado": [registry_row], "totalPaginas": 1, "totalRegistros": 1},
+            request=request,
+        )
+
+    raw_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    connector = ComprasGovConnector(
+        _settings(), http_client=AsyncHTTPClient(_settings(), client=raw_client)
+    )
+    result = await connector.discover_price_registries(
+        ProcurementFilters(start_date=date(2026, 1, 1), end_date=date(2026, 1, 31))
+    )
+
+    assert result.availability is DataAvailability.AVAILABLE
+    registry = result.data[0]
+    assert registry.external_id == "12345678000199-1-000001/2026"
+    assert registry.registry_number == "0001"
+    assert registry.year == 2026
+    assert registry.uasg == "980921"
+    assert registry.total_value is not None
+    assert registry.source_url == "https://pncp.gov.br/app/atas/12345678000199/2026/1"
+    assert requests[0].url.params["dataVigenciaInicialMin"] == "2026-01-01"
+
+    items = await connector.fetch_price_registry_items(registry.external_id)
+    assert items.availability is DataAvailability.AVAILABLE
+    item = items.data[0]
+    assert item.item_number == "1"
+    assert item.quantity is not None and item.unit_value is not None
+    assert item.supplier_cnpj == "12345678000199"
+    assert item.supplier_name == "Empresa Registrada Ltda."
+    assert requests[-1].url.params["numeroControlePncpAta"] == "12345678000199-1-000001/2026"
     await raw_client.aclose()
 
 

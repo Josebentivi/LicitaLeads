@@ -30,6 +30,8 @@ from app.connectors.base import (
     RawDocument,
     RawEvent,
     RawParticipant,
+    RawPriceRegistry,
+    RawPriceRegistryItem,
     RawProcurement,
     RawProcurementDetail,
     RawProcurementItem,
@@ -81,6 +83,8 @@ class ComprasGovConnector:
     PROCUREMENT_ID_PATH = "modulo-contratacoes/1.1_consultarContratacoes_PNCP_14133_Id"
     ITEM_ID_PATH = "modulo-contratacoes/2.1_consultarItensContratacoes_PNCP_14133_Id"
     RESULT_ID_PATH = "modulo-contratacoes/3.1_consultarResultadoItensContratacoes_PNCP_14133_Id"
+    ARP_LIST_PATH = "modulo-arp/1_consultarARP"
+    ARP_ITEM_ID_PATH = "modulo-arp/2.1_consultarARPItem_Id"
 
     def __init__(
         self,
@@ -320,6 +324,113 @@ class ComprasGovConnector:
             ),
         )
 
+    async def discover_price_registries(
+        self, filters: ProcurementFilters
+    ) -> ConnectorResult[list[RawPriceRegistry]]:
+        """Collect ARPs by their vigência window, as required by the official module."""
+
+        start, end = filters.resolved_period(
+            lookback_days=int(setting(self.settings, "default_lookback_days", 30))
+        )
+        endpoint = join_url(self.base_url, self.ARP_LIST_PATH)
+        page_size = min(max(filters.page_size or 500, 1), 500)
+        records: list[RawSourceRecord] = []
+        registries: list[RawPriceRegistry] = []
+        errors: list[Exception] = []
+        fetched_pages = 0
+        total_pages = 0
+        total_records = 0
+        truncated = False
+        page = 1
+        while True:
+            params: dict[str, Any] = {
+                "pagina": page,
+                "tamanhoPagina": page_size,
+                "codigoUnidadeGerenciadora": filters.unit_code,
+                "dataVigenciaInicialMin": start.isoformat(),
+                "dataVigenciaInicialMax": end.isoformat(),
+            }
+            try:
+                response = await self._http.request_json("GET", endpoint, params=params)
+            except _HTTP_EXCEPTIONS as exc:
+                errors.append(exc)
+                break
+            records.append(source_record(self.name, response))
+            payload = response.payload if isinstance(response.payload, dict) else {}
+            rows = list_payload(payload, "resultado")
+            for row in rows:
+                registries.append(self._map_price_registry(row, response.url))
+            fetched_pages += 1
+            observed_total_pages = to_int(payload.get("totalPaginas")) or page
+            total_pages += observed_total_pages if page == 1 else 0
+            if page == 1:
+                total_records += to_int(payload.get("totalRegistros")) or len(rows)
+            has_more = page < observed_total_pages
+            if filters.max_pages is not None and page >= filters.max_pages and has_more:
+                truncated = True
+                break
+            if not has_more:
+                break
+            page += 1
+
+        pagination = PaginationInfo(
+            page=1,
+            page_size=page_size,
+            total_records=total_records,
+            total_pages=total_pages,
+            pages_remaining=max(total_pages - fetched_pages, 0),
+            fetched_pages=fetched_pages,
+            truncated=truncated,
+        )
+        if registries:
+            return ConnectorResult(
+                data=registries,
+                availability=DataAvailability.AVAILABLE,
+                source_urls=unique_urls(records),
+                raw_records=records,
+                pagination=pagination,
+                diagnostic=(
+                    "partial result: one or more pages were not collected"
+                    if errors or truncated
+                    else None
+                ),
+            )
+        if errors:
+            result: ConnectorResult[list[RawPriceRegistry]] = failed_result([], errors[0])
+            result.source_urls = unique_urls(records)
+            result.raw_records = records
+            result.pagination = pagination
+            return result
+        return ConnectorResult(
+            data=[],
+            availability=DataAvailability.EMPTY,
+            source_urls=unique_urls(records),
+            raw_records=records,
+            pagination=pagination,
+            diagnostic="no price registries matched the official response",
+        )
+
+    async def fetch_price_registry_items(
+        self, external_id: str
+    ) -> ConnectorResult[list[RawPriceRegistryItem]]:
+        endpoint = join_url(self.base_url, self.ARP_ITEM_ID_PATH)
+        try:
+            response = await self._http.request_json(
+                "GET", endpoint, params={"numeroControlePncpAta": external_id}
+            )
+        except _HTTP_EXCEPTIONS as exc:
+            return failed_result([], exc)
+        records = [source_record(self.name, response)]
+        rows = list_payload(response.payload, "resultado")
+        items = [self._map_price_registry_item(row, external_id, response.url) for row in rows]
+        return ConnectorResult(
+            data=items,
+            availability=(DataAvailability.AVAILABLE if items else DataAvailability.NOT_PUBLISHED),
+            source_urls=[response.url],
+            raw_records=records,
+            pagination=self._pagination(response.payload, len(items)),
+        )
+
     async def aclose(self) -> None:
         if self._owns_http:
             await self._http.aclose()
@@ -414,6 +525,12 @@ class ComprasGovConnector:
             ),
             "estimated_value": to_decimal(row.get("valorTotalEstimado")),
             "homologated_value": to_decimal(row.get("valorTotalHomologado")),
+            "is_srp": row.get("srp"),
+            "legal_basis": (
+                row.get("amparoLegalNome")
+                or row.get("amparoLegalDescricao")
+                or row.get("amparoLegalCodigoPncp")
+            ),
             "proposal_start_at": to_datetime(row.get("dataAberturaPropostaPncp"), self.timezone),
             "proposal_end_at": to_datetime(row.get("dataEncerramentoPropostaPncp"), self.timezone),
             "publication_at": to_datetime(row.get("dataPublicacaoPncp"), self.timezone),
@@ -428,6 +545,60 @@ class ComprasGovConnector:
                 "pncp_modality_code": row.get("modalidadeIdPncp"),
             }
         return model_type(**values)
+
+    def _map_price_registry(self, row: dict[str, Any], source_url: str) -> RawPriceRegistry:
+        control = row.get("numeroControlePncpAta")
+        year = to_int(row.get("anoCompra"))
+        registry_number = row.get("numeroAtaRegistroPreco")
+        agency_name = row.get("nomeOrgao") or row.get("nomeUnidadeGerenciadora")
+        external_id = str(control or f"{agency_name}:{year}:{registry_number}")
+        excluded = bool(row.get("ataExcluido"))
+        status = row.get("statusAta") or ("excluída" if excluded else None)
+        return RawPriceRegistry(
+            source=self.name,
+            source_url=row.get("linkAtaPNCP") or source_url,
+            raw_payload=row,
+            external_id=external_id,
+            pncp_control_number=str(control) if control else None,
+            linked_pncp_control_number=row.get("numeroControlePncpCompra"),
+            registry_number=str(registry_number) if registry_number is not None else None,
+            year=year,
+            agency_name=agency_name,
+            uasg=(
+                str(row.get("codigoUnidadeGerenciadora"))
+                if row.get("codigoUnidadeGerenciadora") is not None
+                else None
+            ),
+            object_description=row.get("objeto"),
+            status=status,
+            signed_at=to_datetime(row.get("dataAssinatura"), self.timezone),
+            valid_from=to_datetime(row.get("dataVigenciaInicial"), self.timezone),
+            valid_until=to_datetime(row.get("dataVigenciaFinal"), self.timezone),
+            total_value=to_decimal(row.get("valorTotal")),
+        )
+
+    def _map_price_registry_item(
+        self, row: dict[str, Any], registry_external_id: str, source_url: str
+    ) -> RawPriceRegistryItem:
+        item_number = row.get("numeroItem")
+        supplier_cnpj = normalized_identifier(row.get("niFornecedor"))
+        return RawPriceRegistryItem(
+            source=self.name,
+            source_url=source_url,
+            raw_payload=row,
+            external_id=(
+                f"{registry_external_id}:item:{item_number}:{supplier_cnpj or 'sem-fornecedor'}"
+            ),
+            price_registry_external_id=registry_external_id,
+            item_number=str(item_number) if item_number is not None else None,
+            description=row.get("descricaoItem") or row.get("nomePdm"),
+            quantity=to_decimal(row.get("quantidadeHomologadaItem")),
+            unit_value=to_decimal(row.get("valorUnitario")),
+            total_value=to_decimal(row.get("valorTotal")),
+            max_adhesion_quantity=to_decimal(row.get("maximoAdesao")),
+            supplier_cnpj=supplier_cnpj,
+            supplier_name=row.get("nomeRazaoSocialFornecedor"),
+        )
 
     def _map_item(
         self, row: dict[str, Any], procurement_external_id: str, source_url: str

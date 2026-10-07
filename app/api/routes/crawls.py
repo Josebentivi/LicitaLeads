@@ -24,6 +24,7 @@ def pipeline_request(value: CrawlRunRequest) -> PipelineRequest:
 
     return PipelineRequest(
         connector=value.connector,
+        mode=value.mode,
         uf=value.uf,
         days=value.days,
         start_date=value.start_date,

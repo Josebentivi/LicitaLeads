@@ -6,15 +6,44 @@
   <label>UF <select name="uf"><option value="">Todas</option>{% for code, name in ufs %}<option value="{{ code }}"{% if code == filters.uf %} selected{% endif %}>{{ code }} · {{ name }}</option>{% endfor %}</select></label>
   <label>Município <input name="municipality" value="{{ filters.municipality or '' }}"></label>
   <label>Órgão <input name="agency" value="{{ filters.agency or '' }}"></label>
+  <label>Modalidade
+    <select name="modality" multiple size="5">
+      {% for key, label in modality_options %}<option value="{{ key }}"{% if key in filters.modalities %} selected{% endif %}>{{ label }}</option>{% endfor %}
+    </select>
+  </label>
+  <label>Contratação
+    <select name="procurement_type">
+      <option value="">Todas</option>
+      {% for key, label in type_options %}<option value="{{ key }}"{% if key == filters.procurement_type %} selected{% endif %}>{{ label }}</option>{% endfor %}
+    </select>
+  </label>
+  <label>Situação
+    <select name="status_category">
+      <option value="">Todas</option>
+      {% for key, label in status_category_options %}<option value="{{ key }}"{% if key == filters.status_category %} selected{% endif %}>{{ label }}</option>{% endfor %}
+    </select>
+  </label>
+  <label>Registro de preços
+    <select name="is_srp">
+      <option value="">Todos</option>
+      <option value="true"{% if filters.is_srp == 'true' %} selected{% endif %}>SRP</option>
+      <option value="false"{% if filters.is_srp == 'false' %} selected{% endif %}>Não SRP</option>
+    </select>
+  </label>
+  <label>Valor mínimo <input name="value_min" type="number" step="0.01" min="0" value="{{ filters.value_min if filters.value_min is not none else '' }}"></label>
+  <label>Valor máximo <input name="value_max" type="number" step="0.01" min="0" value="{{ filters.value_max if filters.value_max is not none else '' }}"></label>
   <button type="submit">Filtrar</button>
 </form>
 <section class="panel table-wrap">
-<table><thead><tr><th>Processo</th><th>Órgão</th><th>Local</th><th>Modalidade</th><th>Situação</th></tr></thead>
+<table><thead><tr><th>Processo</th><th>Órgão</th><th>Local</th><th>Modalidade</th><th>Contratação</th><th>Valor estimado</th><th>Situação</th><th>SRP</th></tr></thead>
 <tbody>{% for item in procurements %}<tr>
   <td><a href="/procurements/{{ item.id }}">{{ item.purchase_number or item.external_id or item.id }}</a><small>{{ item.object_description or item.title or '' }}</small></td>
   <td>{{ item.agency_name or 'not_available' }}</td><td>{{ item.municipality or '' }}/{{ item.uf or '' }}</td>
-  <td>{{ item.modality or 'unknown' }}</td><td>{{ item.status or 'unknown' }}</td>
-</tr>{% else %}<tr><td colspan="5" class="empty">Nenhuma contratação encontrada.</td></tr>{% endfor %}</tbody></table>
+  <td>{{ item.modality|modality_label }}</td>
+  <td>{{ item.procurement_type|procurement_type_label }}</td>
+  <td>{{ item.estimated_value|brl }}</td>
+  <td>{{ item.status or 'unknown' }}</td>
+  <td>{% if item.is_srp %}Sim{% elif item.is_srp is not none %}Não{% else %}—{% endif %}</td>
+</tr>{% else %}<tr><td colspan="8" class="empty">Nenhuma contratação encontrada.</td></tr>{% endfor %}</tbody></table>
 </section>
 {% endblock %}
-

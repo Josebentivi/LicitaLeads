@@ -60,7 +60,7 @@ SOURCE_CAPABILITIES: tuple[SourceCapability, ...] = (
         id="pncp",
         name="PNCP",
         documentation_url="https://pncp.gov.br/manual/pt-br/latest/",
-        audited_at="2026-09-16",
+        audited_at="2026-10-06",
         capabilities=[
             SourceCapabilityItem(
                 name="Contratações por publicação e atualização",
@@ -128,6 +128,50 @@ SOURCE_CAPABILITIES: tuple[SourceCapability, ...] = (
                 ],
             ),
             SourceCapabilityItem(
+                name="SRP e amparo legal da contratação",
+                availability=CapabilityAvailability.AVAILABLE,
+                notes=(
+                    "As respostas de contratação publicam o booleano srp e o amparo legal "
+                    "(código/nome), permitindo filtrar registro de preços e rota de contratação."
+                ),
+            ),
+            SourceCapabilityItem(
+                name="Atas de registro de preços",
+                availability=CapabilityAvailability.AVAILABLE,
+                notes=(
+                    "Consulta pública por período com cnpj/código de unidade opcionais; "
+                    "o detalhe da ata (itens/fornecedor) não é publicado por esta API."
+                ),
+                endpoints=[
+                    EndpointDescription(
+                        path="/api/consulta/v1/atas",
+                        parameters=[
+                            "dataInicial",
+                            "dataFinal",
+                            "idUsuario",
+                            "cnpj",
+                            "codigoUnidadeAdministrativa",
+                            "pagina",
+                            "tamanhoPagina",
+                        ],
+                        page_size_limit=50,
+                    ),
+                    EndpointDescription(
+                        path="/api/consulta/v1/atas/atualizacao",
+                        parameters=[
+                            "dataInicial",
+                            "dataFinal",
+                            "idUsuario",
+                            "cnpj",
+                            "codigoUnidadeAdministrativa",
+                            "pagina",
+                            "tamanhoPagina",
+                        ],
+                        page_size_limit=50,
+                    ),
+                ],
+            ),
+            SourceCapabilityItem(
                 name="Participantes, inabilitação, desclassificação e recursos",
                 availability=CapabilityAvailability.DOCUMENT_ONLY,
                 notes=(
@@ -149,7 +193,7 @@ SOURCE_CAPABILITIES: tuple[SourceCapability, ...] = (
         id="compras_gov",
         name="Compras.gov.br — Dados Abertos",
         documentation_url="https://dadosabertos.compras.gov.br/swagger-ui/index.html",
-        audited_at="2026-09-16",
+        audited_at="2026-10-06",
         capabilities=[
             SourceCapabilityItem(
                 name="Contratações Lei 14.133/2021",
@@ -209,6 +253,65 @@ SOURCE_CAPABILITIES: tuple[SourceCapability, ...] = (
                 notes=(
                     "Não há feed estruturado público confirmado; usar documentos oficiais do PNCP."
                 ),
+            ),
+            SourceCapabilityItem(
+                name="SRP e amparo legal da contratação",
+                availability=CapabilityAvailability.AVAILABLE,
+                notes=(
+                    "O módulo de contratações publica srp, amparoLegalCodigoPncp, "
+                    "amparoLegalNome e amparoLegalDescricao."
+                ),
+            ),
+            SourceCapabilityItem(
+                name="Atas de registro de preços (ARP)",
+                availability=CapabilityAvailability.AVAILABLE,
+                notes=(
+                    "Módulo ARP oficial com ata, itens, fornecedor e adesões; não substitui a "
+                    "proveniência do recurso original."
+                ),
+                endpoints=[
+                    EndpointDescription(
+                        path="/modulo-arp/1_consultarARP",
+                        parameters=[
+                            "pagina",
+                            "tamanhoPagina",
+                            "codigoUnidadeGerenciadora",
+                            "codigoModalidadeCompra",
+                            "numeroAtaRegistroPreco",
+                            "dataVigenciaInicialMin",
+                            "dataVigenciaInicialMax",
+                            "dataAssinaturaInicial",
+                            "dataAssinaturaFinal",
+                        ],
+                        page_size_limit=500,
+                    ),
+                    EndpointDescription(
+                        path="/modulo-arp/1.1_consultarARP_Id",
+                        parameters=["numeroControlePncpAta", "dataAtualizacao"],
+                    ),
+                    EndpointDescription(
+                        path="/modulo-arp/2_consultarARPItem",
+                        parameters=[
+                            "pagina",
+                            "tamanhoPagina",
+                            "codigoUnidadeGerenciadora",
+                            "codigoModalidadeCompra",
+                            "dataVigenciaInicialMin",
+                            "dataVigenciaInicialMax",
+                            "numeroItem",
+                            "codigoItem",
+                            "tipoItem",
+                            "niFornecedor",
+                            "codigoPdm",
+                            "numeroCompra",
+                        ],
+                        page_size_limit=500,
+                    ),
+                    EndpointDescription(
+                        path="/modulo-arp/2.1_consultarARPItem_Id",
+                        parameters=["numeroControlePncpAta", "dataAtualizacao"],
+                    ),
+                ],
             ),
             SourceCapabilityItem(
                 name="UASG, fornecedores, ARP, contratos e OCDS",

@@ -1,0 +1,82 @@
+{% extends "base.html" %}
+{% macro origin_details(origin) %}
+<details class="technical-details">
+  <summary>Ver origem técnica</summary>
+  <dl class="technical-facts">
+    <div><dt>Fonte</dt><dd>{{ origin.source_label }}</dd></div>
+    {% if origin.official_url %}<div><dt>Link oficial</dt><dd><a href="{{ origin.official_url }}" target="_blank" rel="noopener">Abrir fonte</a></dd></div>{% endif %}
+    {% if origin.source_record_id %}<div><dt>Registro de origem</dt><dd><code>{{ origin.source_record_id }}</code></dd></div>{% endif %}
+    {% if origin.evidence_id %}<div><dt>Evidência</dt><dd><a href="{{ origin.evidence_url }}">Abrir evidência</a></dd></div>{% endif %}
+  </dl>
+</details>
+{% endmacro %}
+{% block title %}{{ company.name }} · LicitaLead Monitor{% endblock %}
+{% block content %}
+<p><a href="/empresas">← Empresas</a></p>
+<header class="procurement-header">
+  <div>
+    <p class="eyebrow">Empresa identificada</p>
+    <h1>{{ company.name }}</h1>
+    <p class="object-description">CNPJ {{ company.cnpj_label }}{% if company.trade_name != 'Não informado' %} · {{ company.trade_name }}{% endif %}</p>
+  </div>
+  <div class="header-actions">
+    <span class="badge">{{ company.location }}</span>
+  </div>
+</header>
+<section class="procurement-summary" aria-label="Resumo da empresa">
+  <dl class="facts">
+    <div><dt>Participações comprovadas</dt><dd>{{ stats.participations }}</dd></div>
+    <div><dt>Adjudicações/vencedora</dt><dd>{{ stats.awarded }}</dd></div>
+    <div><dt>Desclassificações</dt><dd>{{ stats.disqualified }}</dd></div>
+    <div><dt>Inabilitações</dt><dd>{{ stats.ineligible }}</dd></div>
+    <div><dt>Última participação</dt><dd>{{ stats_last_participation_at }}</dd></div>
+    {% if company.domain %}<div><dt>Domínio corporativo</dt><dd>{{ company.domain }}</dd></div>{% endif %}
+  </dl>
+</section>
+<section class="panel procurement-section">
+  <div class="section-heading">
+    <div><h2>Participações</h2><p class="hint">Fatos com fonte oficial; cobertura depende de resultado publicado ou documento processado.</p></div>
+    <form method="get" class="filters">
+      <label>Situação
+        <select name="status">
+          <option value="">Todas</option>
+          {% for key, label in status_options %}<option value="{{ key }}"{% if key == filters.status %} selected{% endif %}>{{ label }}</option>{% endfor %}
+        </select>
+      </label>
+      <label><input type="checkbox" name="active_only" value="true"{% if filters.active_only %} checked{% endif %}> Somente processos com proposta aberta</label>
+      <button type="submit">Filtrar</button>
+    </form>
+  </div>
+  <div class="table-wrap">
+  <table><thead><tr><th>Processo</th><th>Órgão</th><th>Modalidade</th><th>Contratação</th><th>Valor estimado</th><th>Situação do processo</th><th>Papel</th><th>Resultado</th><th>Valor final</th><th>Confiança</th><th>Origem</th></tr></thead>
+  <tbody>{% for item in participations %}<tr>
+    <td><a href="/procurements/{{ item.procurement_id }}">{{ item.process }}</a></td>
+    <td>{{ item.agency }}</td>
+    <td>{{ item.modality }}</td>
+    <td>{{ item.type_label }}{% if item.is_srp %} · SRP{% endif %}</td>
+    <td>{{ item.estimated_value }}</td>
+    <td>{{ item.status }}</td>
+    <td>{{ item.role }}</td>
+    <td>{{ item.outcome }}</td>
+    <td>{{ item.final_value }}</td>
+    <td>{{ item.confidence }}</td>
+    <td>{{ origin_details(item.origin) }}</td>
+  </tr>{% else %}<tr><td colspan="11" class="empty">Nenhuma participação comprovada para os filtros selecionados.</td></tr>{% endfor %}</tbody></table>
+  </div>
+</section>
+<section class="panel procurement-section">
+  <div class="section-heading"><div><h2>Eventos atribuídos</h2><p class="hint">Inabilitação, desclassificação, recursos e demais atos detectados em documentos oficiais.</p></div></div>
+  <div class="table-wrap">
+  <table><thead><tr><th>Evento</th><th>Motivo</th><th>Data</th><th>Confiança</th><th>Revisão</th><th>Evidência</th><th>Origem</th></tr></thead>
+  <tbody>{% for event in events %}<tr>
+    <td><a href="/procurements/{{ event.procurement_id }}">{{ event.event_type }}</a></td>
+    <td>{{ event.reason }}</td>
+    <td>{{ event.occurred_at }}</td>
+    <td>{{ event.confidence }}</td>
+    <td>{{ event.review_label }}</td>
+    <td>{% if event.evidence_url %}<a href="{{ event.evidence_url }}">Abrir evidência</a>{% else %}—{% endif %}</td>
+    <td>{{ origin_details(event.origin) }}</td>
+  </tr>{% else %}<tr><td colspan="7" class="empty">Nenhum evento atribuído a esta empresa.</td></tr>{% endfor %}</tbody></table>
+  </div>
+</section>
+{% endblock %}

@@ -2,19 +2,25 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
+from decimal import Decimal
+from typing import Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import false, func, select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.serialization import model_dict
 from app.dependencies import get_db
 from app.models import Document, Participant, Procurement, ProcurementEvent, ProcurementItem
+from app.models.enums import ContractingType
+from app.repositories.procurements import _status_category_condition
 from app.services.identifiers import canonical_modality
 
 router = APIRouter(prefix="/procurements", tags=["procurements"])
+
+StatusCategory = Literal["aberta", "encerrada", "cancelada", "suspensa", "desconhecida"]
 
 
 def _filters(
@@ -23,9 +29,15 @@ def _filters(
     uf: str | None,
     municipality: str | None,
     agency: str | None,
-    modality: str | None,
+    modality: list[str] | None,
     published_from,
     published_to,
+    procurement_type: ContractingType | None = None,
+    is_srp: bool | None = None,
+    value_min: Decimal | None = None,
+    value_max: Decimal | None = None,
+    status_category: StatusCategory | None = None,
+    status: str | None = None,
 ):
     if uf:
         statement = statement.where(Procurement.uf == uf.upper())
@@ -33,15 +45,29 @@ def _filters(
         statement = statement.where(Procurement.municipality.ilike(f"%{municipality}%"))
     if agency:
         statement = statement.where(Procurement.agency_name.ilike(f"%{agency}%"))
-    if modality:
-        modality_key = canonical_modality(modality)
-        statement = statement.where(
-            Procurement.modality_key == modality_key if modality_key is not None else false()
-        )
+    modality_keys = [
+        key for key in (canonical_modality(value) for value in (modality or [])) if key is not None
+    ]
+    if modality_keys:
+        statement = statement.where(Procurement.modality_key.in_(modality_keys))
     if published_from:
         statement = statement.where(Procurement.publication_at >= published_from)
     if published_to:
         statement = statement.where(Procurement.publication_at <= published_to)
+    if status:
+        statement = statement.where(Procurement.status == status)
+    if status_category:
+        statement = statement.where(
+            *_status_category_condition(status_category, now=datetime.now(UTC))
+        )
+    if procurement_type:
+        statement = statement.where(Procurement.procurement_type == procurement_type.value)
+    if is_srp is not None:
+        statement = statement.where(Procurement.is_srp.is_(is_srp))
+    if value_min is not None:
+        statement = statement.where(Procurement.estimated_value >= value_min)
+    if value_max is not None:
+        statement = statement.where(Procurement.estimated_value <= value_max)
     return statement
 
 
@@ -52,10 +78,15 @@ async def list_procurements(
     uf: str | None = Query(None, min_length=2, max_length=2),
     municipality: str | None = None,
     agency: str | None = None,
-    modality: str | None = None,
+    modality: list[str] | None = Query(None),
     published_from: datetime | None = None,
     published_to: datetime | None = None,
     procurement_status: str | None = Query(None, alias="status"),
+    status_category: StatusCategory | None = None,
+    procurement_type: ContractingType | None = None,
+    is_srp: bool | None = None,
+    value_min: Decimal | None = Query(None, ge=0),
+    value_max: Decimal | None = Query(None, ge=0),
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, object]:
     """List canonical procurements with common operational filters."""
@@ -67,9 +98,13 @@ async def list_procurements(
         modality=modality,
         published_from=published_from,
         published_to=published_to,
+        procurement_type=procurement_type,
+        is_srp=is_srp,
+        value_min=value_min,
+        value_max=value_max,
+        status_category=status_category,
+        status=procurement_status,
     )
-    if procurement_status:
-        base = base.where(Procurement.status == procurement_status)
     count_statement = _filters(
         select(func.count()).select_from(Procurement),
         uf=uf,
@@ -78,9 +113,13 @@ async def list_procurements(
         modality=modality,
         published_from=published_from,
         published_to=published_to,
+        procurement_type=procurement_type,
+        is_srp=is_srp,
+        value_min=value_min,
+        value_max=value_max,
+        status_category=status_category,
+        status=procurement_status,
     )
-    if procurement_status:
-        count_statement = count_statement.where(Procurement.status == procurement_status)
     total = int((await db.scalar(count_statement)) or 0)
     rows = (
         await db.scalars(

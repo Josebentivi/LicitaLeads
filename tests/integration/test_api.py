@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from uuid import uuid4
 
 import httpx
@@ -85,6 +86,117 @@ async def test_procurement_list_filters_and_paginates(
     assert payload["page"] == 1
     assert payload["page_size"] == 1
     assert payload["items"][0]["external_id"] == "ma-1"
+
+
+@pytest.mark.asyncio
+async def test_procurement_advanced_filters(
+    api_client: httpx.AsyncClient,
+    database: DatabaseContext,
+) -> None:
+    """Contracting route, SRP, value range, multi-modality and status category work."""
+
+    now = datetime.now(UTC)
+    async with database.sessions() as session, session.begin():
+        session.add_all(
+            [
+                Procurement(
+                    source="pncp",
+                    external_id="open-srp",
+                    title="Dispensa em aberto",
+                    agency_name="Prefeitura de Exemplo",
+                    uf="MA",
+                    modality="Dispensa de Licitação",
+                    procurement_type="contratacao_direta",
+                    is_srp=True,
+                    legal_basis="Lei 14.133/2021, art. 75, inciso I",
+                    estimated_value=Decimal("50000.00"),
+                    publication_at=now,
+                    proposal_end_at=now + timedelta(days=5),
+                    status="Divulgada no PNCP",
+                    fingerprint="d" * 64,
+                ),
+                Procurement(
+                    source="pncp",
+                    external_id="closed-auction",
+                    title="Pregão encerrado",
+                    agency_name="Secretaria Estadual",
+                    uf="PI",
+                    modality="Pregão - Eletrônico",
+                    procurement_type="licitacao",
+                    is_srp=False,
+                    estimated_value=Decimal("500000.00"),
+                    publication_at=now,
+                    proposal_end_at=now - timedelta(days=2),
+                    status="Homologada",
+                    fingerprint="e" * 64,
+                ),
+                Procurement(
+                    source="pncp",
+                    external_id="no-status-open",
+                    title="Concorrência sem situação publicada",
+                    agency_name="Prefeitura de Exemplo",
+                    uf="MA",
+                    modality="Concorrência - Eletrônica",
+                    procurement_type="licitacao",
+                    estimated_value=Decimal("75000.00"),
+                    publication_at=now,
+                    proposal_end_at=now + timedelta(days=10),
+                    status=None,
+                    fingerprint="f" * 64,
+                ),
+                Procurement(
+                    source="pncp",
+                    external_id="no-status-unknown",
+                    title="Concorrência sem prazo",
+                    agency_name="Prefeitura de Exemplo",
+                    uf="MA",
+                    modality="Concorrência - Eletrônica",
+                    procurement_type="licitacao",
+                    estimated_value=Decimal("25000.00"),
+                    publication_at=now,
+                    proposal_end_at=None,
+                    status=None,
+                    fingerprint="g" * 64,
+                ),
+            ]
+        )
+
+    direct = await api_client.get(
+        "/api/procurements", params={"procurement_type": "contratacao_direta"}
+    )
+    srp = await api_client.get("/api/procurements", params={"is_srp": "true"})
+    expensive = await api_client.get("/api/procurements", params={"value_min": "100000"})
+    open_category = await api_client.get("/api/procurements", params={"status_category": "aberta"})
+    closed_category = await api_client.get(
+        "/api/procurements", params={"status_category": "encerrada"}
+    )
+    unknown_category = await api_client.get(
+        "/api/procurements", params={"status_category": "desconhecida"}
+    )
+    multi = await api_client.get(
+        "/api/procurements",
+        params=[("modality", "dispensa"), ("modality", "pregao_eletronico")],
+    )
+
+    assert direct.status_code == 200
+    assert [item["external_id"] for item in direct.json()["items"]] == ["open-srp"]
+    assert srp.status_code == 200
+    assert [item["external_id"] for item in srp.json()["items"]] == ["open-srp"]
+    assert expensive.status_code == 200
+    assert [item["external_id"] for item in expensive.json()["items"]] == ["closed-auction"]
+    assert open_category.status_code == 200
+    assert {item["external_id"] for item in open_category.json()["items"]} == {
+        "open-srp",
+        "no-status-open",
+    }
+    assert closed_category.status_code == 200
+    assert [item["external_id"] for item in closed_category.json()["items"]] == ["closed-auction"]
+    assert unknown_category.status_code == 200
+    assert [item["external_id"] for item in unknown_category.json()["items"]] == [
+        "no-status-unknown"
+    ]
+    assert multi.status_code == 200
+    assert multi.json()["total"] == 2
 
 
 @pytest.mark.asyncio

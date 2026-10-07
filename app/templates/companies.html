@@ -1,0 +1,24 @@
+{% extends "base.html" %}
+{% block title %}Empresas · LicitaLead Monitor{% endblock %}
+{% block content %}
+<div class="page-heading"><div><p class="eyebrow">Monitoramento</p><h1>Empresas</h1></div></div>
+<form method="get" class="filters">
+  <label>Nome ou CNPJ <input name="search" value="{{ filters.search or '' }}"></label>
+  <label>UF <select name="uf"><option value="">Todas</option>{% for code, name in ufs %}<option value="{{ code }}"{% if code == filters.uf %} selected{% endif %}>{{ code }} · {{ name }}</option>{% endfor %}</select></label>
+  <button type="submit">Filtrar</button>
+</form>
+<section class="panel table-wrap">
+<table><thead><tr><th>Empresa</th><th>CNPJ</th><th>Local</th><th>Participações</th><th>Adjudicações</th><th>Desclassificações</th><th>Inabilitações</th><th>Última participação</th></tr></thead>
+<tbody>{% for item in companies %}<tr>
+  <td><a href="/empresas/{{ item.cnpj }}">{{ item.name }}</a></td>
+  <td>{{ item.cnpj_label }}</td>
+  <td>{{ item.location }}</td>
+  <td>{{ item.participations }}</td>
+  <td>{{ item.awarded }}</td>
+  <td>{{ item.disqualified }}</td>
+  <td>{{ item.ineligible }}</td>
+  <td>{{ item.last_participation_at }}</td>
+</tr>{% else %}<tr><td colspan="8" class="empty">Nenhuma empresa identificada.</td></tr>{% endfor %}</tbody></table>
+</section>
+<p class="hint">Os números refletem apenas fatos comprovados: resultados homologados publicados pelas APIs e eventos extraídos de documentos oficiais com evidência e revisão humana quando aplicável. Participações sem documento não aparecem.</p>
+{% endblock %}

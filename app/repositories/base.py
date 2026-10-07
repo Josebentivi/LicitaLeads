@@ -14,7 +14,7 @@ from app.models import Base
 
 
 @dataclass(frozen=True, slots=True)
-class Page[ModelT: Base]:
+class Page[ModelT]:
     """Stable pagination result shared by API and UI services."""
 
     items: Sequence[ModelT]

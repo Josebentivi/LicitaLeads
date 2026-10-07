@@ -27,7 +27,9 @@ from app.models import (
     Company,
     CrawlRun,
     CrawlRunStatus,
+    FieldObservation,
     Participant,
+    ParticipantStatus,
     Procurement,
     ProcurementSource,
 )
@@ -227,6 +229,72 @@ async def test_pipeline_reprocessing_is_idempotent_and_does_not_invent_losers(
     assert company_count == 1
     assert participant is not None
     assert participant.participation_role.value == "awarded"
+    assert participant.status_code is ParticipantStatus.AWARDED
+
+
+@pytest.mark.asyncio
+async def test_pipeline_persists_contracting_route_srp_and_legal_basis(
+    database: DatabaseContext,
+) -> None:
+    """Lei 14.133 filters come from source fields and are observed for audit."""
+
+    raw = _procurement("pncp", CONTROL_NUMBER).model_copy(
+        update={"is_srp": True, "legal_basis": "Lei 14.133/2021, art. 75, inciso I"}
+    )
+    connector = StaticConnector("pncp", raw)
+    pipeline = IngestionPipeline(
+        session_factory=database.sessions,
+        connectors={"pncp": connector},
+    )
+
+    summary = await pipeline.run(
+        PipelineRequest(connector="pncp", uf="MA", process_documents=False)
+    )
+
+    assert summary.status is CrawlRunStatus.COMPLETED
+    async with database.sessions() as session:
+        stored = await session.scalar(select(Procurement))
+        observations = list((await session.scalars(select(FieldObservation))).all())
+
+    assert stored is not None
+    assert stored.procurement_type == "licitacao"
+    assert stored.is_srp is True
+    assert stored.legal_basis == "Lei 14.133/2021, art. 75, inciso I"
+    observed_fields = {item.field_name for item in observations}
+    assert {"procurement_type", "is_srp", "legal_basis"} <= observed_fields
+
+
+@pytest.mark.asyncio
+async def test_pipeline_preserves_known_participant_status_code(
+    database: DatabaseContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unclassifiable recomputation never downgrades a known outcome to unknown."""
+
+    raw = _procurement("pncp", CONTROL_NUMBER)
+    connector = StaticConnector("pncp", raw, results=_winner_results(raw.external_id))
+    pipeline = IngestionPipeline(
+        session_factory=database.sessions,
+        connectors={"pncp": connector},
+    )
+    request = PipelineRequest(connector="pncp", uf="MA", process_documents=False)
+
+    await pipeline.run(request)
+    async with database.sessions() as session:
+        first = await session.scalar(select(Participant))
+    assert first is not None
+    assert first.status_code is ParticipantStatus.AWARDED
+
+    monkeypatch.setattr(
+        "app.services.ingestion.pipeline.participant_status_code",
+        lambda role, status: ParticipantStatus.UNKNOWN,
+    )
+    await pipeline.run(request)
+
+    async with database.sessions() as session:
+        participant = await session.scalar(select(Participant))
+    assert participant is not None
+    assert participant.status_code is ParticipantStatus.AWARDED
 
 
 @pytest.mark.asyncio

@@ -1,0 +1,46 @@
+{% extends "base.html" %}
+{% block title %}Ata {{ registry.registry_number }}/{{ registry.year }} · LicitaLead Monitor{% endblock %}
+{% block content %}
+<p><a href="/atas">← Atas de Registro de Preços</a></p>
+<header class="procurement-header">
+  <div>
+    <p class="eyebrow">Ata de registro de preços</p>
+    <h1>Ata {{ registry.registry_number }}/{{ registry.year }}</h1>
+    <p class="object-description">{{ registry.object_description }}</p>
+  </div>
+  <div class="header-actions">
+    <span class="badge">{{ registry.status }}</span>
+    {% if registry.source_url %}<a class="button secondary" href="{{ registry.source_url }}" target="_blank" rel="noopener">Abrir fonte oficial</a>{% endif %}
+  </div>
+</header>
+<section class="procurement-summary" aria-label="Resumo da ata">
+  <dl class="facts">
+    <div><dt>Órgão</dt><dd>{{ registry.agency_name }}</dd></div>
+    <div><dt>CNPJ do órgão</dt><dd>{{ registry.agency_cnpj }}</dd></div>
+    <div><dt>UASG/unidade</dt><dd>{{ registry.uasg }}</dd></div>
+    <div><dt>Controle PNCP da ata</dt><dd>{{ registry.pncp_control_number }}</dd></div>
+    <div><dt>Contratação vinculada</dt><dd>{% if registry.procurement_id %}<a href="/procurements/{{ registry.procurement_id }}">{{ registry.linked_control_number }}</a>{% else %}{{ registry.linked_control_number }}{% endif %}</dd></div>
+    <div><dt>Assinatura</dt><dd>{{ registry.signed_at }}</dd></div>
+    <div><dt>Vigência</dt><dd>{{ registry.valid_from }} → {{ registry.valid_until }}</dd></div>
+    <div><dt>Valor total</dt><dd>{{ registry.total_value }}</dd></div>
+    <div><dt>Adesão de outros órgãos</dt><dd>{{ registry.allows_adhesion }}</dd></div>
+    <div><dt>Fonte</dt><dd>{{ registry.source }}</dd></div>
+  </dl>
+</section>
+<section class="panel procurement-section">
+  <div class="section-heading"><div><h2>Itens registrados</h2><p class="hint">Fornecedor, quantidades e preços conforme publicação oficial; itens ausentes indicam limitação da fonte.</p></div></div>
+  <div class="table-wrap">
+  <table><thead><tr><th>Item</th><th>Descrição</th><th>Quantidade</th><th>Unidade</th><th>Valor unitário</th><th>Valor total</th><th>Adesão máxima</th><th>Fornecedor</th></tr></thead>
+  <tbody>{% for item in items %}<tr>
+    <td>{{ item.item_number }}</td>
+    <td><small>{{ item.description }}</small></td>
+    <td>{{ item.quantity }}</td>
+    <td>{{ item.unit }}</td>
+    <td>{{ item.unit_value }}</td>
+    <td>{{ item.total_value }}</td>
+    <td>{{ item.max_adhesion }}</td>
+    <td>{% if item.supplier_cnpj %}<a href="/empresas/{{ item.supplier_cnpj }}">{{ item.supplier_name }}</a><small>{{ item.supplier_cnpj_label }}</small>{% else %}{{ item.supplier_name }}{% endif %}</td>
+  </tr>{% else %}<tr><td colspan="8" class="empty">Nenhum item publicado para esta ata.</td></tr>{% endfor %}</tbody></table>
+  </div>
+</section>
+{% endblock %}

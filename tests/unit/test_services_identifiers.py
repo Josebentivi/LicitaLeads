@@ -1,11 +1,17 @@
 # ruff: noqa: E501
 
+from app.models.enums import ParticipantStatus
 from app.services.identifiers import (
+    PROCUREMENT_TYPE_CONTRATACAO_DIRETA,
+    PROCUREMENT_TYPE_LICITACAO,
+    PROCUREMENT_TYPE_PROCEDIMENTO_AUXILIAR,
     canonical_modality,
     format_cnpj,
     is_valid_cnpj,
+    modality_category,
     normalize_cnpj,
     normalize_company_name,
+    participant_status_code,
 )
 
 
@@ -41,3 +47,27 @@ def test_canonical_modality_unifies_source_labels_and_filter_keys() -> None:
     assert canonical_modality("Dispensa") == "dispensa"
     assert canonical_modality("") is None
     assert canonical_modality(None) is None
+
+
+def test_modality_category_follows_lei_14133_routes() -> None:
+    assert modality_category("Pregão - Eletrônico") == PROCUREMENT_TYPE_LICITACAO
+    assert modality_category("Concorrência Presencial") == PROCUREMENT_TYPE_LICITACAO
+    assert modality_category("Diálogo Competitivo") == PROCUREMENT_TYPE_LICITACAO
+    assert modality_category("Dispensa de Licitação") == PROCUREMENT_TYPE_CONTRATACAO_DIRETA
+    assert modality_category("Inexigibilidade") == PROCUREMENT_TYPE_CONTRATACAO_DIRETA
+    assert modality_category("Credenciamento") == PROCUREMENT_TYPE_PROCEDIMENTO_AUXILIAR
+    assert modality_category("Pré-qualificação") == PROCUREMENT_TYPE_PROCEDIMENTO_AUXILIAR
+    assert modality_category("Manifestação de Interesse") == PROCUREMENT_TYPE_PROCEDIMENTO_AUXILIAR
+    assert modality_category("Modalidade desconhecida") is None
+    assert modality_category(None) is None
+
+
+def test_participant_status_code_normalizes_source_and_document_texts() -> None:
+    assert (
+        participant_status_code("participant", "Empresa desclassificada")
+        is ParticipantStatus.DISQUALIFIED
+    )
+    assert participant_status_code("participant", "inabilitada") is ParticipantStatus.INELIGIBLE
+    assert participant_status_code("awarded", "homologado") is ParticipantStatus.AWARDED
+    assert participant_status_code("winner", None) is ParticipantStatus.WINNER
+    assert participant_status_code(None, "sem informação") is ParticipantStatus.UNKNOWN
