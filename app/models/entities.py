@@ -756,6 +756,9 @@ class PriceRegistry(UUIDPrimaryKeyMixin, TimestampMixin, FingerprintMixin, Base)
     procurement_id: Mapped[UUID | None] = mapped_column(
         GUID(), ForeignKey("procurements.id", ondelete="SET NULL"), index=True
     )
+    source_record_id: Mapped[UUID | None] = mapped_column(
+        GUID(), ForeignKey("source_records.id", ondelete="SET NULL"), index=True
+    )
     registry_number: Mapped[str | None] = mapped_column(String(100), index=True)
     year: Mapped[int | None] = mapped_column(Integer)
     agency_name: Mapped[str | None] = mapped_column(String(500), index=True)
@@ -772,6 +775,7 @@ class PriceRegistry(UUIDPrimaryKeyMixin, TimestampMixin, FingerprintMixin, Base)
     source_url: Mapped[str | None] = mapped_column(Text)
 
     procurement: Mapped[Procurement | None] = relationship()
+    source_record: Mapped[SourceRecord | None] = relationship(foreign_keys=[source_record_id])
     items: Mapped[list[PriceRegistryItem]] = relationship(
         back_populates="price_registry", cascade="all, delete-orphan", passive_deletes=True
     )

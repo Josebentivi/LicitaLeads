@@ -15,12 +15,30 @@ from app.api.serialization import model_dict
 from app.dependencies import get_db
 from app.models import Document, Participant, Procurement, ProcurementEvent, ProcurementItem
 from app.models.enums import ContractingType
-from app.repositories.procurements import _status_category_condition
-from app.services.identifiers import canonical_modality
+from app.repositories.procurements import _status_category_condition, company_cnpj_condition
+from app.services.identifiers import canonical_modality, is_valid_cnpj, normalize_cnpj
 
 router = APIRouter(prefix="/procurements", tags=["procurements"])
 
 StatusCategory = Literal["aberta", "encerrada", "cancelada", "suspensa", "desconhecida"]
+
+
+def _normalized_agency_cnpj(value: str | None) -> str | None:
+    if not value:
+        return None
+    normalized = normalize_cnpj(value)
+    if normalized is None or len(normalized) != 14:
+        raise HTTPException(status_code=422, detail="CNPJ do órgão inválido")
+    return normalized
+
+
+def _normalized_company_cnpj(value: str | None) -> str | None:
+    if not value:
+        return None
+    normalized = normalize_cnpj(value)
+    if not is_valid_cnpj(normalized):
+        raise HTTPException(status_code=422, detail="CNPJ da empresa inválido")
+    return normalized
 
 
 def _filters(
@@ -32,6 +50,8 @@ def _filters(
     modality: list[str] | None,
     published_from,
     published_to,
+    agency_cnpj: str | None = None,
+    company_cnpj: str | None = None,
     procurement_type: ContractingType | None = None,
     is_srp: bool | None = None,
     value_min: Decimal | None = None,
@@ -45,6 +65,10 @@ def _filters(
         statement = statement.where(Procurement.municipality.ilike(f"%{municipality}%"))
     if agency:
         statement = statement.where(Procurement.agency_name.ilike(f"%{agency}%"))
+    if agency_cnpj:
+        statement = statement.where(Procurement.agency_cnpj == agency_cnpj)
+    if company_cnpj:
+        statement = statement.where(company_cnpj_condition(company_cnpj))
     modality_keys = [
         key for key in (canonical_modality(value) for value in (modality or [])) if key is not None
     ]
@@ -78,6 +102,8 @@ async def list_procurements(
     uf: str | None = Query(None, min_length=2, max_length=2),
     municipality: str | None = None,
     agency: str | None = None,
+    agency_cnpj: str | None = None,
+    company_cnpj: str | None = None,
     modality: list[str] | None = Query(None),
     published_from: datetime | None = None,
     published_to: datetime | None = None,
@@ -90,6 +116,8 @@ async def list_procurements(
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, object]:
     """List canonical procurements with common operational filters."""
+    normalized_agency_cnpj = _normalized_agency_cnpj(agency_cnpj)
+    normalized_company_cnpj = _normalized_company_cnpj(company_cnpj)
     base = _filters(
         select(Procurement),
         uf=uf,
@@ -98,6 +126,8 @@ async def list_procurements(
         modality=modality,
         published_from=published_from,
         published_to=published_to,
+        agency_cnpj=normalized_agency_cnpj,
+        company_cnpj=normalized_company_cnpj,
         procurement_type=procurement_type,
         is_srp=is_srp,
         value_min=value_min,
@@ -113,6 +143,8 @@ async def list_procurements(
         modality=modality,
         published_from=published_from,
         published_to=published_to,
+        agency_cnpj=normalized_agency_cnpj,
+        company_cnpj=normalized_company_cnpj,
         procurement_type=procurement_type,
         is_srp=is_srp,
         value_min=value_min,

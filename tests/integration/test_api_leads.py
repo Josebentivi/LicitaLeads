@@ -500,3 +500,54 @@ async def test_crawl_page_localizes_partial_result_and_retries_only_failed_sourc
         follow_redirects=False,
     )
     assert rejected.status_code == 409
+
+
+@pytest.mark.asyncio
+async def test_crawl_page_retry_preserves_price_registry_mode(
+    api_client: httpx.AsyncClient,
+    database: DatabaseContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Retrying a failed ARP crawl keeps collecting atas, not procurements."""
+
+    started = datetime(2026, 9, 17, 6, 32, 15, tzinfo=UTC)
+    async with database.sessions() as session, session.begin():
+        run = CrawlRun(
+            connector="compras_gov",
+            status=CrawlRunStatus.PARTIAL,
+            started_at=started,
+            finished_at=started + timedelta(minutes=1),
+            errors=[{"message": "compras_gov: temporary network failure: ReadTimeout"}],
+            filters={
+                "connector": "compras_gov",
+                "mode": "price_registries",
+                "uf": "MA",
+                "days": 365,
+                "modalities": ["pregao_eletronico"],
+                "process_documents": False,
+            },
+        )
+        session.add(run)
+        await session.flush()
+        run_id = run.id
+
+    fake_retry = SimpleNamespace(id="00000000-0000-0000-0000-000000000322")
+    captured: list[object] = []
+
+    async def create_retry(_self, request):
+        captured.append(request)
+        return fake_retry
+
+    monkeypatch.setattr(web_routes.IngestionPipeline, "create_run", create_retry)
+    monkeypatch.setattr(web_routes, "launch_crawl", lambda *args: captured.append(args))
+
+    retry = await api_client.post(
+        f"/crawls/{run_id}/retry",
+        data={"connector": "compras_gov"},
+        follow_redirects=False,
+    )
+
+    assert retry.status_code == 303
+    assert captured[0].mode == "price_registries"
+    assert captured[0].days == 365
+    assert len(captured) == 2

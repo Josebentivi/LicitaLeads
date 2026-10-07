@@ -488,7 +488,6 @@ class IngestionPipeline:
         source_record_id: UUID | None,
         item_source_record_id: UUID | None,
     ) -> bool:
-        del source_record_id  # retained on SourceRecord; registry links via items/source_url
         async with self.session_factory() as session, session.begin():
             registry = await session.scalar(
                 select(PriceRegistry).where(
@@ -514,6 +513,7 @@ class IngestionPipeline:
             values = {
                 "pncp_control_number": raw.pncp_control_number,
                 "linked_pncp_control_number": raw.linked_pncp_control_number,
+                "source_record_id": source_record_id,
                 "registry_number": raw.registry_number,
                 "year": raw.year,
                 "agency_name": raw.agency_name,
@@ -570,12 +570,14 @@ class IngestionPipeline:
                 entity.source_record_id = item_source_record_id
                 entity.description = raw_item.description or entity.description
                 entity.unit = raw_item.unit or entity.unit
-                entity.quantity = raw_item.quantity or entity.quantity
-                entity.unit_value = raw_item.unit_value or entity.unit_value
-                entity.total_value = raw_item.total_value or entity.total_value
-                entity.max_adhesion_quantity = (
-                    raw_item.max_adhesion_quantity or entity.max_adhesion_quantity
-                )
+                if raw_item.quantity is not None:
+                    entity.quantity = raw_item.quantity
+                if raw_item.unit_value is not None:
+                    entity.unit_value = raw_item.unit_value
+                if raw_item.total_value is not None:
+                    entity.total_value = raw_item.total_value
+                if raw_item.max_adhesion_quantity is not None:
+                    entity.max_adhesion_quantity = raw_item.max_adhesion_quantity
                 entity.supplier_cnpj = cnpj or entity.supplier_cnpj
                 entity.supplier_name = raw_item.supplier_name or entity.supplier_name
             return created
@@ -744,7 +746,7 @@ class IngestionPipeline:
             "modality_key": canonical_modality(raw.modality),
             "procurement_type": modality_category(raw.modality),
             "is_srp": raw.is_srp,
-            "legal_basis": raw.legal_basis,
+            "legal_basis": str(raw.legal_basis)[:255] if raw.legal_basis else None,
             "title": raw.title,
             "object_description": raw.object_description,
             "agency_name": raw.agency_name,

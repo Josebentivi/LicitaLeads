@@ -11,7 +11,17 @@ import pytest
 from sqlalchemy import func, select
 
 from app.api.routes import health as health_route
-from app.models import Company, CompanyContact, CrawlRun, CrawlRunStatus, Procurement
+from app.models import (
+    Company,
+    CompanyContact,
+    CrawlRun,
+    CrawlRunStatus,
+    Participant,
+    ParticipantStatus,
+    PriceRegistry,
+    PriceRegistryItem,
+    Procurement,
+)
 
 from .conftest import DatabaseContext
 
@@ -197,6 +207,134 @@ async def test_procurement_advanced_filters(
     ]
     assert multi.status_code == 200
     assert multi.json()["total"] == 2
+
+
+@pytest.mark.asyncio
+async def test_procurement_cnpj_filters(
+    api_client: httpx.AsyncClient,
+    database: DatabaseContext,
+) -> None:
+    """Agency CNPJ and company CNPJ filters cover participations and ARP suppliers."""
+
+    now = datetime.now(UTC)
+    agency_cnpj = "00000000000191"
+    company_cnpj = "11222333000181"
+    async with database.sessions() as session, session.begin():
+        agency_procurement = Procurement(
+            source="pncp",
+            external_id="agency-proc",
+            agency_name="Órgão Alvo",
+            agency_cnpj=agency_cnpj,
+            modality="Pregão - Eletrônico",
+            publication_at=now,
+            fingerprint="h" * 64,
+        )
+        participant_procurement = Procurement(
+            source="pncp",
+            external_id="participant-proc",
+            agency_name="Outro Órgão",
+            modality="Pregão - Eletrônico",
+            publication_at=now,
+            fingerprint="i" * 64,
+        )
+        arp_procurement = Procurement(
+            source="pncp",
+            external_id="arp-proc",
+            agency_name="Outro Órgão",
+            pncp_control_number=f"{company_cnpj}-1-000009/2026",
+            modality="Pregão - Eletrônico",
+            publication_at=now,
+            fingerprint="j" * 64,
+        )
+        other_procurement = Procurement(
+            source="pncp",
+            external_id="other-proc",
+            agency_name="Outro Órgão",
+            modality="Pregão - Eletrônico",
+            publication_at=now,
+            fingerprint="k" * 64,
+        )
+        company = Company(
+            cnpj=company_cnpj,
+            legal_name="Empresa Alvo Ltda.",
+            normalized_name="EMPRESA ALVO",
+            fingerprint="l" * 64,
+        )
+        session.add_all(
+            [
+                agency_procurement,
+                participant_procurement,
+                arp_procurement,
+                other_procurement,
+                company,
+            ]
+        )
+        await session.flush()
+        session.add(
+            Participant(
+                procurement_id=participant_procurement.id,
+                company_id=company.id,
+                participation_role="awarded",
+                status_code=ParticipantStatus.AWARDED,
+                source="pncp",
+                confidence=Decimal("1"),
+                fingerprint="m" * 64,
+            )
+        )
+        registry = PriceRegistry(
+            source="compras_gov",
+            external_id="ata-1",
+            linked_pncp_control_number=f"{company_cnpj}-1-000009/2026",
+            fingerprint="n" * 64,
+        )
+        session.add(registry)
+        await session.flush()
+        session.add(
+            PriceRegistryItem(
+                price_registry_id=registry.id,
+                item_number="1",
+                supplier_cnpj=company_cnpj,
+                fingerprint="o" * 64,
+            )
+        )
+
+    by_agency = await api_client.get("/api/procurements", params={"agency_cnpj": agency_cnpj})
+    by_agency_formatted = await api_client.get(
+        "/api/procurements", params={"agency_cnpj": "00.000.000/0001-91"}
+    )
+    by_company = await api_client.get("/api/procurements", params={"company_cnpj": company_cnpj})
+    by_company_formatted = await api_client.get(
+        "/api/procurements", params={"company_cnpj": "11.222.333/0001-81"}
+    )
+    invalid_agency = await api_client.get("/api/procurements", params={"agency_cnpj": "123"})
+    invalid_company = await api_client.get(
+        "/api/procurements", params={"company_cnpj": "00000000000000"}
+    )
+    page = await api_client.get(
+        "/procurements",
+        params={"agency_cnpj": agency_cnpj, "company_cnpj": company_cnpj},
+    )
+    invalid_page = await api_client.get("/procurements", params={"company_cnpj": "123"})
+
+    assert by_agency.status_code == 200
+    assert [item["external_id"] for item in by_agency.json()["items"]] == ["agency-proc"]
+    assert by_agency_formatted.status_code == 200
+    assert by_agency_formatted.json()["total"] == 1
+    assert by_company.status_code == 200
+    assert {item["external_id"] for item in by_company.json()["items"]} == {
+        "participant-proc",
+        "arp-proc",
+    }
+    assert by_company_formatted.status_code == 200
+    assert by_company_formatted.json()["total"] == 2
+    assert invalid_agency.status_code == 422
+    assert "CNPJ do órgão" in invalid_agency.json()["detail"]
+    assert invalid_company.status_code == 422
+    assert "CNPJ da empresa" in invalid_company.json()["detail"]
+    assert page.status_code == 200
+    assert "ver empresa" in page.text
+    assert invalid_page.status_code == 200
+    assert "CNPJ inválido informado" in invalid_page.text
 
 
 @pytest.mark.asyncio

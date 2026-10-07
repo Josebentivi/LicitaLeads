@@ -30,12 +30,20 @@ Resposta: `status` (`ok`/`degraded`), `version`, `database`, `scheduler`
 | `GET /api/procurements/{id}/events` | Eventos detectados |
 
 Filtros de `GET /api/procurements`: `page`, `page_size` (1–200), `uf`,
-`municipality`, `agency`, `modality` (repetível; chave canônica ou rótulo da
-fonte), `published_from`, `published_to`, `status` (alias de
-`procurement_status`), `status_category` (`aberta`, `encerrada`, `cancelada`,
-`suspensa`, `desconhecida`), `procurement_type` (`licitacao`,
+`municipality`, `agency`, `agency_cnpj`, `company_cnpj`, `modality` (repetível;
+chave canônica ou rótulo da fonte), `published_from`, `published_to`, `status`
+(alias de `procurement_status`), `status_category` (`aberta`, `encerrada`,
+`cancelada`, `suspensa`, `desconhecida`), `procurement_type` (`licitacao`,
 `contratacao_direta`, `procedimento_auxiliar`), `is_srp` (`true`/`false`) e
 `value_min`/`value_max` (valor estimado).
+
+`agency_cnpj` casa o CNPJ do órgão que publica a contratação (aceita pontuação;
+exige 14 posições alfanuméricas). `company_cnpj` retorna contratações
+vinculadas à empresa por **participações comprovadas** (resultados homologados
+das APIs e fatos documentais) ou por **fornecedores registrados em atas**
+(ARP), casando tanto o vínculo resolvido quanto o `numeroControlePNCP`
+publicado; exige CNPJ válido (dígitos verificadores). CNPJ malformado responde
+`422`.
 
 Cada contratação expõe `procurement_type` derivado da modalidade, `is_srp` e
 `legal_basis` (amparo legal publicado pela fonte) — quando a fonte não publica
@@ -171,7 +179,7 @@ As páginas não aparecem no Swagger (`include_in_schema=False`).
 |---|---|
 | `/` | Redireciona para `/dashboard` |
 | `/dashboard` | Métricas operacionais e últimos leads |
-| `/procurements` | Lista com filtros de UF, município, órgão, modalidade, rota de contratação, situação, SRP e faixa de valor |
+| `/procurements` | Lista com filtros de UF, município, órgão, CNPJ do órgão, CNPJ da empresa licitante/fornecedora, modalidade, rota de contratação, situação, SRP e faixa de valor |
 | `/procurements/{id}` | Detalhe: itens, documentos, participantes, eventos e vínculo manual de empresa |
 | `/empresas` | Lista de empresas com contadores de participação, adjudicação, desclassificação e inabilitação |
 | `/empresas/{cnpj}` | Histórico de participações e eventos com selo de origem, confiança e revisão |

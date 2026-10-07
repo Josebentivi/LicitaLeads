@@ -182,6 +182,34 @@ async def test_company_pages_render_with_provenance(
 
 
 @pytest.mark.asyncio
+async def test_company_list_pagination_is_stable(
+    api_client: httpx.AsyncClient,
+    database: DatabaseContext,
+) -> None:
+    """Companies tied on name/counters keep a deterministic order across pages."""
+
+    cnpjs = ["00000000000191", "11222333000181", "12345678000195"]
+    async with database.sessions() as session, session.begin():
+        for index, cnpj in enumerate(cnpjs):
+            session.add(
+                Company(
+                    cnpj=cnpj,
+                    legal_name="Empresa Igual Ltda.",
+                    normalized_name=f"EMPRESA IGUAL {index}",
+                    fingerprint=str(index) * 64,
+                )
+            )
+
+    pages: list[str] = []
+    for page in (1, 2, 3):
+        response = await api_client.get("/api/companies", params={"page": page, "page_size": 1})
+        assert response.status_code == 200
+        pages.append(response.json()["items"][0]["company"]["cnpj"])
+
+    assert sorted(pages) == sorted(cnpjs)
+
+
+@pytest.mark.asyncio
 async def test_company_active_only_includes_null_status_open_procurement(
     api_client: httpx.AsyncClient,
     database: DatabaseContext,

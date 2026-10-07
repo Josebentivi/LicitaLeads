@@ -41,7 +41,7 @@ from app.repositories.procurements import (
     ProcurementEventRepository,
     ProcurementRepository,
 )
-from app.services.identifiers import canonical_modality, normalize_cnpj
+from app.services.identifiers import canonical_modality, is_valid_cnpj, normalize_cnpj
 from app.services.ingestion import IngestionPipeline, PipelineRequest
 from app.services.ingestion.processor import DocumentProcessingService
 from app.services.maintenance import (
@@ -805,6 +805,8 @@ async def procurements_page(
     uf: str | None = Query(None, min_length=2, max_length=2),
     municipality: str | None = None,
     agency: str | None = None,
+    agency_cnpj: str | None = None,
+    company_cnpj: str | None = None,
     modality: list[str] | None = Query(None),
     procurement_type: str | None = None,
     status_category: str | None = None,
@@ -825,12 +827,24 @@ async def procurements_page(
         parsed_srp = True
     elif is_srp in {"false", "0", "nao", "não"}:
         parsed_srp = False
+    selected_agency_cnpj = normalize_cnpj(agency_cnpj) if agency_cnpj else None
+    if selected_agency_cnpj is not None and len(selected_agency_cnpj) != 14:
+        selected_agency_cnpj = None
+    selected_company_cnpj = normalize_cnpj(company_cnpj) if company_cnpj else None
+    if selected_company_cnpj is not None and not is_valid_cnpj(selected_company_cnpj):
+        selected_company_cnpj = None
+    invalid_cnpj = bool(
+        (agency_cnpj and selected_agency_cnpj is None)
+        or (company_cnpj and selected_company_cnpj is None)
+    )
     page = await ProcurementRepository(db).list_filtered(
         page=1,
         page_size=200,
         uf=uf,
         municipality=municipality,
         agency=agency,
+        agency_cnpj=selected_agency_cnpj,
+        company_cnpj=selected_company_cnpj,
         modalities=selected_modalities,
         procurement_type=selected_type,
         status_category=selected_category,
@@ -848,6 +862,10 @@ async def procurements_page(
                 uf=uf.upper() if uf else None,
                 municipality=municipality,
                 agency=agency,
+                agency_cnpj=agency_cnpj,
+                company_cnpj=company_cnpj,
+                company_cnpj_valid=selected_company_cnpj,
+                invalid_cnpj=invalid_cnpj,
                 modalities=selected_modalities,
                 procurement_type=selected_type,
                 status_category=selected_category,
@@ -1367,6 +1385,7 @@ async def retry_failed_crawl_source(
     modalities = filters.get("modalities") or get_settings().default_modalities
     retry_request = PipelineRequest(
         connector=connector,
+        mode=str(filters.get("mode") or "procurements"),
         uf=str(filters.get("uf") or get_settings().default_uf),
         days=filters.get("days"),
         start_date=_filter_date(filters.get("start_date")),

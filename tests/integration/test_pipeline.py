@@ -265,6 +265,35 @@ async def test_pipeline_persists_contracting_route_srp_and_legal_basis(
 
 
 @pytest.mark.asyncio
+async def test_pipeline_truncates_long_legal_basis_but_observes_the_full_value(
+    database: DatabaseContext,
+) -> None:
+    """The 255-char column is safe on PostgreSQL while provenance keeps the original."""
+
+    long_basis = "Lei 14.133/2021, " + "A" * 400
+    raw = _procurement("pncp", CONTROL_NUMBER).model_copy(update={"legal_basis": long_basis})
+    connector = StaticConnector("pncp", raw)
+    pipeline = IngestionPipeline(
+        session_factory=database.sessions,
+        connectors={"pncp": connector},
+    )
+
+    summary = await pipeline.run(
+        PipelineRequest(connector="pncp", uf="MA", process_documents=False)
+    )
+
+    assert summary.status is CrawlRunStatus.COMPLETED
+    async with database.sessions() as session:
+        stored = await session.scalar(select(Procurement))
+        observations = list((await session.scalars(select(FieldObservation))).all())
+
+    assert stored is not None
+    assert stored.legal_basis is not None and len(stored.legal_basis) == 255
+    observed = [item for item in observations if item.field_name == "legal_basis"]
+    assert observed and observed[0].value == long_basis
+
+
+@pytest.mark.asyncio
 async def test_pipeline_preserves_known_participant_status_code(
     database: DatabaseContext,
     monkeypatch: pytest.MonkeyPatch,

@@ -92,7 +92,7 @@ class PriceRegistryConnector(StaticConnector):
             [self.registry],
             DataAvailability.AVAILABLE,
             source=self.name,
-            operation="price_registries",
+            operation="discovery",
         )
 
     async def fetch_price_registry_items(
@@ -148,6 +148,7 @@ async def test_price_registry_pipeline_is_idempotent_and_links_procurement(
 
     assert registry is not None and procurement is not None
     assert registry.procurement_id == procurement.id
+    assert registry.source_record_id is not None
     assert float(registry.total_value) == 1000.0
     assert registry.allows_adhesion is True
     assert item is not None and company is not None
@@ -197,6 +198,45 @@ async def test_price_registry_keeps_multiple_suppliers_per_item(
     assert {item.supplier_cnpj for item in items} == {SUPPLIER_CNPJ, SECOND_SUPPLIER_CNPJ}
     assert {company.cnpj for company in companies} == {SUPPLIER_CNPJ, SECOND_SUPPLIER_CNPJ}
     assert all(item.company_id is not None for item in items)
+
+
+@pytest.mark.asyncio
+async def test_price_registry_item_zero_values_are_applied(
+    database: DatabaseContext,
+) -> None:
+    """A newer payload with zeroed quantities/values is not treated as missing."""
+
+    item = _registry_item()
+    connector = PriceRegistryConnector(_registry(), [item])
+    pipeline = IngestionPipeline(
+        session_factory=database.sessions,
+        connectors={"compras_gov": connector},
+    )
+    request = PipelineRequest(
+        connector="compras_gov", mode="price_registries", days=365, process_documents=False
+    )
+    await pipeline.run(request)
+
+    connector.items = [
+        item.model_copy(
+            update={
+                "quantity": Decimal("0"),
+                "unit_value": Decimal("0"),
+                "total_value": Decimal("0"),
+                "max_adhesion_quantity": Decimal("0"),
+            }
+        )
+    ]
+    await pipeline.run(request)
+
+    async with database.sessions() as session:
+        stored = await session.scalar(select(PriceRegistryItem))
+
+    assert stored is not None
+    assert float(stored.quantity) == 0.0
+    assert float(stored.unit_value) == 0.0
+    assert float(stored.total_value) == 0.0
+    assert float(stored.max_adhesion_quantity) == 0.0
 
 
 @pytest.mark.asyncio

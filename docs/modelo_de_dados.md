@@ -59,7 +59,7 @@ CrawlRun --> SourceRecord (payload bruto, hash, endpoint, disponibilidade)
 | `CompanyContact` | Contato corporativo | único por empresa+tipo+valor; `is_corporate`/`is_personal` mutuamente exclusivos |
 | `Lead` | Oportunidade | score 0–100 decomposto; vínculo com evento, prazo, empresa e processo |
 | `LeadReview` | Decisão humana | `approved`, `rejected`, `needs_changes`, com autor e notas |
-| `PriceRegistry` | Ata de registro de preços | cabeçalho oficial (PNCP/Compras): número, ano, órgão, vigência, valores, vínculo com a contratação (`linked_pncp_control_number`) |
+| `PriceRegistry` | Ata de registro de preços | cabeçalho oficial (PNCP/Compras): número, ano, órgão, vigência, valores, vínculo com a contratação (`linked_pncp_control_number`) e com a resposta bruta (`source_record_id`) |
 | `PriceRegistryItem` | Item registrado da ata | único por ata+item+fornecedor; descrição, quantidades, valores, fornecedor (empresa por CNPJ validado) e adesão máxima |
 | `OutreachDraft` | Rascunho | `facts_hash`/`template_hash` para idempotência; `sent` exige `approved` |
 | `JobLease` | Lease de job | evita execução concorrente do scheduler/pipeline |

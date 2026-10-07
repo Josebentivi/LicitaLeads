@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from uuid import UUID
 
-from sqlalchemy import Select, case, false, func, or_, select
+from sqlalchemy import Select, and_, case, exists, false, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -14,6 +14,8 @@ from app.models import (
     Company,
     Evidence,
     Participant,
+    PriceRegistry,
+    PriceRegistryItem,
     Procurement,
     ProcurementEvent,
     ProcurementSource,
@@ -32,6 +34,42 @@ def _status_tokens_condition(tokens: tuple[str, ...]):
     # Coalesce keeps NULL statuses from poisoning the negated conditions below.
     status_text = func.coalesce(func.lower(Procurement.status), "")
     return or_(*[status_text.like(f"%{token}%") for token in tokens])
+
+
+def company_cnpj_condition(company_cnpj: str):
+    """Match procurements linked to a company by participation or ARP supply.
+
+    Participations cover awarded results and document-derived facts; the price
+    registry branch covers suppliers registered in atas, linked either through
+    the resolved procurement or the published PNCP control number.
+    """
+
+    participant_link = exists(
+        select(Participant.id)
+        .join(Company, Participant.company_id == Company.id)
+        .where(
+            Participant.procurement_id == Procurement.id,
+            Company.cnpj == company_cnpj,
+        )
+    )
+    price_registry_link = exists(
+        select(PriceRegistryItem.id)
+        .join(
+            PriceRegistry,
+            PriceRegistryItem.price_registry_id == PriceRegistry.id,
+        )
+        .where(
+            PriceRegistryItem.supplier_cnpj == company_cnpj,
+            or_(
+                PriceRegistry.procurement_id == Procurement.id,
+                and_(
+                    PriceRegistry.linked_pncp_control_number.is_not(None),
+                    PriceRegistry.linked_pncp_control_number == Procurement.pncp_control_number,
+                ),
+            ),
+        )
+    )
+    return or_(participant_link, price_registry_link)
 
 
 def _status_category_condition(category: str, *, now: datetime):
@@ -175,6 +213,8 @@ class ProcurementRepository(BaseRepository[Procurement]):
         uf: str | None = None,
         municipality: str | None = None,
         agency: str | None = None,
+        agency_cnpj: str | None = None,
+        company_cnpj: str | None = None,
         modality: str | None = None,
         modalities: list[str] | None = None,
         published_from: datetime | None = None,
@@ -194,6 +234,10 @@ class ProcurementRepository(BaseRepository[Procurement]):
             statement = statement.where(Procurement.municipality.ilike(f"%{municipality}%"))
         if agency:
             statement = statement.where(Procurement.agency_name.ilike(f"%{agency}%"))
+        if agency_cnpj:
+            statement = statement.where(Procurement.agency_cnpj == agency_cnpj)
+        if company_cnpj:
+            statement = statement.where(company_cnpj_condition(company_cnpj))
         selected_modalities = [
             key
             for key in (canonical_modality(value) for value in (modalities or []))
@@ -325,7 +369,9 @@ class CompanyRepository(BaseRepository[Company]):
         statement = (
             select(Company, stats)
             .outerjoin(stats, stats.c.company_id == Company.id)
-            .order_by(func.coalesce(stats.c.participations, 0).desc(), Company.legal_name)
+            .order_by(
+                func.coalesce(stats.c.participations, 0).desc(), Company.legal_name, Company.id
+            )
         )
         if search:
             term = f"%{search}%"
@@ -435,7 +481,9 @@ class ParticipantRepository(BaseRepository[Participant]):
             reference = now or datetime.now(UTC)
             statement = statement.where(*_status_category_condition("aberta", now=reference))
         statement = statement.order_by(
-            Procurement.publication_at.desc().nullslast(), Participant.created_at.desc()
+            Procurement.publication_at.desc().nullslast(),
+            Participant.created_at.desc(),
+            Participant.id,
         )
         return await self.page(statement, page=page, page_size=page_size)
 
@@ -511,5 +559,6 @@ class ProcurementEventRepository(BaseRepository[ProcurementEvent]):
         statement = statement.order_by(
             ProcurementEvent.occurred_at.desc().nullslast(),
             ProcurementEvent.created_at.desc(),
+            ProcurementEvent.id,
         )
         return await self.page(statement, page=page, page_size=page_size)
