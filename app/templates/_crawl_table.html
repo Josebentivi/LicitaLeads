@@ -35,6 +35,9 @@
                 {% if source.records_found is not none %}
                 <small>{{ source.records_found }} registro(s)</small>
                 {% endif %}
+                {% if source.records_failed %}
+                <small>{{ source.records_failed }} falha(s)</small>
+                {% endif %}
               </div>
               {% endfor %}
             </div>

@@ -99,6 +99,29 @@ def to_decimal(value: Any) -> Decimal | None:
         return None
 
 
+def nonnegative_decimal(value: Any) -> Decimal | None:
+    """Map source decimals to the DB invariant, treating negatives as unavailable.
+
+    Some sources publish sentinel/invalid values such as ``-0.0001``.  The
+    original value stays available in ``raw_payload`` for auditability; the
+    canonical column must respect its nonnegative check constraint.
+    """
+
+    parsed = to_decimal(value)
+    if parsed is None or parsed < 0:
+        return None
+    return parsed
+
+
+def positive_int(value: Any) -> int | None:
+    """Map source integers to the positive-only invariants (e.g. participant rank)."""
+
+    parsed = to_int(value)
+    if parsed is None or parsed < 1:
+        return None
+    return parsed
+
+
 def to_int(value: Any) -> int | None:
     if value is None or value == "":
         return None

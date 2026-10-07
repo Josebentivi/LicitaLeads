@@ -159,6 +159,10 @@ para disco local ou use PostgreSQL.
   inabilitação e recursos dependem de documentos oficiais e podem exigir revisão.
 - Resultado homologado não equivale à lista de participantes.
 - Inabilitação, desclassificação e recursos normalmente dependem de documentos.
+- Valores negativos publicados por erro pela fonte são tratados como não
+  disponíveis (`NULL`), preservando o payload bruto para auditoria; uma falha
+  por registro não derruba a coleta inteira (fica registrada e o run termina
+  `partial`).
 - PDF escaneado é marcado `ocr_required` quando não há OCR configurado.
 - LLM e busca de contatos ficam desligados por padrão.
 - CNPJ numérico e alfanumérico são aceitos; CPF não é usado para prospecção.

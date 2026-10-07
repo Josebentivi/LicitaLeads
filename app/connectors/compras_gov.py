@@ -13,12 +13,13 @@ from app.connectors._common import (
     is_corporate_identifier,
     join_url,
     list_payload,
+    nonnegative_decimal,
     normalized_identifier,
     normalized_text,
+    positive_int,
     runtime_settings,
     source_record,
     to_datetime,
-    to_decimal,
     to_int,
     unique_urls,
 )
@@ -523,8 +524,8 @@ class ComprasGovConnector:
                 if row.get("unidadeOrgaoCodigoIbge") is not None
                 else None
             ),
-            "estimated_value": to_decimal(row.get("valorTotalEstimado")),
-            "homologated_value": to_decimal(row.get("valorTotalHomologado")),
+            "estimated_value": nonnegative_decimal(row.get("valorTotalEstimado")),
+            "homologated_value": nonnegative_decimal(row.get("valorTotalHomologado")),
             "is_srp": row.get("srp"),
             "legal_basis": (
                 row.get("amparoLegalNome")
@@ -574,7 +575,7 @@ class ComprasGovConnector:
             signed_at=to_datetime(row.get("dataAssinatura"), self.timezone),
             valid_from=to_datetime(row.get("dataVigenciaInicial"), self.timezone),
             valid_until=to_datetime(row.get("dataVigenciaFinal"), self.timezone),
-            total_value=to_decimal(row.get("valorTotal")),
+            total_value=nonnegative_decimal(row.get("valorTotal")),
         )
 
     def _map_price_registry_item(
@@ -592,10 +593,10 @@ class ComprasGovConnector:
             price_registry_external_id=registry_external_id,
             item_number=str(item_number) if item_number is not None else None,
             description=row.get("descricaoItem") or row.get("nomePdm"),
-            quantity=to_decimal(row.get("quantidadeHomologadaItem")),
-            unit_value=to_decimal(row.get("valorUnitario")),
-            total_value=to_decimal(row.get("valorTotal")),
-            max_adhesion_quantity=to_decimal(row.get("maximoAdesao")),
+            quantity=nonnegative_decimal(row.get("quantidadeHomologadaItem")),
+            unit_value=nonnegative_decimal(row.get("valorUnitario")),
+            total_value=nonnegative_decimal(row.get("valorTotal")),
+            max_adhesion_quantity=nonnegative_decimal(row.get("maximoAdesao")),
             supplier_cnpj=supplier_cnpj,
             supplier_name=row.get("nomeRazaoSocialFornecedor"),
         )
@@ -614,10 +615,10 @@ class ComprasGovConnector:
             item_number=str(item_number) if item_number is not None else None,
             description=row.get("descricaoResumida") or row.get("descricaodetalhada"),
             detailed_description=row.get("descricaodetalhada"),
-            quantity=to_decimal(row.get("quantidade")),
+            quantity=nonnegative_decimal(row.get("quantidade")),
             unit=row.get("unidadeMedida"),
-            estimated_unit_value=to_decimal(row.get("valorUnitarioEstimado")),
-            estimated_total_value=to_decimal(row.get("valorTotal")),
+            estimated_unit_value=nonnegative_decimal(row.get("valorUnitarioEstimado")),
+            estimated_total_value=nonnegative_decimal(row.get("valorTotal")),
             result_status=row.get("situacaoCompraItemNome"),
             has_result=row.get("temResultado"),
         )
@@ -652,10 +653,10 @@ class ComprasGovConnector:
             supplier_name=row.get("nomeRazaoSocialFornecedor"),
             person_type=row.get("tipoPessoa") or row.get("tipoPessoaId"),
             role="awarded",
-            quantity=to_decimal(row.get("quantidadeHomologada")),
-            unit_value=to_decimal(row.get("valorUnitarioHomologado")),
-            total_value=to_decimal(row.get("valorTotalHomologado")),
-            rank=to_int(row.get("ordemClassificacaoSrp")),
+            quantity=nonnegative_decimal(row.get("quantidadeHomologada")),
+            unit_value=nonnegative_decimal(row.get("valorUnitarioHomologado")),
+            total_value=nonnegative_decimal(row.get("valorTotalHomologado")),
+            rank=positive_int(row.get("ordemClassificacaoSrp")),
             result_status=status,
             result_at=to_datetime(row.get("dataResultadoPncp"), self.timezone),
             is_cancelled=is_cancelled,

@@ -155,6 +155,44 @@ class StaticConnector:
         self.closed = True
 
 
+class MultiRecordConnector(StaticConnector):
+    """Static double that serves several discovery records with full details."""
+
+    def __init__(self, name: str, procurements: list[RawProcurement]) -> None:
+        super().__init__(name, procurements[0])
+        self.records = {item.external_id: item for item in procurements}
+
+    async def discover_procurements(
+        self, filters: ProcurementFilters
+    ) -> ConnectorResult[list[RawProcurement]]:
+        assert filters.uf == "MA"
+        return _result(
+            list(self.records.values()),
+            DataAvailability.AVAILABLE,
+            source=self.name,
+            operation="discovery",
+        )
+
+    async def fetch_procurement(
+        self, external_id: str
+    ) -> ConnectorResult[RawProcurementDetail | None]:
+        raw = self.records[external_id]
+        detail = RawProcurementDetail(**raw.model_dump(), additional_data={"audited": True})
+        return _result(detail, DataAvailability.AVAILABLE, source=self.name, operation="detail")
+
+    async def fetch_items(self, external_id: str) -> ConnectorResult[list[RawProcurementItem]]:
+        del external_id
+        return _result([], DataAvailability.EMPTY, source=self.name, operation="items")
+
+    async def fetch_documents(self, external_id: str) -> ConnectorResult[list[RawDocument]]:
+        del external_id
+        return _result([], DataAvailability.NOT_SUPPORTED, source=self.name, operation="documents")
+
+    async def fetch_results(self, external_id: str) -> ConnectorResult[list[RawResult]]:
+        del external_id
+        return _result([], DataAvailability.NOT_PUBLISHED, source=self.name, operation="results")
+
+
 def _winner_results(external_id: str) -> list[RawResult]:
     common = {
         "source": "pncp",
@@ -324,6 +362,46 @@ async def test_pipeline_preserves_known_participant_status_code(
         participant = await session.scalar(select(Participant))
     assert participant is not None
     assert participant.status_code is ParticipantStatus.AWARDED
+
+
+@pytest.mark.asyncio
+async def test_pipeline_isolates_record_failure_and_keeps_crawling(
+    database: DatabaseContext,
+    api_client,
+) -> None:
+    """One record violating a DB invariant must not abort the whole source crawl."""
+
+    bad = _procurement("pncp", CONTROL_NUMBER).model_copy(update={"estimated_value": Decimal("-1")})
+    good_control = "00000000000191-1-000002/2026"
+    good = _procurement("pncp", good_control).model_copy(
+        update={"pncp_control_number": good_control}
+    )
+    connector = MultiRecordConnector("pncp", [bad, good])
+    pipeline = IngestionPipeline(
+        session_factory=database.sessions,
+        connectors={"pncp": connector},
+    )
+
+    summary = await pipeline.run(
+        PipelineRequest(connector="pncp", uf="MA", process_documents=False)
+    )
+
+    assert summary.status is CrawlRunStatus.PARTIAL
+    assert summary.records_failed == 1
+    assert summary.records_created == 1
+    assert any("IntegrityError" in item for item in summary.diagnostics)
+    async with database.sessions() as session:
+        stored = list((await session.scalars(select(Procurement))).all())
+        persisted_run = await session.get(CrawlRun, summary.run_id)
+
+    assert [item.external_id for item in stored] == [good_control]
+    assert persisted_run is not None
+    assert persisted_run.cursor is not None
+    assert persisted_run.cursor["sources"]["pncp"]["records_failed"] == 1
+
+    page = await api_client.get("/crawls")
+    assert page.status_code == 200
+    assert "1 falha(s)" in page.text
 
 
 @pytest.mark.asyncio

@@ -159,6 +159,39 @@ async def test_compras_arp_discovery_and_items_map_official_fields() -> None:
 
 
 @pytest.mark.asyncio
+async def test_compras_arp_negative_item_values_are_treated_as_unavailable() -> None:
+    item_row = {
+        "numeroItem": "1",
+        "descricaoItem": "Item com valores inválidos",
+        "quantidadeHomologadaItem": -1,
+        "valorUnitario": -0.0001,
+        "valorTotal": -0.0001,
+        "maximoAdesao": -2,
+        "niFornecedor": "12345678000195",
+        "nomeRazaoSocialFornecedor": "Empresa Registrada Ltda.",
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200, json={"resultado": [item_row], "totalPaginas": 1}, request=request
+        )
+
+    raw_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    connector = ComprasGovConnector(
+        _settings(), http_client=AsyncHTTPClient(_settings(), client=raw_client)
+    )
+    result = await connector.fetch_price_registry_items("12345678000195-1-000001/2026")
+
+    assert result.availability is DataAvailability.AVAILABLE
+    item = result.data[0]
+    assert item.quantity is None
+    assert item.unit_value is None
+    assert item.total_value is None
+    assert item.max_adhesion_quantity is None
+    await raw_client.aclose()
+
+
+@pytest.mark.asyncio
 async def test_compras_participants_exclude_people_and_cancelled_results() -> None:
     rows = [
         {

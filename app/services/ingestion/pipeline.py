@@ -158,6 +158,7 @@ class PipelineSummary:
     records_found: int = 0
     records_created: int = 0
     records_updated: int = 0
+    records_failed: int = 0
     diagnostics: list[str] = field(default_factory=list)
     source_results: dict[str, dict[str, Any]] = field(default_factory=dict)
 
@@ -229,6 +230,7 @@ class IngestionPipeline:
                 found_before = summary.records_found
                 created_before = summary.records_created
                 updated_before = summary.records_updated
+                failed_before = summary.records_failed
                 diagnostics_before = len(summary.diagnostics)
                 source_status = "completed"
                 try:
@@ -250,6 +252,7 @@ class IngestionPipeline:
                     "records_found": summary.records_found - found_before,
                     "records_created": summary.records_created - created_before,
                     "records_updated": summary.records_updated - updated_before,
+                    "records_failed": summary.records_failed - failed_before,
                     "duration_seconds": round(time.perf_counter() - source_started, 3),
                     "max_attempts_per_request": self.settings.http_max_retries + 1,
                     "diagnostics": source_diagnostics,
@@ -378,35 +381,48 @@ class IngestionPipeline:
         for position, raw in enumerate(records, start=1):
             if await self._cancellation_requested(summary.run_id):
                 raise PipelineCancelled
-            detail = await connector.fetch_procurement(raw.external_id)
-            items = await connector.fetch_items(raw.external_id)
-            documents = await connector.fetch_documents(raw.external_id)
-            results = await connector.fetch_results(raw.external_id)
-            persisted: list[list[UUID]] = []
-            for result in (detail, items, documents, results):
-                persisted.append(await self._persist_source_records(summary.run_id, result))
-                if result.availability is ConnectorAvailability.TEMPORARY_ERROR:
-                    summary.diagnostics.append(
-                        f"{connector.name}/{raw.external_id}: "
-                        f"{result.diagnostic or 'temporary source error'}"
-                    )
-            enriched = detail.data if detail.is_available and detail.data is not None else raw
-            procurement_record_ids = persisted[0] or discovery_record_ids
-            created = await self._persist_procurement_bundle(
-                summary.run_id,
-                enriched,
-                items.data if items.is_available else [],
-                documents.data if documents.is_available else [],
-                results.data if results.is_available else [],
-                source_record_id=procurement_record_ids[0] if procurement_record_ids else None,
-                item_source_record_id=persisted[1][0] if persisted[1] else None,
-                document_source_record_id=persisted[2][0] if persisted[2] else None,
-                result_source_record_id=persisted[3][0] if persisted[3] else None,
-            )
-            if created:
-                summary.records_created += 1
-            else:
-                summary.records_updated += 1
+            try:
+                detail = await connector.fetch_procurement(raw.external_id)
+                items = await connector.fetch_items(raw.external_id)
+                documents = await connector.fetch_documents(raw.external_id)
+                results = await connector.fetch_results(raw.external_id)
+                persisted: list[list[UUID]] = []
+                for result in (detail, items, documents, results):
+                    persisted.append(await self._persist_source_records(summary.run_id, result))
+                    if result.availability is ConnectorAvailability.TEMPORARY_ERROR:
+                        summary.diagnostics.append(
+                            f"{connector.name}/{raw.external_id}: "
+                            f"{result.diagnostic or 'temporary source error'}"
+                        )
+                enriched = detail.data if detail.is_available and detail.data is not None else raw
+                procurement_record_ids = persisted[0] or discovery_record_ids
+                created = await self._persist_procurement_bundle(
+                    summary.run_id,
+                    enriched,
+                    items.data if items.is_available else [],
+                    documents.data if documents.is_available else [],
+                    results.data if results.is_available else [],
+                    source_record_id=procurement_record_ids[0] if procurement_record_ids else None,
+                    item_source_record_id=persisted[1][0] if persisted[1] else None,
+                    document_source_record_id=persisted[2][0] if persisted[2] else None,
+                    result_source_record_id=persisted[3][0] if persisted[3] else None,
+                )
+                if created:
+                    summary.records_created += 1
+                else:
+                    summary.records_updated += 1
+            except (asyncio.CancelledError, PipelineCancelled):
+                raise
+            except Exception as exc:
+                # One malformed record must not abort the whole source crawl;
+                # the raw payload was already persisted above for auditability.
+                summary.records_failed += 1
+                summary.source_results[connector.name]["records_failed"] = (
+                    int(summary.source_results[connector.name].get("records_failed", 0)) + 1
+                )
+                summary.diagnostics.append(
+                    f"{connector.name}/{raw.external_id}: {type(exc).__name__}: {exc}"
+                )
             progress["processed"] = position
             await self._update_progress(summary)
 
@@ -451,32 +467,45 @@ class IngestionPipeline:
             "processed": 0,
             "total": len(records),
         }
-        summary.source_results[f"{connector.name}:price_registries"] = {
+        summary.source_results[connector.name] = {
             "status": "running",
+            "mode": "price_registries",
             "records_found": len(records),
+            "records_failed": 0,
             "progress": progress,
         }
         await self._update_progress(summary)
         for position, raw in enumerate(records, start=1):
             if await self._cancellation_requested(summary.run_id):
                 raise PipelineCancelled
-            items = await price_connector.fetch_price_registry_items(raw.external_id)
-            persisted_items = await self._persist_source_records(summary.run_id, items)
-            if items.availability is ConnectorAvailability.TEMPORARY_ERROR:
-                summary.diagnostics.append(
-                    f"{connector.name}/{raw.external_id}: "
-                    f"{items.diagnostic or 'temporary source error'}"
+            try:
+                items = await price_connector.fetch_price_registry_items(raw.external_id)
+                persisted_items = await self._persist_source_records(summary.run_id, items)
+                if items.availability is ConnectorAvailability.TEMPORARY_ERROR:
+                    summary.diagnostics.append(
+                        f"{connector.name}/{raw.external_id}: "
+                        f"{items.diagnostic or 'temporary source error'}"
+                    )
+                created = await self._persist_price_registry_bundle(
+                    raw,
+                    items.data if items.is_available else [],
+                    source_record_id=discovery_record_ids[0] if discovery_record_ids else None,
+                    item_source_record_id=persisted_items[0] if persisted_items else None,
                 )
-            created = await self._persist_price_registry_bundle(
-                raw,
-                items.data if items.is_available else [],
-                source_record_id=discovery_record_ids[0] if discovery_record_ids else None,
-                item_source_record_id=persisted_items[0] if persisted_items else None,
-            )
-            if created:
-                summary.records_created += 1
-            else:
-                summary.records_updated += 1
+                if created:
+                    summary.records_created += 1
+                else:
+                    summary.records_updated += 1
+            except (asyncio.CancelledError, PipelineCancelled):
+                raise
+            except Exception as exc:
+                summary.records_failed += 1
+                summary.source_results[connector.name]["records_failed"] = (
+                    int(summary.source_results[connector.name].get("records_failed", 0)) + 1
+                )
+                summary.diagnostics.append(
+                    f"{connector.name}/{raw.external_id}: {type(exc).__name__}: {exc}"
+                )
             progress["processed"] = position
             await self._update_progress(summary)
 

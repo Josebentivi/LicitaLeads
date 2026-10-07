@@ -14,12 +14,13 @@ from app.connectors._common import (
     is_corporate_identifier,
     join_url,
     list_payload,
+    nonnegative_decimal,
     normalized_identifier,
     normalized_text,
+    positive_int,
     runtime_settings,
     source_record,
     to_datetime,
-    to_decimal,
     to_int,
     unique_urls,
 )
@@ -624,8 +625,8 @@ class PNCPConnector:
             "municipality_code": (
                 str(unit.get("codigoIbge")) if unit.get("codigoIbge") is not None else None
             ),
-            "estimated_value": to_decimal(row.get("valorTotalEstimado")),
-            "homologated_value": to_decimal(row.get("valorTotalHomologado")),
+            "estimated_value": nonnegative_decimal(row.get("valorTotalEstimado")),
+            "homologated_value": nonnegative_decimal(row.get("valorTotalHomologado")),
             "is_srp": row.get("srp"),
             "legal_basis": self._legal_basis(row),
             "proposal_start_at": to_datetime(row.get("dataAberturaProposta"), self.timezone),
@@ -685,6 +686,7 @@ class PNCPConnector:
             published_at=to_datetime(row.get("dataPublicacaoPncp"), self.timezone),
             valid_from=to_datetime(row.get("vigenciaInicio"), self.timezone),
             valid_until=to_datetime(row.get("vigenciaFim"), self.timezone),
+            total_value=nonnegative_decimal(row.get("valorTotal")),
             allows_adhesion=row.get("possibilidadeAdesao"),
         )
 
@@ -701,10 +703,10 @@ class PNCPConnector:
             item_number=str(number) if number is not None else None,
             description=row.get("descricao"),
             detailed_description=row.get("informacaoComplementar"),
-            quantity=to_decimal(row.get("quantidade")),
+            quantity=nonnegative_decimal(row.get("quantidade")),
             unit=row.get("unidadeMedida"),
-            estimated_unit_value=to_decimal(row.get("valorUnitarioEstimado")),
-            estimated_total_value=to_decimal(row.get("valorTotal")),
+            estimated_unit_value=nonnegative_decimal(row.get("valorUnitarioEstimado")),
+            estimated_total_value=nonnegative_decimal(row.get("valorTotal")),
             result_status=row.get("situacaoCompraItemNome"),
             has_result=row.get("temResultado"),
         )
@@ -756,10 +758,10 @@ class PNCPConnector:
             supplier_name=row.get("nomeRazaoSocialFornecedor"),
             person_type=row.get("tipoPessoa") or row.get("tipoPessoaId"),
             role="awarded",
-            quantity=to_decimal(row.get("quantidadeHomologada")),
-            unit_value=to_decimal(row.get("valorUnitarioHomologado")),
-            total_value=to_decimal(row.get("valorTotalHomologado")),
-            rank=to_int(row.get("ordemClassificacaoSrp")),
+            quantity=nonnegative_decimal(row.get("quantidadeHomologada")),
+            unit_value=nonnegative_decimal(row.get("valorUnitarioHomologado")),
+            total_value=nonnegative_decimal(row.get("valorTotalHomologado")),
+            rank=positive_int(row.get("ordemClassificacaoSrp")),
             result_status=status,
             result_at=to_datetime(
                 row.get("dataResultadoPncp") or row.get("dataResultado"), self.timezone

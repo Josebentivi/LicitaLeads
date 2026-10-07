@@ -244,6 +244,86 @@ async def test_pncp_returns_only_awarded_legal_entities_as_participants() -> Non
 
 
 @pytest.mark.asyncio
+async def test_pncp_negative_values_and_zero_rank_are_treated_as_unavailable() -> None:
+    """Invalid source values never violate the canonical nonnegative invariants."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path.endswith("/contratacoes/publicacao"):
+            return httpx.Response(
+                200,
+                json={
+                    "data": [
+                        {
+                            "numeroControlePNCP": "12345678000195-1-000001/2026",
+                            "anoCompra": 2026,
+                            "sequencialCompra": 1,
+                            "orgaoEntidade": {"cnpj": "12345678000195"},
+                            "unidadeOrgao": {"ufSigla": "MA"},
+                            "modalidadeId": 6,
+                            "modalidadeNome": "Pregão - Eletrônico",
+                            "valorTotalEstimado": -0.0001,
+                        }
+                    ],
+                    "totalPaginas": 1,
+                    "totalRegistros": 1,
+                },
+                request=request,
+            )
+        if path.endswith("/itens"):
+            return httpx.Response(
+                200,
+                json=[
+                    {
+                        "numeroItem": 1,
+                        "descricao": "Item com valores inválidos",
+                        "quantidade": -1,
+                        "valorUnitarioEstimado": -0.0001,
+                        "valorTotal": -0.0001,
+                        "temResultado": True,
+                    }
+                ],
+                request=request,
+            )
+        if path.endswith("/itens/1/resultados"):
+            return httpx.Response(
+                200,
+                json=[
+                    {
+                        "numeroItem": 1,
+                        "sequencialResultado": 1,
+                        "niFornecedor": "12345678000195",
+                        "tipoPessoaId": "PJ",
+                        "nomeRazaoSocialFornecedor": "Empresa Exemplo Ltda.",
+                        "valorTotalHomologado": -5,
+                        "ordemClassificacaoSrp": 0,
+                        "situacaoCompraItemResultadoNome": "Informado",
+                    }
+                ],
+                request=request,
+            )
+        raise AssertionError(f"unexpected request {request.url}")
+
+    raw_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    connector = PNCPConnector(
+        _settings(), http_client=AsyncHTTPClient(_settings(), client=raw_client)
+    )
+    discovery = await connector.discover_procurements(
+        ProcurementFilters(start_date=date(2026, 1, 1), end_date=date(2026, 1, 31))
+    )
+    items = await connector.fetch_items("12345678000195-1-000001/2026")
+    results = await connector.fetch_results("12345678000195-1-000001/2026")
+
+    assert discovery.data[0].estimated_value is None
+    assert items.data[0].quantity is None
+    assert items.data[0].estimated_unit_value is None
+    assert items.data[0].estimated_total_value is None
+    assert results.data[0].total_value is None
+    assert results.data[0].rank is None
+    await raw_client.aclose()
+
+
+@pytest.mark.asyncio
 async def test_pncp_events_are_not_confused_with_technical_history() -> None:
     http = AsyncHTTPClient(_settings())
     connector = PNCPConnector(_settings(), http_client=http)

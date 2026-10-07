@@ -593,6 +593,8 @@ def _source_views(run: CrawlRun) -> list[SimpleNamespace]:
             found_value = (
                 run.records_found if len(successful) == 1 and source_id in successful else None
             )
+        failed_value = stored.get("records_failed")
+        records_failed = int(failed_value) if isinstance(failed_value, (int, float)) else 0
         duration_value = stored.get("duration_seconds")
         duration = float(duration_value) if isinstance(duration_value, (int, float)) else None
         attempts_value = stored.get("max_attempts_per_request")
@@ -611,6 +613,7 @@ def _source_views(run: CrawlRun) -> list[SimpleNamespace]:
                 status=status,
                 status_label=_STATUS_LABELS.get(status, status.replace("_", " ").title()),
                 records_found=found_value,
+                records_failed=records_failed,
                 duration=_duration_label(duration),
                 max_attempts=max_attempts,
                 friendly_error=None if active else _friendly_source_error(source_id, diagnostics),
