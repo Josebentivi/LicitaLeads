@@ -144,7 +144,8 @@
   <ul>
     <li><strong>Iniciar uma coleta:</strong> pelo terminal (<code>python -m app.cli run-pipeline --uf MA --days 7</code> ou <code>python -m app.cli crawl-atas all --days 365</code>) ou pela API (<code>POST /api/crawls/run</code>). A tela <a href="/crawls">Coletas</a> apenas acompanha.</li>
     <li><strong>Encerrar:</strong> uma coleta em andamento pode ser encerrada na própria tela.</li>
-    <li><strong>Repetir:</strong> se uma fonte falhar, o botão "Tentar novamente" refaz somente aquela fonte, com os mesmos filtros.</li>
+    <li><strong>Repetir:</strong> se uma fonte falhar, o botão "Tentar novamente" refaz somente aquela fonte, com os mesmos filtros. Se a coleta inteira falhou ou foi interrompida (por exemplo, o programa foi fechado), use <strong>"Repetir coleta"</strong> para refazer tudo com os mesmos filtros.</li>
+    <li><strong>Interrompida:</strong> quando o processo é encerrado no meio, a coleta é marcada como falha automaticamente e a trava é liberada; nada válido é perdido.</li>
     <li><strong>Parcial:</strong> uma fonte falhou e a outra concluiu; nada válido é perdido.</li>
     <li><strong>Documentos:</strong> são baixados e processados automaticamente após a coleta; também podem ser processados pelo comando <code>python -m app.cli process-documents</code>.</li>
     <li><strong>Atualizar campos antigos:</strong> <code>python -m app.cli backfill-fields</code> recupera SRP, amparo legal e rota de contratação de coletas anteriores, sem novo download.</li>

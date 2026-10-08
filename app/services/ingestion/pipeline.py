@@ -11,7 +11,7 @@ from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from enum import Enum
 from typing import Any, cast
-from uuid import UUID, uuid4
+from uuid import UUID
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -202,7 +202,7 @@ class IngestionPipeline:
 
         if run_id is None:
             run_id = (await self.create_run(request)).id
-        owner = f"pipeline:{uuid4()}"
+        owner = f"pipeline:{run_id}"
         lease_name = f"crawl:{request.connector.lower()}:{request.uf.upper()}"
         acquired = await self._acquire_lease(lease_name, owner)
         if not acquired:

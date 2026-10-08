@@ -202,6 +202,7 @@ As páginas não aparecem no Swagger (`include_in_schema=False`).
 | `/leads/{id}` | Detalhe do lead, evidências e último rascunho |
 | `/crawls` e `/crawls/table` | Execuções por fonte, com fragmento HTMX repollado e retry por fonte |
 | `/crawls/{id}/cancel` | Encerra uma coleta ativa (form; redireciona de volta) |
+| `/crawls/{id}/retry-all` | Recria uma coleta terminal (falhou/parcial/cancelada) com os filtros originais; `409` se já houver coleta ativa para a fonte |
 | `/settings` | Visão pública das configurações e zona de risco (reset) |
 | `/settings/clear-data` | Apaga todos os dados após confirmação explícita (form) |
 | `/source-capabilities` | Matriz de capacidades das fontes |

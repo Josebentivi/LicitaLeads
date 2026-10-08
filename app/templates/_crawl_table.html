@@ -53,6 +53,11 @@
               <button type="submit" class="button secondary compact">Encerrar coleta</button>
             </form>
             {% endif %}
+            {% if run.retry_all %}
+            <form method="post" action="/crawls/{{ run.id }}/retry-all" class="retry-form" onsubmit="return confirm('Repetir esta coleta com os mesmos filtros?');">
+              <button type="submit" class="button secondary compact">Repetir coleta</button>
+            </form>
+            {% endif %}
             {% set diagnostics = namespace(found=false) %}
             {% for source in run.sources %}
               {% if source.friendly_error %}

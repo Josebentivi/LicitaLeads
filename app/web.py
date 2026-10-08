@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
 from types import SimpleNamespace
-from typing import Annotated
+from typing import Annotated, Any
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
@@ -644,6 +644,10 @@ def _source_views(run: CrawlRun) -> list[SimpleNamespace]:
         if active:
             # A source has no terminal result until the whole crawl finishes.
             status = "running" if run.status is CrawlRunStatus.RUNNING else "pending"
+        elif status in {"running", "pending"}:
+            # A terminal run can never leave a source "in progress"; this covers
+            # runs recovered from an interrupted process.
+            status = "cancelled" if run.status is CrawlRunStatus.CANCELLED else "failed"
         elif not status:
             status = "temporary_error" if source_id in failed_legacy else "completed"
         found_value = stored.get("records_found")
@@ -756,6 +760,15 @@ def _crawl_view(run: CrawlRun) -> SimpleNamespace:
         sources=_source_views(run),
         general_error=general_error,
         general_technical_detail="\n".join(general_diagnostics),
+        retry_all=(
+            run.status
+            in {
+                CrawlRunStatus.FAILED,
+                CrawlRunStatus.PARTIAL,
+                CrawlRunStatus.CANCELLED,
+            }
+            and bool(run.filters)
+        ),
     )
 
 
@@ -1465,6 +1478,27 @@ async def cancel_crawl_from_web(
     return RedirectResponse("/crawls", status_code=303)
 
 
+def _retry_request(filters: dict[str, Any], *, connector: str) -> PipelineRequest:
+    """Rebuild a crawl request from the filters persisted on a previous run."""
+
+    modalities = filters.get("modalities") or get_settings().default_modalities
+    return PipelineRequest(
+        connector=connector,
+        mode=str(filters.get("mode") or "procurements"),
+        uf=str(filters.get("uf") or get_settings().default_uf),
+        days=filters.get("days"),
+        start_date=_filter_date(filters.get("start_date")),
+        end_date=_filter_date(filters.get("end_date")),
+        modalities=tuple(str(item) for item in modalities),
+        municipality=filters.get("municipality"),
+        agency=filters.get("agency"),
+        keyword=filters.get("keyword"),
+        max_pages=filters.get("max_pages"),
+        process_documents=bool(filters.get("process_documents", True)),
+        document_batch_size=filters.get("document_batch_size"),
+    )
+
+
 @router.post("/crawls/{run_id}/retry")
 async def retry_failed_crawl_source(
     run_id: UUID,
@@ -1480,23 +1514,47 @@ async def retry_failed_crawl_source(
     if connector not in failed_sources or connector not in _SOURCE_LABELS:
         raise HTTPException(status_code=409, detail="Essa fonte não possui falha repetível")
 
+    retry_request = _retry_request(run.filters or {}, connector=connector)
+    retry_run = await IngestionPipeline().create_run(retry_request)
+    launch_crawl(retry_run.id, retry_request)
+    return RedirectResponse("/crawls", status_code=303)
+
+
+@router.post("/crawls/{run_id}/retry-all")
+async def retry_terminal_crawl(
+    run_id: UUID,
+    db: AsyncSession = Depends(get_db),
+) -> RedirectResponse:
+    """Recreate a terminal crawl (failed/partial/cancelled) from its original filters."""
+
+    run = await db.get(CrawlRun, run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="Coleta não encontrada")
+    if run.status not in {
+        CrawlRunStatus.FAILED,
+        CrawlRunStatus.PARTIAL,
+        CrawlRunStatus.CANCELLED,
+    }:
+        raise HTTPException(status_code=409, detail="A coleta não está em estado repetível")
     filters = run.filters or {}
-    modalities = filters.get("modalities") or get_settings().default_modalities
-    retry_request = PipelineRequest(
-        connector=connector,
-        mode=str(filters.get("mode") or "procurements"),
-        uf=str(filters.get("uf") or get_settings().default_uf),
-        days=filters.get("days"),
-        start_date=_filter_date(filters.get("start_date")),
-        end_date=_filter_date(filters.get("end_date")),
-        modalities=tuple(str(item) for item in modalities),
-        municipality=filters.get("municipality"),
-        agency=filters.get("agency"),
-        keyword=filters.get("keyword"),
-        max_pages=filters.get("max_pages"),
-        process_documents=bool(filters.get("process_documents", True)),
-        document_batch_size=filters.get("document_batch_size"),
+    connector = str(filters.get("connector") or run.connector)
+    active = int(
+        (
+            await db.scalar(
+                select(func.count())
+                .select_from(CrawlRun)
+                .where(
+                    CrawlRun.connector == connector,
+                    CrawlRun.status.in_([CrawlRunStatus.PENDING, CrawlRunStatus.RUNNING]),
+                )
+            )
+        )
+        or 0
     )
+    if active:
+        raise HTTPException(status_code=409, detail="Já existe coleta em andamento para esta fonte")
+
+    retry_request = _retry_request(filters, connector=connector)
     retry_run = await IngestionPipeline().create_run(retry_request)
     launch_crawl(retry_run.id, retry_request)
     return RedirectResponse("/crawls", status_code=303)

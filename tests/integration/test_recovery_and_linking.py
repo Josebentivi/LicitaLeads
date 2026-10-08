@@ -5,11 +5,13 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
+from types import SimpleNamespace
 
 import httpx
 import pytest
 from sqlalchemy import func, select
 
+from app import web as web_routes
 from app.models import (
     Company,
     CrawlRun,
@@ -17,6 +19,7 @@ from app.models import (
     Deadline,
     Document,
     ExtractionStatus,
+    JobLease,
     Lead,
     Participant,
     ParticipantRole,
@@ -147,6 +150,168 @@ async def test_reconcile_marks_stale_cancelled_runs_as_cancelled(
         stored = await session.get(CrawlRun, cancelled_id)
     assert stored is not None and stored.status is CrawlRunStatus.CANCELLED
     assert "cancelada" in (stored.diagnostic or "")
+
+
+@pytest.mark.asyncio
+async def test_reconcile_normalizes_cursor_and_releases_lease(
+    database: DatabaseContext,
+) -> None:
+    """An interrupted run must not keep a source "running" nor hold its lease."""
+
+    now = datetime.now(UTC)
+    async with database.sessions() as session, session.begin():
+        stale = CrawlRun(
+            connector="all",
+            status=CrawlRunStatus.RUNNING,
+            started_at=now - timedelta(hours=5),
+            created_at=now - timedelta(hours=5),
+            filters={"connector": "all", "uf": "MA"},
+            cursor={
+                "sources": {
+                    "pncp": {
+                        "status": "running",
+                        "records_found": 10,
+                        "progress": {"processed": 3, "total": 10},
+                    }
+                }
+            },
+        )
+        session.add(stale)
+        await session.flush()
+        stale_id = stale.id
+        session.add(
+            JobLease(
+                name="crawl:all:MA",
+                owner_id=f"pipeline:{stale_id}",
+                acquired_at=now - timedelta(hours=5),
+                heartbeat_at=now - timedelta(hours=5),
+                expires_at=now + timedelta(hours=1),
+            )
+        )
+
+    reconciled = await reconcile_stale_crawls(
+        session_factory=database.sessions, now=now, stale_after_minutes=180
+    )
+
+    assert reconciled == 1
+    async with database.sessions() as session:
+        stored = await session.get(CrawlRun, stale_id)
+        lease = await session.get(JobLease, "crawl:all:MA")
+    assert stored is not None
+    source = stored.cursor["sources"]["pncp"]
+    assert source["status"] == "failed"
+    assert source["progress"] == {"processed": 3, "total": 10}
+    assert any("interrompida" in item for item in source["diagnostics"])
+    assert lease is None
+
+
+@pytest.mark.asyncio
+async def test_reconcile_does_not_release_a_newer_lease(
+    database: DatabaseContext,
+) -> None:
+    """A lease held by another (newer) run is preserved."""
+
+    now = datetime.now(UTC)
+    async with database.sessions() as session, session.begin():
+        stale = CrawlRun(
+            connector="pncp",
+            status=CrawlRunStatus.RUNNING,
+            started_at=now - timedelta(hours=5),
+            created_at=now - timedelta(hours=5),
+            filters={"connector": "pncp", "uf": "MA"},
+        )
+        session.add(stale)
+        await session.flush()
+        session.add(
+            JobLease(
+                name="crawl:pncp:MA",
+                owner_id="pipeline:00000000-0000-0000-0000-000000000999",
+                acquired_at=now,
+                heartbeat_at=now,
+                expires_at=now + timedelta(hours=1),
+            )
+        )
+
+    await reconcile_stale_crawls(
+        session_factory=database.sessions, now=now, stale_after_minutes=180
+    )
+
+    async with database.sessions() as session:
+        lease = await session.get(JobLease, "crawl:pncp:MA")
+    assert lease is not None
+
+
+@pytest.mark.asyncio
+async def test_terminal_run_shows_failed_source_and_can_be_repeated(
+    api_client: httpx.AsyncClient,
+    database: DatabaseContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A terminal run never shows a source "Em andamento" and offers full retry."""
+
+    now = datetime.now(UTC)
+    async with database.sessions() as session, session.begin():
+        run = CrawlRun(
+            connector="all",
+            status=CrawlRunStatus.FAILED,
+            started_at=now - timedelta(hours=8),
+            finished_at=now - timedelta(hours=1),
+            filters={
+                "connector": "all",
+                "uf": "MA",
+                "days": 7,
+                "modalities": ["pregao_eletronico"],
+                "process_documents": False,
+            },
+            cursor={
+                "sources": {
+                    "pncp": {
+                        "status": "running",
+                        "records_found": 479,
+                        "progress": {"processed": 119, "total": 479},
+                    }
+                }
+            },
+        )
+        session.add(run)
+        await session.flush()
+        run_id = run.id
+
+    page = await api_client.get("/crawls")
+
+    assert page.status_code == 200
+    assert "Em andamento" not in page.text
+    assert "Repetir coleta" in page.text
+
+    captured: list[object] = []
+    fake_retry = SimpleNamespace(id="00000000-0000-0000-0000-000000000324")
+
+    async def create_retry(_self, request):
+        captured.append(request)
+        return fake_retry
+
+    monkeypatch.setattr(web_routes.IngestionPipeline, "create_run", create_retry)
+    monkeypatch.setattr(web_routes, "launch_crawl", lambda *args: captured.append(args))
+
+    retry = await api_client.post(f"/crawls/{run_id}/retry-all", follow_redirects=False)
+
+    assert retry.status_code == 303
+    assert captured[0].connector == "all"
+    assert captured[0].uf == "MA"
+    assert captured[0].days == 7
+    assert len(captured) == 2
+
+    async with database.sessions() as session, session.begin():
+        session.add(
+            CrawlRun(
+                connector="all",
+                status=CrawlRunStatus.RUNNING,
+                started_at=now,
+                filters={},
+            )
+        )
+    blocked = await api_client.post(f"/crawls/{run_id}/retry-all", follow_redirects=False)
+    assert blocked.status_code == 409
 
 
 @pytest.mark.asyncio

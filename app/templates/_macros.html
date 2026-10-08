@@ -1,6 +1,6 @@
-{%- macro info_tip(text, label='Mais informações') -%}
+{%- macro info_tip(text) -%}
 <span class="info-tip">
-  <button type="button" class="info-tip-button" aria-label="{{ label }}" title="{{ text }}">i</button>
+  <button type="button" class="info-tip-button" aria-label="{{ text }}">i</button>
   <span class="info-tip-bubble" role="tooltip">{{ text }}</span>
 </span>
 {%- endmacro -%}
