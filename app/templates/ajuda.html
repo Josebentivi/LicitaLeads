@@ -150,6 +150,7 @@
     <li><strong>Documentos:</strong> são baixados e processados automaticamente após a coleta; também podem ser processados pelo comando <code>python -m app.cli process-documents</code>.</li>
     <li><strong>Atualizar campos antigos:</strong> <code>python -m app.cli backfill-fields</code> recupera SRP, amparo legal e rota de contratação de coletas anteriores, sem novo download.</li>
     <li><strong>Cuidado com o reset:</strong> em Configurações, "Apagar todos os dados" remove tudo e não pode ser desfeito.</li>
+    <li><strong>Bloqueio por trava antiga:</strong> se o apagamento indicar um job em andamento sem haver trabalho real, use "Liberar travas antigas" na própria tela; travas expiradas ou de coleta inativa são removidas automaticamente antes do apagamento.</li>
   </ul>
 </section>
 {% endblock %}

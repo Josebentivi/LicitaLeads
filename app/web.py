@@ -37,6 +37,7 @@ from app.models import (
     ProcurementEvent,
     ProcurementItem,
 )
+from app.repositories.crawls import JobLeaseRepository
 from app.repositories.leads import CompanyContactRepository
 from app.repositories.price_registries import PriceRegistryRepository
 from app.repositories.procurements import (
@@ -51,6 +52,7 @@ from app.services.ingestion.processor import DocumentProcessingService
 from app.services.maintenance import (
     COUNT_TABLE_LABELS,
     MaintenanceBlocked,
+    active_leases,
     clear_all_data,
     data_counts,
     maintenance_blocked_reason,
@@ -1569,6 +1571,7 @@ async def help_page(request: Request):
 
 @router.get("/settings")
 async def settings_page(request: Request, db: AsyncSession = Depends(get_db)):
+    leases = await active_leases(db)
     return templates.TemplateResponse(
         request,
         "settings.html",
@@ -1577,9 +1580,22 @@ async def settings_page(request: Request, db: AsyncSession = Depends(get_db)):
             "counts": await data_counts(db),
             "count_labels": COUNT_TABLE_LABELS,
             "block_reason": await maintenance_blocked_reason(db),
+            "leases": [
+                SimpleNamespace(name=name, expires_at=_local_datetime(expires))
+                for name, expires in leases
+            ],
             "reset_status": request.query_params.get("reset"),
         },
     )
+
+
+@router.post("/settings/release-stale-leases")
+async def release_stale_leases(db: AsyncSession = Depends(get_db)) -> RedirectResponse:
+    """Delete expired leases and orphan crawl leases, then return to settings."""
+
+    await JobLeaseRepository(db).purge_stale(now=datetime.now(UTC))
+    await db.commit()
+    return RedirectResponse("/settings?reset=livre", status_code=303)
 
 
 @router.post("/settings/clear-data")

@@ -135,3 +135,38 @@ class JobLeaseRepository:
             ),
         )
         return bool(result.rowcount)
+
+    async def purge_stale(self, *, now: datetime) -> int:
+        """Remove expired leases and crawl leases with no active run.
+
+        Expired rows are inert (``acquire`` steals them), and a crawl lease is
+        only meaningful while its run is pending/running. Leases of active runs
+        are preserved.
+        """
+
+        removed = 0
+        expired = cast(
+            CursorResult[Any],
+            await self.session.execute(delete(JobLease).where(JobLease.expires_at <= now)),
+        )
+        removed += int(expired.rowcount or 0)
+
+        active_names: set[str] = set()
+        active_runs = await self.session.scalars(
+            select(CrawlRun).where(
+                CrawlRun.status.in_([CrawlRunStatus.PENDING, CrawlRunStatus.RUNNING])
+            )
+        )
+        for run in active_runs.all():
+            filters = run.filters if isinstance(run.filters, dict) else {}
+            connector = str(filters.get("connector") or run.connector)
+            uf = str(filters.get("uf") or "").upper()
+            if uf:
+                active_names.add(f"crawl:{connector.lower()}:{uf}")
+
+        crawl_delete = delete(JobLease).where(JobLease.name.like("crawl:%"))
+        if active_names:
+            crawl_delete = crawl_delete.where(JobLease.name.not_in(active_names))
+        orphans = cast(CursorResult[Any], await self.session.execute(crawl_delete))
+        removed += int(orphans.rowcount or 0)
+        return removed

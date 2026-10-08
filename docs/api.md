@@ -205,5 +205,6 @@ As páginas não aparecem no Swagger (`include_in_schema=False`).
 | `/crawls/{id}/retry-all` | Recria uma coleta terminal (falhou/parcial/cancelada) com os filtros originais; `409` se já houver coleta ativa para a fonte |
 | `/settings` | Visão pública das configurações e zona de risco (reset) |
 | `/settings/clear-data` | Apaga todos os dados após confirmação explícita (form) |
+| `/settings/release-stale-leases` | Remove travas expiradas e travas de coleta sem coleta ativa (form) |
 | `/source-capabilities` | Matriz de capacidades das fontes |
 | `/ajuda` | Manual de uso em linguagem simples, voltado ao advogado, com seção curta de operação das coletas |

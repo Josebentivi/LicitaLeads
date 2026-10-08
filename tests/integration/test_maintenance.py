@@ -277,3 +277,125 @@ async def test_maintenance_service_helpers_directly(
         result = await maintenance.clear_all_data(session, settings=settings)
     assert result.counts["procurements"] == 1
     assert result.total_records >= 3
+
+
+@pytest.mark.asyncio
+async def test_expired_and_orphan_leases_do_not_block_reset(
+    database: DatabaseContext,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Leases left by dead processes are cleaned instead of blocking the operator."""
+
+    settings = _settings(tmp_path)
+    monkeypatch.setattr(maintenance, "get_settings", lambda: settings)
+    await _seed(database)
+    now = datetime.now(UTC)
+    async with database.sessions() as session, session.begin():
+        session.add_all(
+            [
+                JobLease(
+                    name="scheduler:stale_job",
+                    owner_id="host:dead",
+                    acquired_at=now - timedelta(hours=4),
+                    heartbeat_at=now - timedelta(hours=4),
+                    expires_at=now - timedelta(hours=2),
+                ),
+                JobLease(
+                    name="crawl:all:MA",
+                    owner_id="pipeline:dead",
+                    acquired_at=now - timedelta(hours=4),
+                    heartbeat_at=now - timedelta(hours=4),
+                    expires_at=now + timedelta(hours=1),
+                ),
+            ]
+        )
+
+    async with database.sessions() as session:
+        reason = await maintenance.maintenance_blocked_reason(session)
+    assert reason is None
+
+    async with database.sessions() as session:
+        result = await maintenance.clear_all_data(session, settings=settings)
+    assert result.counts["procurements"] == 1
+    async with database.sessions() as session:
+        remaining = await session.scalar(select(func.count()).select_from(JobLease))
+    assert remaining == 0
+
+
+@pytest.mark.asyncio
+async def test_valid_scheduler_lease_blocks_and_is_listed_with_details(
+    api_client: httpx.AsyncClient,
+    database: DatabaseContext,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unexpired scheduler lease still blocks, and the page shows how to recover."""
+
+    settings = _settings(tmp_path)
+    monkeypatch.setattr(maintenance, "get_settings", lambda: settings)
+    await _seed(database)
+    now = datetime.now(UTC)
+    async with database.sessions() as session, session.begin():
+        session.add(
+            JobLease(
+                name="scheduler:enrich_pending_companies",
+                owner_id="host:alive",
+                acquired_at=now,
+                heartbeat_at=now,
+                expires_at=now + timedelta(minutes=30),
+            )
+        )
+
+    page = await api_client.get("/settings")
+
+    assert page.status_code == 200
+    assert "Bloqueado agora" in page.text
+    assert "scheduler" in page.text
+    assert "scheduler:enrich_pending_companies" in page.text
+    assert "Detalhes técnicos" in page.text
+    assert "Liberar travas antigas" in page.text
+    async with database.sessions() as session:
+        reason = await maintenance.maintenance_blocked_reason(session)
+    assert reason is not None and "scheduler" in reason
+
+
+@pytest.mark.asyncio
+async def test_release_stale_leases_endpoint_purges_orphans(
+    api_client: httpx.AsyncClient,
+    database: DatabaseContext,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The operator action removes expired and orphan crawl leases."""
+
+    settings = _settings(tmp_path)
+    monkeypatch.setattr(maintenance, "get_settings", lambda: settings)
+    now = datetime.now(UTC)
+    async with database.sessions() as session, session.begin():
+        session.add_all(
+            [
+                JobLease(
+                    name="scheduler:stale_job",
+                    owner_id="host:dead",
+                    acquired_at=now - timedelta(hours=4),
+                    heartbeat_at=now - timedelta(hours=4),
+                    expires_at=now - timedelta(hours=2),
+                ),
+                JobLease(
+                    name="crawl:all:MA",
+                    owner_id="pipeline:dead",
+                    acquired_at=now - timedelta(hours=4),
+                    heartbeat_at=now - timedelta(hours=4),
+                    expires_at=now + timedelta(hours=1),
+                ),
+            ]
+        )
+
+    response = await api_client.post("/settings/release-stale-leases", follow_redirects=False)
+
+    assert response.status_code == 303
+    assert response.headers["location"] == "/settings?reset=livre"
+    async with database.sessions() as session:
+        remaining = await session.scalar(select(func.count()).select_from(JobLease))
+    assert remaining == 0

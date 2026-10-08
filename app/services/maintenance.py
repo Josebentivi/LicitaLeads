@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from contextlib import suppress
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 
 from sqlalchemy import delete, func, select
@@ -12,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import Settings, get_settings
 from app.models import Base, CrawlRun, CrawlRunStatus, JobLease
+from app.repositories.crawls import JobLeaseRepository
 
 COUNT_TABLE_LABELS: dict[str, str] = {
     "procurements": "Contratações",
@@ -50,9 +52,19 @@ class ClearDataResult:
         return sum(self.counts.values())
 
 
-async def maintenance_blocked_reason(session: AsyncSession) -> str | None:
-    """Explain why the reset cannot run right now, or return ``None``."""
+async def maintenance_blocked_reason(
+    session: AsyncSession,
+    *,
+    now: datetime | None = None,
+) -> str | None:
+    """Explain why the reset cannot run right now, or return ``None``.
 
+    Only unexpired leases count: rows left behind by a killed process are
+    inert and must not block the operator forever. Crawl leases are covered by
+    the active-run check, so they never block by themselves.
+    """
+
+    moment = now or datetime.now(UTC)
     active = int(
         await session.scalar(
             select(func.count())
@@ -63,10 +75,28 @@ async def maintenance_blocked_reason(session: AsyncSession) -> str | None:
     )
     if active:
         return f"{active} coleta(s) em andamento — encerre em /crawls antes de apagar os dados"
-    leases = int(await session.scalar(select(func.count()).select_from(JobLease)) or 0)
-    if leases:
+    leases = list(
+        (await session.scalars(select(JobLease).where(JobLease.expires_at > moment))).all()
+    )
+    if any(not lease.name.startswith("crawl:") for lease in leases):
         return "um job do scheduler está em andamento — tente novamente em alguns minutos"
     return None
+
+
+async def active_leases(
+    session: AsyncSession,
+    *,
+    now: datetime | None = None,
+) -> list[tuple[str, datetime]]:
+    """Return unexpired leases as ``(name, expires_at)`` for diagnosis."""
+
+    moment = now or datetime.now(UTC)
+    rows = await session.scalars(
+        select(JobLease)
+        .where(JobLease.expires_at > moment)
+        .order_by(JobLease.expires_at, JobLease.name)
+    )
+    return [(lease.name, lease.expires_at) for lease in rows.all()]
 
 
 async def data_counts(session: AsyncSession) -> dict[str, int]:
@@ -90,8 +120,11 @@ async def clear_all_data(
     """
 
     selected = settings or get_settings()
+    await JobLeaseRepository(session).purge_stale(now=datetime.now(UTC))
     reason = await maintenance_blocked_reason(session)
     if reason is not None:
+        # Keep the stale-lease cleanup even when the reset is refused.
+        await session.commit()
         raise MaintenanceBlocked(reason)
 
     result = ClearDataResult()

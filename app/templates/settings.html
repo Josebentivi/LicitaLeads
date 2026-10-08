@@ -26,12 +26,26 @@
   <p class="alert error">Marque a caixa de confirmação para apagar os dados.</p>
   {% elif reset_status == 'bloqueado' %}
   <p class="alert error">Não foi possível apagar: {{ block_reason or 'há trabalho em andamento' }}.</p>
+  {% elif reset_status == 'livre' %}
+  <p class="alert success">Travas antigas liberadas. Se o bloqueio continuar, veja os detalhes técnicos abaixo.</p>
   {% endif %}
   <ul class="count-list">
     {% for name, value in counts.items() %}<li>{{ count_labels[name] }}: <strong>{{ value }}</strong></li>{% endfor %}
   </ul>
   {% if block_reason %}
   <p class="alert error">Bloqueado agora: {{ block_reason }}. <a href="/crawls">Ver coletas</a>.</p>
+  {% if leases %}
+  <details class="technical-details">
+    <summary>Detalhes técnicos</summary>
+    <ul class="technical-source-list">
+      {% for lease in leases %}<li><code>{{ lease.name }}</code> — expira em {{ lease.expires_at }}</li>{% endfor %}
+    </ul>
+  </details>
+  {% endif %}
+  <form method="post" action="/settings/release-stale-leases" onsubmit="return confirm('Liberar travas antigas?');">
+    <button type="submit" class="button secondary">Liberar travas antigas</button>
+  </form>
+  <p class="hint">Travas expiradas e travas de coleta sem coleta ativa são removidas imediatamente. Travas de job válidas continuam bloqueando até terminarem.</p>
   <button type="button" class="button danger" disabled>Apagar todos os dados</button>
   {% else %}
   <form method="post" action="/settings/clear-data" onsubmit="return confirm('Apagar todos os dados? Esta ação não pode ser desfeita.');">
