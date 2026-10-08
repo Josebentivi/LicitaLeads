@@ -127,6 +127,12 @@ O scheduler é deliberadamente separado da API:
 python -m app.jobs.scheduler
 ```
 
+Ele coleta automaticamente por padrão (descoberta a cada 6 h, atualização a
+cada 60 min, documentos a cada 2 h). As coletas automáticas podem ser
+pausadas/retomadas em Configurações (as rotinas continuam rodando, mas são
+puladas) e o reset de dados as pausa para não repovoar o banco. Use
+`iniciar.bat --no-scheduler` para subir sem scheduler.
+
 ## Banco e migrations
 
 O padrão é `sqlite:///./data/licita_lead.db`.

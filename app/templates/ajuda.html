@@ -143,6 +143,7 @@
   <p>Esta seção é curta e voltada a quem inicia e acompanha as coletas. O advogado não precisa dela no dia a dia.</p>
   <ul>
     <li><strong>Iniciar uma coleta:</strong> pelo terminal (<code>python -m app.cli run-pipeline --uf MA --days 7</code> ou <code>python -m app.cli crawl-atas all --days 365</code>) ou pela API (<code>POST /api/crawls/run</code>). A tela <a href="/crawls">Coletas</a> apenas acompanha.</li>
+    <li><strong>Coletas automáticas:</strong> por padrão, o sistema também coleta sozinho (atualização a cada 60 minutos, descoberta a cada 6 horas, documentos a cada 2 horas). Para parar sem desligar o programa, use <strong>"Pausar coletas automáticas"</strong> em Configurações; o botão "Retomar" volta a ativar. Apagar todos os dados pausa as coletas automaticamente para o banco não ser repovoado na hora.</li>
     <li><strong>Encerrar:</strong> uma coleta em andamento pode ser encerrada na própria tela.</li>
     <li><strong>Repetir:</strong> se uma fonte falhar, o botão "Tentar novamente" refaz somente aquela fonte, com os mesmos filtros. Se a coleta inteira falhou ou foi interrompida (por exemplo, o programa foi fechado), use <strong>"Repetir coleta"</strong> para refazer tudo com os mesmos filtros.</li>
     <li><strong>Interrompida:</strong> quando o processo é encerrado no meio, a coleta é marcada como falha automaticamente e a trava é liberada; nada válido é perdido.</li>

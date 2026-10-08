@@ -11,6 +11,30 @@
   <dl class="facts">{% for key, value in settings.items() %}<div><dt>{{ key }}</dt><dd>{{ value }}</dd></div>{% endfor %}</dl>
   <p class="hint">Segredos são sempre ocultados. Edite o arquivo .env e reinicie os processos para alterar configurações.</p>
 </section>
+<section class="panel">
+  <h2>Coletas automáticas (scheduler)</h2>
+  <p>
+    O scheduler é um processo separado que atualiza contratações, processa documentos e recalcula prazos em intervalos fixos. Pausar aqui não encerra o processo: os jobs são simplesmente pulados até você retomar.
+  </p>
+  <p>
+    <span class="badge{% if scheduler.paused %} status-pending{% endif %}">{% if scheduler.paused %}Pausado{% else %}Ativo{% endif %}</span>
+    {% if scheduler.last_activity_at %}<small>Última atividade: {{ scheduler.last_activity_at }}</small>{% else %}<small>Sem atividade registrada.</small>{% endif %}
+  </p>
+  {% if scheduler_feedback == 'pausado' %}
+  <p class="alert success">Coletas automáticas pausadas.</p>
+  {% elif scheduler_feedback == 'ativo' %}
+  <p class="alert success">Coletas automáticas retomadas.</p>
+  {% endif %}
+  {% if scheduler.paused %}
+  <form method="post" action="/settings/resume-scheduler">
+    <button type="submit" class="button">Retomar coletas automáticas</button>
+  </form>
+  {% else %}
+  <form method="post" action="/settings/pause-scheduler" onsubmit="return confirm('Pausar as coletas automáticas?');">
+    <button type="submit" class="button secondary">Pausar coletas automáticas</button>
+  </form>
+  {% endif %}
+</section>
 <section class="panel danger-zone">
   <h2>Zona de risco</h2>
   <p>
@@ -21,7 +45,7 @@
     sistema são preservados.
   </p>
   {% if reset_status == 'ok' %}
-  <p class="alert success">Dados apagados. O sistema está zerado e pronto para uma nova coleta.</p>
+  <p class="alert success">Dados apagados. O sistema está zerado e pronto para uma nova coleta. As coletas automáticas foram <strong>pausadas</strong> para não repovoar o banco; retome quando quiser no painel acima.</p>
   {% elif reset_status == 'sem-confirmacao' %}
   <p class="alert error">Marque a caixa de confirmação para apagar os dados.</p>
   {% elif reset_status == 'bloqueado' %}

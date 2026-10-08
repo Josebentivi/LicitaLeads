@@ -181,8 +181,10 @@ contratação; a operação registra uma decisão humana e nunca inventa víncul
 | `POST /api/maintenance/clear-data` | Apaga todos os dados coletados e arquivos baixados (ação destrutiva e irreversível) |
 
 Corpo: `confirm` (`true` obrigatório). Responde `200` com `counts` (linhas por
-tabela) e `files_removed`; `422` sem confirmação; `409` quando há coleta ou job
-do scheduler em andamento. Configuração (`.env`) e migrations são preservadas.
+tabela), `files_removed` e `scheduler_paused` (as coletas automáticas são
+pausadas para o banco não ser repovoado); `422` sem confirmação; `409` quando há
+coleta ou job do scheduler em andamento. Configuração (`.env`) e migrations são
+preservadas.
 
 ## Páginas web (Jinja2/HTMX)
 
@@ -203,8 +205,10 @@ As páginas não aparecem no Swagger (`include_in_schema=False`).
 | `/crawls` e `/crawls/table` | Execuções por fonte, com fragmento HTMX repollado e retry por fonte |
 | `/crawls/{id}/cancel` | Encerra uma coleta ativa (form; redireciona de volta) |
 | `/crawls/{id}/retry-all` | Recria uma coleta terminal (falhou/parcial/cancelada) com os filtros originais; `409` se já houver coleta ativa para a fonte |
-| `/settings` | Visão pública das configurações e zona de risco (reset) |
+| `/settings` | Visão pública das configurações, status do scheduler e zona de risco (reset) |
 | `/settings/clear-data` | Apaga todos os dados após confirmação explícita (form) |
+| `/settings/pause-scheduler` | Pausa as coletas automáticas (form) |
+| `/settings/resume-scheduler` | Retoma as coletas automáticas (form) |
 | `/settings/release-stale-leases` | Remove travas expiradas e travas de coleta sem coleta ativa (form) |
 | `/source-capabilities` | Matriz de capacidades das fontes |
 | `/ajuda` | Manual de uso em linguagem simples, voltado ao advogado, com seção curta de operação das coletas |

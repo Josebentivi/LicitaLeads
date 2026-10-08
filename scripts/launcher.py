@@ -33,6 +33,7 @@ from typing import IO
 REPO_ROOT = Path(__file__).resolve().parents[1]
 LAUNCHER_PATH = Path(__file__).resolve()
 SCHEDULER_LOG = REPO_ROOT / "data" / "scheduler.log"
+SCHEDULER_PID = REPO_ROOT / "data" / "scheduler.pid"
 PYTHON_DOWNLOAD_URL = "https://www.python.org/downloads/windows/"
 JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x2000
 JOB_OBJECT_EXTENDED_LIMIT_INFORMATION = 9
@@ -856,6 +857,61 @@ def _assign_kill_on_close_job(process: subprocess.Popen[bytes]) -> object | None
     return job
 
 
+def _read_scheduler_pid() -> int | None:
+    """Return the pid left by a previous launcher session, when present."""
+
+    try:
+        text = SCHEDULER_PID.read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    return int(text) if text.isdigit() else None
+
+
+def _pid_is_python(pid: int) -> bool:
+    """Best-effort check that a live pid belongs to a python process.
+
+    The process-name check avoids killing an unrelated program in the unlikely
+    case of Windows pid reuse.
+    """
+
+    if os.name == "nt":
+        try:
+            result = subprocess.run(
+                ["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return False
+        return "python" in (result.stdout or "").lower()
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    return True
+
+
+def _stop_orphan_scheduler() -> None:
+    """Stop a scheduler left behind by a previous launcher session.
+
+    Only the pid recorded by the launcher is touched; a scheduler started
+    manually has no pidfile and is left alone.
+    """
+
+    pid = _read_scheduler_pid()
+    if pid is not None and pid != os.getpid() and _pid_is_python(pid):
+        print(f"[--] Encerrando scheduler anterior (pid {pid})...")
+        with suppress(OSError, subprocess.SubprocessError):
+            subprocess.run(
+                ["taskkill", "/PID", str(pid), "/T", "/F"],
+                capture_output=True,
+                timeout=15,
+            )
+    with suppress(OSError):
+        SCHEDULER_PID.unlink()
+
+
 class _Scheduler:
     """Own the optional scheduler process and stop it with the launcher."""
 
@@ -880,6 +936,8 @@ class _Scheduler:
             env={**os.environ, **(env or {})},
         )
         self.job = _assign_kill_on_close_job(self.process)
+        with suppress(OSError):
+            SCHEDULER_PID.write_text(str(self.process.pid), encoding="utf-8")
 
     def stop(self) -> None:
         if self.stopped:
@@ -891,6 +949,9 @@ class _Scheduler:
                 self.process.wait(timeout=10)
             except subprocess.TimeoutExpired:
                 self.process.kill()
+        if self.process is not None and _read_scheduler_pid() == self.process.pid:
+            with suppress(OSError):
+                SCHEDULER_PID.unlink()
         if self.log is not None:
             self.log.close()
 
@@ -1116,8 +1177,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                 print(repair_notice)
 
         if args.no_scheduler or not bool(settings.get("scheduler_enabled", True)):
+            _stop_orphan_scheduler()
             print("Scheduler desativado nesta execucao.")
         else:
+            _stop_orphan_scheduler()
             scheduler.start(venv_python, env=override)
             print(
                 f"Scheduler iniciado em segundo plano (log: {SCHEDULER_LOG.relative_to(REPO_ROOT)})."

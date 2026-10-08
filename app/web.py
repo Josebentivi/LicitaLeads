@@ -57,6 +57,7 @@ from app.services.maintenance import (
     data_counts,
     maintenance_blocked_reason,
 )
+from app.services.scheduler_control import scheduler_status, set_scheduler_paused
 
 router = APIRouter(include_in_schema=False)
 templates = Jinja2Templates(directory="app/templates")
@@ -1572,6 +1573,8 @@ async def help_page(request: Request):
 @router.get("/settings")
 async def settings_page(request: Request, db: AsyncSession = Depends(get_db)):
     leases = await active_leases(db)
+    scheduler = await scheduler_status(db)
+    last_activity = scheduler.get("last_activity_at")
     return templates.TemplateResponse(
         request,
         "settings.html",
@@ -1584,9 +1587,32 @@ async def settings_page(request: Request, db: AsyncSession = Depends(get_db)):
                 SimpleNamespace(name=name, expires_at=_local_datetime(expires))
                 for name, expires in leases
             ],
+            "scheduler": SimpleNamespace(
+                paused=bool(scheduler.get("paused")),
+                last_activity_at=(
+                    _local_datetime(last_activity) if isinstance(last_activity, datetime) else None
+                ),
+            ),
+            "scheduler_feedback": request.query_params.get("scheduler"),
             "reset_status": request.query_params.get("reset"),
         },
     )
+
+
+@router.post("/settings/pause-scheduler")
+async def pause_scheduler(db: AsyncSession = Depends(get_db)) -> RedirectResponse:
+    """Pause the automatic collection jobs without stopping the process."""
+
+    set_scheduler_paused(True)
+    return RedirectResponse("/settings?scheduler=pausado", status_code=303)
+
+
+@router.post("/settings/resume-scheduler")
+async def resume_scheduler(db: AsyncSession = Depends(get_db)) -> RedirectResponse:
+    """Resume the automatic collection jobs."""
+
+    set_scheduler_paused(False)
+    return RedirectResponse("/settings?scheduler=ativo", status_code=303)
 
 
 @router.post("/settings/release-stale-leases")

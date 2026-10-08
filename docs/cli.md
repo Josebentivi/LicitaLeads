@@ -81,3 +81,13 @@ Jobs (intervalos configuráveis em `SCHEDULER_*`):
 Cada job roda sob um lease no banco (`JobLease`): se outra instância já detém o
 lease, o job é pulado em vez de executado em duplicidade.
 `SCHEDULER_ENABLED=false` desliga o processo.
+
+### Pausar sem desligar
+
+A página Configurações mostra o status do scheduler (Ativo/Pausado, última
+atividade) e permite pausar/retomar as coletas automáticas. O estado fica no
+arquivo `data/scheduler.paused` (fora do banco), que os jobs checam a cada
+execução — pausar tem efeito imediato e sobrevive ao reset de dados. O launcher
+também grava `data/scheduler.pid` e encerra um scheduler órfão de sessão
+anterior antes de iniciar outro. Após `clear-data`, as coletas automáticas são
+pausadas automaticamente.

@@ -129,3 +129,4 @@ class ClearDataResponse(ApiModel):
 
     counts: dict[str, int] = Field(default_factory=dict)
     files_removed: int = 0
+    scheduler_paused: bool = False

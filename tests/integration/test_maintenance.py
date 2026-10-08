@@ -20,7 +20,7 @@ from app.models import (
     PriceRegistryItem,
     Procurement,
 )
-from app.services import maintenance
+from app.services import maintenance, scheduler_control
 
 from .conftest import DatabaseContext
 
@@ -85,6 +85,7 @@ async def test_clear_data_endpoint_wipes_database_and_files(
     assert payload["counts"]["documents"] == 1
     assert payload["counts"]["crawl_runs"] == 1
     assert payload["files_removed"] == 2
+    assert payload["scheduler_paused"] is True
     assert not (documents_root / "ab").exists()
     assert (documents_root / ".gitkeep").exists()
     assert not (raw_root / "payload.json").exists()
@@ -126,6 +127,8 @@ async def test_maintenance_counts_and_clears_price_registries(
         result = await maintenance.clear_all_data(session, settings=settings)
     assert result.counts["price_registries"] == 1
     assert result.counts["price_registry_items"] == 1
+    assert result.scheduler_paused is True
+    assert (tmp_path / "scheduler.paused").is_file()
     async with database.sessions() as session:
         assert await session.scalar(select(func.count()).select_from(PriceRegistry)) == 0
         assert await session.scalar(select(func.count()).select_from(PriceRegistryItem)) == 0
@@ -399,3 +402,48 @@ async def test_release_stale_leases_endpoint_purges_orphans(
     async with database.sessions() as session:
         remaining = await session.scalar(select(func.count()).select_from(JobLease))
     assert remaining == 0
+
+
+@pytest.mark.asyncio
+async def test_settings_page_controls_scheduler_pause(
+    api_client: httpx.AsyncClient,
+    database: DatabaseContext,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The settings page shows scheduler status and toggles the pause flag."""
+
+    settings = _settings(tmp_path)
+    monkeypatch.setattr(maintenance, "get_settings", lambda: settings)
+    monkeypatch.setattr(scheduler_control, "get_settings", lambda: settings)
+    now = datetime.now(UTC)
+    async with database.sessions() as session, session.begin():
+        session.add(
+            JobLease(
+                name="scheduler:recalculate_deadlines",
+                owner_id="host:alive",
+                acquired_at=now,
+                heartbeat_at=now,
+                expires_at=now + timedelta(minutes=30),
+            )
+        )
+
+    page = await api_client.get("/settings")
+    assert page.status_code == 200
+    assert "Coletas automáticas (scheduler)" in page.text
+    assert "Ativo" in page.text
+    assert "Última atividade" in page.text
+
+    paused = await api_client.post("/settings/pause-scheduler", follow_redirects=False)
+    assert paused.status_code == 303
+    assert paused.headers["location"] == "/settings?scheduler=pausado"
+    assert (tmp_path / "scheduler.paused").is_file()
+
+    after_pause = await api_client.get("/settings")
+    assert "Pausado" in after_pause.text
+    assert "Retomar coletas automáticas" in after_pause.text
+
+    resumed = await api_client.post("/settings/resume-scheduler", follow_redirects=False)
+    assert resumed.status_code == 303
+    assert resumed.headers["location"] == "/settings?scheduler=ativo"
+    assert not (tmp_path / "scheduler.paused").exists()

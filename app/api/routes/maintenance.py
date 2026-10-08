@@ -28,4 +28,8 @@ async def clear_data_endpoint(
         result = await clear_all_data(db)
     except MaintenanceBlocked as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
-    return ClearDataResponse(counts=result.counts, files_removed=result.files_removed)
+    return ClearDataResponse(
+        counts=result.counts,
+        files_removed=result.files_removed,
+        scheduler_paused=result.scheduler_paused,
+    )

@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import Settings, get_settings
 from app.models import Base, CrawlRun, CrawlRunStatus, JobLease
 from app.repositories.crawls import JobLeaseRepository
+from app.services.scheduler_control import set_scheduler_paused
 
 COUNT_TABLE_LABELS: dict[str, str] = {
     "procurements": "Contratações",
@@ -46,6 +47,7 @@ class ClearDataResult:
 
     counts: dict[str, int] = field(default_factory=dict)
     files_removed: int = 0
+    scheduler_paused: bool = False
 
     @property
     def total_records(self) -> int:
@@ -144,6 +146,10 @@ async def clear_all_data(
         _truncate_scheduler_log,
         selected.document_storage_path.resolve().parent / "scheduler.log",
     )
+    # Without this the automatic jobs would repopulate the fresh database on
+    # their next tick; the operator resumes explicitly in the settings page.
+    set_scheduler_paused(True, settings=selected)
+    result.scheduler_paused = True
     return result
 
 

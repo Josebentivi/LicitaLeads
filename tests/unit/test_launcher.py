@@ -7,6 +7,7 @@ import json
 import os
 import sqlite3
 from pathlib import Path
+from types import SimpleNamespace
 
 LAUNCHER_PATH = Path(__file__).resolve().parents[2] / "scripts" / "launcher.py"
 
@@ -229,3 +230,45 @@ def test_parse_args_defaults_and_flags() -> None:
     assert flags.no_scheduler
     assert flags.dev
     assert flags.venv == Path("C:/tmp/venv")
+
+
+def test_stop_orphan_scheduler_removes_dead_pidfile(tmp_path: Path, monkeypatch) -> None:
+    pidfile = tmp_path / "scheduler.pid"
+    pidfile.write_text("424242", encoding="utf-8")
+    monkeypatch.setattr(launcher, "SCHEDULER_PID", pidfile)
+    monkeypatch.setattr(launcher, "_pid_is_python", lambda pid: False)
+
+    launcher._stop_orphan_scheduler()
+
+    assert not pidfile.exists()
+
+
+def test_stop_orphan_scheduler_kills_live_python(tmp_path: Path, monkeypatch) -> None:
+    pidfile = tmp_path / "scheduler.pid"
+    pidfile.write_text("424242", encoding="utf-8")
+    monkeypatch.setattr(launcher, "SCHEDULER_PID", pidfile)
+    monkeypatch.setattr(launcher, "_pid_is_python", lambda pid: True)
+    commands: list[list[str]] = []
+
+    def fake_run(args: list[str], **_kwargs: object) -> SimpleNamespace:
+        commands.append(args)
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(launcher.subprocess, "run", fake_run)
+
+    launcher._stop_orphan_scheduler()
+
+    assert commands and "424242" in commands[0]
+    assert not pidfile.exists()
+
+
+def test_scheduler_stop_removes_its_own_pidfile(tmp_path: Path, monkeypatch) -> None:
+    pidfile = tmp_path / "scheduler.pid"
+    pidfile.write_text("424242", encoding="utf-8")
+    monkeypatch.setattr(launcher, "SCHEDULER_PID", pidfile)
+    scheduler = launcher._Scheduler()
+    scheduler.process = SimpleNamespace(pid=424242, poll=lambda: 0)
+
+    scheduler.stop()
+
+    assert not pidfile.exists()

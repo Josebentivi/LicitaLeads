@@ -20,12 +20,19 @@ from app.services.ingestion import IngestionPipeline, PipelineRequest
 from app.services.ingestion.contacts import ContactEnrichmentService
 from app.services.ingestion.processor import DocumentProcessingService
 from app.services.ingestion.recovery import reconcile_stale_crawls
+from app.services.scheduler_control import scheduler_paused
 
 logger = logging.getLogger(__name__)
 JobCallable = Callable[[], Awaitable[object]]
 
 
 async def _leased(name: str, callback: JobCallable, *, minutes: int = 55) -> None:
+    if scheduler_paused():
+        logger.info(
+            "scheduled job skipped because automatic collections are paused",
+            extra={"job": name},
+        )
+        return
     owner = f"{socket.gethostname()}:{uuid4()}"
     now = datetime.now(UTC)
     async with async_session_factory() as session, session.begin():
