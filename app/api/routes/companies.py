@@ -57,12 +57,28 @@ async def list_companies(
     page_size: int = Query(50, ge=1, le=200),
     search: str | None = Query(None, max_length=120),
     uf: str | None = Query(None, min_length=2, max_length=2),
+    published_from: datetime | None = None,
+    published_to: datetime | None = None,
+    has_lead: bool = False,
+    active_only: bool = False,
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, object]:
-    """List companies with auditable participation counters."""
+    """List companies with auditable participation counters.
+
+    ``published_from``/``published_to`` filter the publication date of the
+    procurements behind the counters; ``active_only`` keeps only participations
+    in processes that can still receive proposals.
+    """
 
     result = await CompanyRepository(db).list_with_stats(
-        page=page, page_size=page_size, search=search, uf=uf
+        page=page,
+        page_size=page_size,
+        search=search,
+        uf=uf,
+        published_from=published_from,
+        published_to=published_to,
+        has_lead=has_lead,
+        active_only=active_only,
     )
     return {
         "items": [

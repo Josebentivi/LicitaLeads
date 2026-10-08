@@ -72,6 +72,7 @@ from app.services.ingestion.documents import SecureDocumentDownloader, store_by_
 from app.services.ingestion.pipeline import stable_fingerprint
 from app.services.lead_scoring import LeadScoreInput, LeadScorer
 from app.services.llm import LLMEventAnalyzer, build_event_analyzer
+from app.services.procurement_status import procurement_is_active
 
 logger = logging.getLogger(__name__)
 
@@ -403,7 +404,7 @@ class DocumentProcessingService:
             .unique()
             .all()
         )
-        references = [
+        company_refs = [
             CompanyReference(
                 str(company.id), company.legal_name or company.normalized_name, company.cnpj
             )
@@ -433,7 +434,7 @@ class DocumentProcessingService:
             )
             participants = self.participant_detector.detect(
                 source_evidence,
-                known_companies=references,
+                known_companies=company_refs,
             )
             for detected_participant in participants:
                 created = await self._persist_participant(
@@ -444,7 +445,21 @@ class DocumentProcessingService:
                     detected_participant,
                 )
                 participant_count += int(created)
-            # Refresh references so an event in the same chunk can bind to a just-seen CNPJ.
+                if procurement_is_active(procurement.status, procurement.proposal_end_at):
+                    event, event_created = await self._persist_participation_event(
+                        session,
+                        procurement,
+                        document,
+                        chunk,
+                        detected_participant,
+                    )
+                    if event is not None and event_created:
+                        event_count += 1
+                        if event.company_id:
+                            lead_count += int(
+                                await self._deadline_and_lead(session, procurement, event)
+                            )
+            # Refresh company_refs so an event in the same chunk can bind to a just-seen CNPJ.
             companies = list(
                 (
                     await session.scalars(
@@ -456,13 +471,13 @@ class DocumentProcessingService:
                 .unique()
                 .all()
             )
-            references = [
+            company_refs = [
                 CompanyReference(
                     str(company.id), company.legal_name or company.normalized_name, company.cnpj
                 )
                 for company in companies
             ]
-            events = self.event_detector.detect(source_evidence, known_companies=references)
+            events = self.event_detector.detect(source_evidence, known_companies=company_refs)
             for detected_event in events:
                 event, created = await self._persist_event(
                     session,
@@ -487,7 +502,7 @@ class DocumentProcessingService:
 
             if self.settings.contact_domain_discovery_enabled:
                 await self._discover_company_domains(
-                    session, procurement, document, chunk, references
+                    session, procurement, document, chunk, company_refs
                 )
         return event_count, participant_count, lead_count
 
@@ -1060,6 +1075,58 @@ class DocumentProcessingService:
             normalized_reason=detected.normalized_reason,
             reason_category=ReasonCategory(detected.reason_category.value),
             source=source,
+            source_url=document.original_url,
+            evidence_id=evidence.id,
+            confidence=Decimal(str(detected.confidence)),
+            requires_manual_review=detected.requires_manual_review,
+            fingerprint=fingerprint,
+        )
+        session.add(event)
+        await session.flush()
+        return event, True
+
+    async def _persist_participation_event(
+        self,
+        session: AsyncSession,
+        procurement: Procurement,
+        document: Document,
+        chunk: StoredDocumentChunk,
+        detected: DetectedParticipant,
+    ) -> tuple[ProcurementEvent | None, bool]:
+        """Create one evidence-bound event per company detected in an open process.
+
+        The fingerprint ignores the evidence on purpose: the same company must
+        not generate a new lead for every chunk/document that mentions it.
+        """
+
+        company = await self._company(session, detected.company_name, detected.company_cnpj)
+        if company is None:
+            return None, False
+        item = await self._item(session, procurement.id, detected.item_number)
+        fingerprint = stable_fingerprint("participation_event", procurement.id, company.id)
+        event = await session.scalar(
+            select(ProcurementEvent).where(ProcurementEvent.fingerprint == fingerprint)
+        )
+        if event is not None:
+            return event, False
+        evidence = await self._evidence(
+            session,
+            procurement,
+            document,
+            chunk,
+            detected.evidence,
+        )
+        event = ProcurementEvent(
+            procurement_id=procurement.id,
+            company_id=company.id,
+            item_id=item.id if item else None,
+            event_type=ProcurementEventType.PARTICIPATION_DETECTED,
+            occurred_at=None,
+            published_at=document.published_at,
+            raw_description=" ".join(detected.evidence.text.split())[:2000],
+            normalized_reason=None,
+            reason_category=ReasonCategory.UNKNOWN,
+            source="document",
             source_url=document.original_url,
             evidence_id=evidence.id,
             confidence=Decimal(str(detected.confidence)),

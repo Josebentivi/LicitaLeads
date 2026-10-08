@@ -65,7 +65,13 @@ def _settings(tmp_path: Path) -> Settings:
     )
 
 
-async def _pending_document(database: DatabaseContext, *, url: str = "https://pncp.gov.br/ata.txt"):
+async def _pending_document(
+    database: DatabaseContext,
+    *,
+    url: str = "https://pncp.gov.br/ata.txt",
+    status: str = "em julgamento",
+    proposal_end_at: datetime | None = None,
+):
     async with database.sessions() as session, session.begin():
         procurement = Procurement(
             source="pncp",
@@ -77,7 +83,8 @@ async def _pending_document(database: DatabaseContext, *, url: str = "https://pn
             municipality="São Luís",
             estimated_value=180000,
             publication_at=datetime(2026, 9, 16, 14, 30, tzinfo=UTC),
-            status="em julgamento",
+            proposal_end_at=proposal_end_at,
+            status=status,
             source_url="https://pncp.gov.br/processo/1",
             fingerprint="d" * 64,
         )
@@ -244,3 +251,66 @@ async def test_extraction_runs_off_the_event_loop(
     assert elapsed < 0.3, "extraction must not block the event loop"
     summary = await asyncio.wait_for(processing, timeout=10)
     assert summary.documents_processed == 1
+
+
+@pytest.mark.asyncio
+async def test_open_process_participation_creates_evidence_bound_lead(
+    database: DatabaseContext,
+    tmp_path: Path,
+) -> None:
+    """A documented participant in an open process triggers the new lead event."""
+
+    await _pending_document(
+        database,
+        status="Divulgada no PNCP",
+        proposal_end_at=datetime(2099, 1, 1, tzinfo=UTC),
+    )
+    text = b"EMPRESA EXEMPLO LTDA., CNPJ 00.000.000/0001-91, licitante do item 3."
+    service = DocumentProcessingService(
+        _settings(tmp_path),
+        session_factory=database.sessions,
+        downloader=FakeDownloader(text),
+    )
+
+    summary = await service.process_pending()
+
+    assert summary.documents_processed == 1
+    assert summary.participants_created == 1
+    assert summary.events_created == 1
+    assert summary.leads_created == 1
+    async with database.sessions() as session:
+        event = await session.scalar(select(ProcurementEvent))
+        lead = await session.scalar(select(Lead))
+
+    assert event is not None
+    assert event.event_type.value == "PARTICIPATION_DETECTED"
+    assert event.evidence_id is not None
+    assert lead is not None and lead.triggering_event_id == event.id
+
+
+@pytest.mark.asyncio
+async def test_closed_process_participation_does_not_trigger_lead(
+    database: DatabaseContext,
+    tmp_path: Path,
+) -> None:
+    """The participation trigger only fires while the process can receive proposals."""
+
+    await _pending_document(
+        database,
+        status="Homologada",
+        proposal_end_at=datetime(2020, 1, 1, tzinfo=UTC),
+    )
+    text = b"EMPRESA EXEMPLO LTDA., CNPJ 00.000.000/0001-91, licitante do item 3."
+    service = DocumentProcessingService(
+        _settings(tmp_path),
+        session_factory=database.sessions,
+        downloader=FakeDownloader(text),
+    )
+
+    summary = await service.process_pending()
+
+    assert summary.participants_created == 1
+    assert summary.events_created == 0
+    assert summary.leads_created == 0
+    async with database.sessions() as session:
+        assert await session.scalar(select(func.count()).select_from(Lead)) == 0

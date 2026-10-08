@@ -8,8 +8,16 @@ from decimal import Decimal
 import httpx
 import pytest
 
-from app.models import Company, Participant, ParticipantStatus, Procurement, ProcurementEvent
-from app.models.enums import ProcurementEventType, ReasonCategory
+from app.models import (
+    Company,
+    CompanyContact,
+    Lead,
+    Participant,
+    ParticipantStatus,
+    Procurement,
+    ProcurementEvent,
+)
+from app.models.enums import LeadStatus, ProcurementEventType, ReasonCategory
 
 from .conftest import DatabaseContext
 
@@ -319,3 +327,207 @@ async def test_procurement_page_accepts_advanced_filters(
 
     assert response.status_code == 200
     assert "Contratações" in response.text
+
+
+@pytest.mark.asyncio
+async def test_company_period_lead_and_active_filters(
+    api_client: httpx.AsyncClient,
+    database: DatabaseContext,
+) -> None:
+    """Period, has_lead and active_only filters plus corporate contacts."""
+
+    async with database.sessions() as session, session.begin():
+        open_procurement = Procurement(
+            source="pncp",
+            external_id="open-2026",
+            title="Pregão 2026",
+            agency_name="Prefeitura de Exemplo",
+            uf="MA",
+            modality="Pregão - Eletrônico",
+            publication_at=datetime(2026, 6, 1, tzinfo=UTC),
+            proposal_end_at=datetime(2099, 1, 1, tzinfo=UTC),
+            status="Divulgada no PNCP",
+            fingerprint="a" * 64,
+        )
+        closed_procurement = Procurement(
+            source="pncp",
+            external_id="closed-2025",
+            title="Pregão 2025",
+            agency_name="Prefeitura de Exemplo",
+            uf="MA",
+            modality="Pregão - Eletrônico",
+            publication_at=datetime(2025, 6, 1, tzinfo=UTC),
+            proposal_end_at=datetime(2025, 7, 1, tzinfo=UTC),
+            status="Homologada",
+            fingerprint="b" * 64,
+        )
+        other_procurement = Procurement(
+            source="pncp",
+            external_id="other-2025",
+            title="Concorrência 2025",
+            agency_name="Secretaria Estadual",
+            uf="PI",
+            modality="Concorrência - Eletrônica",
+            publication_at=datetime(2025, 8, 1, tzinfo=UTC),
+            proposal_end_at=datetime(2025, 9, 1, tzinfo=UTC),
+            status="Homologada",
+            fingerprint="c" * 64,
+        )
+        company_a = Company(
+            cnpj=CNPJ,
+            legal_name="Empresa Alvo Ltda.",
+            normalized_name="EMPRESA ALVO",
+            uf="MA",
+            fingerprint="d" * 64,
+        )
+        company_b = Company(
+            cnpj="11222333000181",
+            legal_name="Empresa com Lead Ltda.",
+            normalized_name="EMPRESA COM LEAD",
+            uf="PI",
+            fingerprint="e" * 64,
+        )
+        session.add_all(
+            [
+                open_procurement,
+                closed_procurement,
+                other_procurement,
+                company_a,
+                company_b,
+            ]
+        )
+        await session.flush()
+        session.add_all(
+            [
+                Participant(
+                    procurement_id=open_procurement.id,
+                    company_id=company_a.id,
+                    participation_role="awarded",
+                    status_code=ParticipantStatus.AWARDED,
+                    source="pncp",
+                    confidence=Decimal("1"),
+                    fingerprint="f" * 64,
+                ),
+                Participant(
+                    procurement_id=closed_procurement.id,
+                    company_id=company_a.id,
+                    participation_role="awarded",
+                    status_code=ParticipantStatus.AWARDED,
+                    source="pncp",
+                    confidence=Decimal("1"),
+                    fingerprint="g" * 64,
+                ),
+                Participant(
+                    procurement_id=other_procurement.id,
+                    company_id=company_b.id,
+                    participation_role="awarded",
+                    status_code=ParticipantStatus.AWARDED,
+                    source="pncp",
+                    confidence=Decimal("1"),
+                    fingerprint="h" * 64,
+                ),
+            ]
+        )
+        event = ProcurementEvent(
+            procurement_id=other_procurement.id,
+            company_id=company_b.id,
+            event_type=ProcurementEventType.DISQUALIFIED,
+            raw_description="Empresa desclassificada.",
+            reason_category=ReasonCategory.OTHER,
+            source="document",
+            confidence=Decimal("0.90"),
+            fingerprint="i" * 64,
+        )
+        session.add(event)
+        await session.flush()
+        lead = Lead(
+            procurement_id=other_procurement.id,
+            company_id=company_b.id,
+            triggering_event_id=event.id,
+            lead_status=LeadStatus.NEW,
+            score=60,
+            urgency_score=12,
+            evidence_score=20,
+            legal_relevance_score=20,
+            contact_score=0,
+            economic_value_score=8,
+            fit_score=60,
+            reason_summary="Evento comprovado.",
+            recommended_action="Revisar evidência.",
+            score_breakdown={"evidence": "20/25"},
+            fingerprint="j" * 64,
+        )
+        session.add(lead)
+        await session.flush()
+        session.add_all(
+            [
+                CompanyContact(
+                    company_id=company_a.id,
+                    contact_type="email",
+                    contact_value="contato@empresa-alvo.example",
+                    source_url="https://empresa-alvo.example/contato",
+                    is_corporate=True,
+                    status="verified",
+                    confidence=Decimal("0.90"),
+                    fingerprint="k" * 64,
+                ),
+                CompanyContact(
+                    company_id=company_b.id,
+                    contact_type="phone",
+                    contact_value="+55 98 90000-0000",
+                    is_corporate=True,
+                    status="discovered",
+                    confidence=Decimal("0.70"),
+                    fingerprint="l" * 64,
+                ),
+            ]
+        )
+        lead_id = lead.id
+
+    by_period = await api_client.get(
+        "/api/companies",
+        params={
+            "published_from": "2026-01-01T00:00:00Z",
+            "published_to": "2026-12-31T23:59:59Z",
+        },
+    )
+    active = await api_client.get("/api/companies", params={"active_only": "true"})
+    with_lead = await api_client.get("/api/companies", params={"has_lead": "true"})
+    period_page = await api_client.get(
+        "/empresas",
+        params={
+            "published_from": "2026-01-01",
+            "published_to": "2026-12-31",
+            "active_only": "true",
+        },
+    )
+    lead_page = await api_client.get("/empresas", params={"has_lead": "true"})
+    company_page = await api_client.get(f"/empresas/{CNPJ}")
+    lead_detail = await api_client.get(f"/leads/{lead_id}")
+
+    assert by_period.status_code == 200
+    assert [item["company"]["legal_name"] for item in by_period.json()["items"]] == [
+        "Empresa Alvo Ltda."
+    ]
+    assert by_period.json()["items"][0]["stats"]["participations"] == 1
+    assert active.status_code == 200
+    assert [item["company"]["legal_name"] for item in active.json()["items"]] == [
+        "Empresa Alvo Ltda."
+    ]
+    assert active.json()["items"][0]["stats"]["participations"] == 1
+    assert with_lead.status_code == 200
+    assert [item["company"]["legal_name"] for item in with_lead.json()["items"]] == [
+        "Empresa com Lead Ltda."
+    ]
+    assert period_page.status_code == 200
+    assert "Empresa Alvo Ltda." in period_page.text
+    assert "Empresa com Lead Ltda." not in period_page.text
+    assert "info-tip-button" in period_page.text
+    assert "Em processo ativo" in period_page.text
+    assert lead_page.status_code == 200 and "Empresa com Lead Ltda." in lead_page.text
+    assert company_page.status_code == 200
+    assert "contato@empresa-alvo.example" in company_page.text
+    assert "Verificado" in company_page.text
+    assert lead_detail.status_code == 200
+    assert "+55 98 90000-0000" in lead_detail.text
+    assert "/empresas/11222333000181" in lead_detail.text

@@ -99,6 +99,13 @@ class EvidenceBoundLLMEventAnalyzer:
     ) -> list[LLMEventAnalysis]:
         raw_items = await self.provider(text, pages)
         analyses = [LLMEventAnalysis.model_validate(item) for item in raw_items]
+        # The programmatic open-process trigger owns this event type; a model
+        # must never fabricate it (it has no active-process guard).
+        analyses = [
+            analysis
+            for analysis in analyses
+            if analysis.event_type is not EventType.PARTICIPATION_DETECTED
+        ]
         full_text = _quote_key(text)
         page_text = {page: _quote_key(value) for page, value in (pages or {}).items()}
         for analysis in analyses:

@@ -430,3 +430,118 @@ async def test_cancel_endpoint_requests_cancellation_and_rejects_terminal_runs(
     async with database.sessions() as session:
         stored = await session.get(CrawlRun, active_id)
     assert stored is not None and stored.cancel_requested is True
+
+
+@pytest.mark.asyncio
+async def test_web_filter_forms_accept_blank_fields(
+    api_client: httpx.AsyncClient,
+) -> None:
+    """Browsers submit empty inputs; the pages must treat them as omitted."""
+
+    responses = {
+        "empresas": await api_client.get(
+            "/empresas",
+            params={"uf": "", "search": "", "published_from": "", "published_to": ""},
+        ),
+        "procurements": await api_client.get(
+            "/procurements",
+            params={"uf": "", "municipality": "", "value_min": "", "value_max": ""},
+        ),
+        "leads": await api_client.get(
+            "/leads",
+            params={"min_score": "", "event_type": "", "created_from": "", "created_to": ""},
+        ),
+        "atas": await api_client.get("/atas", params={"search": "", "valid_on": ""}),
+    }
+
+    for name, response in responses.items():
+        assert response.status_code == 200, name
+
+    empresas = responses["empresas"].text
+    assert '</a><span class="info-tip">' in empresas
+    assert '<a href="/leads">Leads<button' not in empresas
+
+
+@pytest.mark.asyncio
+async def test_open_category_matches_active_trigger_semantics(
+    api_client: httpx.AsyncClient,
+    database: DatabaseContext,
+) -> None:
+    """The SQL "aberta" category follows the same rule as the ingestion trigger."""
+
+    now = datetime.now(UTC)
+    async with database.sessions() as session, session.begin():
+        closed_future = Procurement(
+            source="pncp",
+            external_id="closed-future",
+            title="Encerrada com prazo futuro",
+            modality="Pregão - Eletrônico",
+            status="Encerrada",
+            publication_at=now,
+            proposal_end_at=now + timedelta(days=10),
+            fingerprint="x" * 64,
+        )
+        open_no_deadline = Procurement(
+            source="pncp",
+            external_id="open-no-deadline",
+            title="Divulgada sem prazo",
+            modality="Pregão - Eletrônico",
+            status="Divulgada no PNCP",
+            publication_at=now,
+            proposal_end_at=None,
+            fingerprint="y" * 64,
+        )
+        company = Company(
+            cnpj="12345678000195",
+            legal_name="Empresa Sem Prazo Ltda.",
+            normalized_name="EMPRESA SEM PRAZO",
+            fingerprint="z" * 64,
+        )
+        session.add_all([closed_future, open_no_deadline, company])
+        await session.flush()
+        session.add(
+            Participant(
+                procurement_id=open_no_deadline.id,
+                company_id=company.id,
+                participation_role="awarded",
+                status_code=ParticipantStatus.AWARDED,
+                source="pncp",
+                confidence=Decimal("1"),
+                fingerprint="0" * 64,
+            )
+        )
+
+    open_category = await api_client.get("/api/procurements", params={"status_category": "aberta"})
+    active_companies = await api_client.get("/api/companies", params={"active_only": "true"})
+
+    assert open_category.status_code == 200
+    assert [item["external_id"] for item in open_category.json()["items"]] == ["open-no-deadline"]
+    assert active_companies.status_code == 200
+    assert [item["company"]["legal_name"] for item in active_companies.json()["items"]] == [
+        "Empresa Sem Prazo Ltda."
+    ]
+
+
+@pytest.mark.asyncio
+async def test_help_page_documents_the_lawyer_workflow(
+    api_client: httpx.AsyncClient,
+) -> None:
+    """The manual explains the workflow in plain Portuguese and is in the menu."""
+
+    response = await api_client.get("/ajuda")
+
+    assert response.status_code == 200
+    for text in (
+        "Manual de uso",
+        "O que é a plataforma",
+        "Palavras que você vai ver",
+        "Passo a passo por tela",
+        "Como ler o score de um lead",
+        "O que a plataforma não faz",
+        "Perguntas frequentes",
+        "Para quem opera as coletas",
+        "não envia mensagens",
+        "Participação comprovada",
+    ):
+        assert text in response.text
+    assert '<a href="/ajuda">Ajuda</a>' in response.text

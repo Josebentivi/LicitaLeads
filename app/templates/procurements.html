@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from "_macros.html" import info_tip %}
 {% block title %}Contratações · LicitaLead Monitor{% endblock %}
 {% block content %}
 <div class="page-heading"><div><p class="eyebrow">Monitoramento</p><h1>Contratações</h1></div></div>
@@ -13,19 +14,19 @@
       {% for key, label in modality_options %}<option value="{{ key }}"{% if key in filters.modalities %} selected{% endif %}>{{ label }}</option>{% endfor %}
     </select>
   </label>
-  <label>Contratação
+  <label>Contratação{{ info_tip('Rota da Lei 14.133/2021 derivada da modalidade: licitação (art. 28), contratação direta (dispensa/inexigibilidade) ou procedimento auxiliar (credenciamento, pré-qualificação, manifestação de interesse).') }}
     <select name="procurement_type">
       <option value="">Todas</option>
       {% for key, label in type_options %}<option value="{{ key }}"{% if key == filters.procurement_type %} selected{% endif %}>{{ label }}</option>{% endfor %}
     </select>
   </label>
-  <label>Situação
+  <label>Situação{{ info_tip('Classificação operacional: proposta aberta (janela vigente), encerrada, cancelada, suspensa ou sem prazo conhecido. Baseada no texto publicado pela fonte e na data final de propostas.') }}
     <select name="status_category">
       <option value="">Todas</option>
       {% for key, label in status_category_options %}<option value="{{ key }}"{% if key == filters.status_category %} selected{% endif %}>{{ label }}</option>{% endfor %}
     </select>
   </label>
-  <label>Registro de preços
+  <label>Registro de preços{{ info_tip('SRP: contratação por Sistema de Registro de Preços, que gera ata com preços registrados para contratações futuras. Não é modalidade nem contrato imediato.') }}
     <select name="is_srp">
       <option value="">Todos</option>
       <option value="true"{% if filters.is_srp == 'true' %} selected{% endif %}>SRP</option>

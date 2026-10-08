@@ -133,3 +133,21 @@ class CompanyContactRepository(BaseRepository[CompanyContact]):
                 CompanyContact.contact_value == contact_value,
             )
         )
+
+    async def list_for_company(
+        self,
+        company_id: UUID | str,
+        *,
+        corporate_only: bool = False,
+    ) -> list[CompanyContact]:
+        """List contacts with the most trustworthy rows first."""
+
+        statement = select(CompanyContact).where(CompanyContact.company_id == company_id)
+        if corporate_only:
+            statement = statement.where(CompanyContact.is_corporate.is_(True))
+        statement = statement.order_by(
+            CompanyContact.confidence.desc().nullslast(),
+            CompanyContact.contact_type,
+            CompanyContact.contact_value,
+        )
+        return list((await self.session.scalars(statement)).all())

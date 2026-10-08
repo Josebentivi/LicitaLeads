@@ -1,9 +1,12 @@
 {% extends "base.html" %}
+{% from "_macros.html" import info_tip %}
 {% block title %}Lead · LicitaLead Monitor{% endblock %}
 {% block content %}
 <p><a href="/leads">← Leads</a></p>
-<div class="page-heading"><div><p class="eyebrow">Score {{ lead.score }}/100</p><h1>{{ lead.company_name or 'Empresa não confirmada' }}</h1><p>{{ lead.cnpj or 'CNPJ não disponível' }}</p></div><span class="badge">{{ lead.lead_status }}</span></div>
+<div class="page-heading"><div><p class="eyebrow">Score {{ lead.score }}/100{{ info_tip('Nota de 0 a 100: urgência do prazo, força da evidência, relevância jurídica do evento, contatos corporativos e valor estimado, menos penalidades.') }}</p><h1>{% if lead.cnpj %}<a href="/empresas/{{ lead.cnpj }}">{{ lead.company_name or 'Empresa não confirmada' }}</a>{% else %}{{ lead.company_name or 'Empresa não confirmada' }}{% endif %}</h1><p>{{ lead.cnpj or 'CNPJ não disponível' }}{% if lead.cnpj %} · <a href="/empresas/{{ lead.cnpj }}">ver empresa</a>{% endif %}</p></div><span class="badge">{{ lead.lead_status }}</span></div>
 <section class="panel"><h2>Oportunidade</h2><p>{{ lead.reason_summary or 'Motivo requer revisão manual.' }}</p><p><strong>Ação recomendada:</strong> {{ lead.recommended_action or 'Revisar evidências.' }}</p></section>
+<section class="panel"><h2>Contatos corporativos</h2><div class="table-wrap"><table><thead><tr><th>Tipo</th><th>Contato</th><th>Status</th><th>Origem</th></tr></thead>
+<tbody>{% for contact in contacts %}<tr><td>{{ contact.contact_type }}</td><td>{{ contact.value }}</td><td>{{ contact.status }}</td><td>{% if contact.source_url %}<a href="{{ contact.source_url }}" target="_blank" rel="noopener">Abrir origem</a>{% else %}—{% endif %}</td></tr>{% else %}<tr><td colspan="4" class="empty">Nenhum contato corporativo registrado para esta empresa.</td></tr>{% endfor %}</tbody></table></div></section>
 <section class="panel"><h2>Cronologia</h2><div class="relevant-dates">
   <span><strong>Adicionado em</strong>{{ lead.created_at }}</span>
   <span><strong>Atualizado em</strong>{{ lead.updated_at }}</span>

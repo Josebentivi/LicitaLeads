@@ -1,14 +1,19 @@
 {% extends "base.html" %}
+{% from "_macros.html" import info_tip %}
 {% block title %}Empresas · LicitaLead Monitor{% endblock %}
 {% block content %}
 <div class="page-heading"><div><p class="eyebrow">Monitoramento</p><h1>Empresas</h1></div></div>
 <form method="get" class="filters">
   <label>Nome ou CNPJ <input name="search" value="{{ filters.search or '' }}"></label>
   <label>UF <select name="uf"><option value="">Todas</option>{% for code, name in ufs %}<option value="{{ code }}"{% if code == filters.uf %} selected{% endif %}>{{ code }} · {{ name }}</option>{% endfor %}</select></label>
+  <label>Publicação da contratação (de) <input type="date" name="published_from" value="{{ filters.published_from }}"></label>
+  <label>Publicação da contratação (até) <input type="date" name="published_to" value="{{ filters.published_to }}"></label>
+  <label><input type="checkbox" name="has_lead" value="true"{% if filters.has_lead %} checked{% endif %}> Somente com lead{{ info_tip('Mostra apenas empresas que já geraram um lead (evento comprovado em documento oficial ou participação detectada em processo ativo).') }}</label>
+  <label><input type="checkbox" name="active_only" value="true"{% if filters.active_only %} checked{% endif %}> Em processo ativo{{ info_tip('Considera apenas participações comprovadas (resultado publicado ou documento oficial) em processos que ainda podem receber propostas. A cobertura depende de documento; processo sem participação comprovada não aparece.') }}</label>
   <button type="submit">Filtrar</button>
 </form>
 <section class="panel table-wrap">
-<table><thead><tr><th>Empresa</th><th>CNPJ</th><th>Local</th><th>Participações</th><th>Adjudicações</th><th>Desclassificações</th><th>Inabilitações</th><th>Última participação</th></tr></thead>
+<table><thead><tr><th>Empresa</th><th>CNPJ</th><th>Local</th><th>Participações{{ info_tip('Participações comprovadas: resultados homologados publicados pelas APIs e fatos extraídos de documentos oficiais com evidência.') }}</th><th>Adjudicações</th><th>Desclassificações</th><th>Inabilitações</th><th>Última participação</th></tr></thead>
 <tbody>{% for item in companies %}<tr>
   <td><a href="/empresas/{{ item.cnpj }}">{{ item.name }}</a></td>
   <td>{{ item.cnpj_label }}</td>

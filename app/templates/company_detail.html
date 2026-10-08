@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from "_macros.html" import info_tip %}
 {% macro origin_details(origin) %}
 <details class="technical-details">
   <summary>Ver origem técnica</summary>
@@ -25,13 +26,26 @@
 </header>
 <section class="procurement-summary" aria-label="Resumo da empresa">
   <dl class="facts">
-    <div><dt>Participações comprovadas</dt><dd>{{ stats.participations }}</dd></div>
+    <div><dt>Participações comprovadas{{ info_tip('Participações com fonte oficial: resultado homologado publicado pelas APIs ou fato extraído de documento com evidência.') }}</dt><dd>{{ stats.participations }}</dd></div>
     <div><dt>Adjudicações/vencedora</dt><dd>{{ stats.awarded }}</dd></div>
     <div><dt>Desclassificações</dt><dd>{{ stats.disqualified }}</dd></div>
     <div><dt>Inabilitações</dt><dd>{{ stats.ineligible }}</dd></div>
     <div><dt>Última participação</dt><dd>{{ stats_last_participation_at }}</dd></div>
     {% if company.domain %}<div><dt>Domínio corporativo</dt><dd>{{ company.domain }}</dd></div>{% endif %}
   </dl>
+</section>
+<section class="panel procurement-section">
+  <div class="section-heading"><div><h2>Contatos corporativos</h2><p class="hint">Somente contatos explicitamente corporativos, com origem e status. O enriquecimento externo é opcional e desligado por padrão.</p></div></div>
+  <div class="table-wrap">
+  <table><thead><tr><th>Tipo</th><th>Contato</th><th>Status</th><th>Origem</th><th>Verificado em</th></tr></thead>
+  <tbody>{% for contact in contacts %}<tr>
+    <td>{{ contact.contact_type }}</td>
+    <td>{{ contact.value }}</td>
+    <td>{{ contact.status }}</td>
+    <td>{% if contact.source_url %}<a href="{{ contact.source_url }}" target="_blank" rel="noopener">Abrir origem</a>{% else %}—{% endif %}</td>
+    <td>{{ contact.verified_at or '—' }}</td>
+  </tr>{% else %}<tr><td colspan="5" class="empty">Nenhum contato corporativo registrado para esta empresa.</td></tr>{% endfor %}</tbody></table>
+  </div>
 </section>
 <section class="panel procurement-section">
   <div class="section-heading">

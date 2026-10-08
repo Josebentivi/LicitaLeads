@@ -55,10 +55,17 @@ já armazenadas, sem novo crawl.
 
 | Método e rota | Descrição |
 |---|---|
-| `GET /api/companies` | Lista empresas com contadores auditáveis (`search`, `uf`) |
+| `GET /api/companies` | Lista empresas com contadores auditáveis (`search`, `uf`, `published_from`, `published_to`, `has_lead`, `active_only`) |
 | `GET /api/companies/{cnpj}` | Empresa + contadores de participação |
 | `GET /api/companies/{cnpj}/participations` | Histórico de participações com contexto da contratação |
 | `GET /api/companies/{cnpj}/events` | Eventos documentais atribuídos à empresa |
+
+Filtros de `GET /api/companies`: `published_from`/`published_to` recortam pela
+data de publicação das contratações por trás dos contadores; `has_lead` mostra
+apenas empresas que já geraram lead; `active_only` mostra apenas empresas com
+participação comprovada em processo que ainda pode receber propostas (a
+cobertura depende de documento — processo sem participação comprovada não
+aparece).
 
 Filtros de `participations`: `status` (repetível; `winner`, `awarded`,
 `participant`, `disqualified`, `ineligible`, `unknown`), `uf`, `agency`,
@@ -72,6 +79,12 @@ Os contadores refletem apenas fatos comprovados: resultados homologados das
 APIs e eventos/participações extraídos de documentos oficiais com evidência.
 Cobertura é parcial e a UI sinaliza revisão pendente; ausência de evento nunca
 é interpretada como fato negativo.
+
+Empresas em processo ativo: quando um documento oficial comprova a participação
+de uma empresa em contratação que ainda pode receber propostas, o sistema cria
+o evento `PARTICIPATION_DETECTED` (uma vez por empresa/processo, com evidência)
+e o lead correspondente pelo fluxo normal. Processos encerrados não disparam
+esse gatilho.
 
 ## Atas de registro de preços (ARP)
 
@@ -181,8 +194,8 @@ As páginas não aparecem no Swagger (`include_in_schema=False`).
 | `/dashboard` | Métricas operacionais e últimos leads |
 | `/procurements` | Lista com filtros de UF, município, órgão, CNPJ do órgão, CNPJ da empresa licitante/fornecedora, modalidade, rota de contratação, situação, SRP e faixa de valor |
 | `/procurements/{id}` | Detalhe: itens, documentos, participantes, eventos e vínculo manual de empresa |
-| `/empresas` | Lista de empresas com contadores de participação, adjudicação, desclassificação e inabilitação |
-| `/empresas/{cnpj}` | Histórico de participações e eventos com selo de origem, confiança e revisão |
+| `/empresas` | Lista de empresas com filtros de período de publicação, "somente com lead" e "em processo ativo"; contadores de participação, adjudicação, desclassificação e inabilitação |
+| `/empresas/{cnpj}` | Histórico de participações, eventos e contatos corporativos com selo de origem, confiança e revisão |
 | `/atas` | Lista de atas de registro de preços com filtros de órgão, número, fornecedor e vigência |
 | `/atas/{id}` | Detalhe da ata com itens, fornecedores, valores e vínculo com a contratação |
 | `/leads` | Lista com filtros de score, tipo de evento e revisão pendente |
@@ -192,3 +205,4 @@ As páginas não aparecem no Swagger (`include_in_schema=False`).
 | `/settings` | Visão pública das configurações e zona de risco (reset) |
 | `/settings/clear-data` | Apaga todos os dados após confirmação explícita (form) |
 | `/source-capabilities` | Matriz de capacidades das fontes |
+| `/ajuda` | Manual de uso em linguagem simples, voltado ao advogado, com seção curta de operação das coletas |

@@ -17,7 +17,9 @@ from app.services.event_detection.types import EventType, ReasonCategory
 
 logger = logging.getLogger(__name__)
 
-_EVENT_TYPES = ", ".join(member.value for member in EventType)
+_EVENT_TYPES = ", ".join(
+    member.value for member in EventType if member is not EventType.PARTICIPATION_DETECTED
+)
 _REASON_CATEGORIES = ", ".join(member.value for member in ReasonCategory)
 
 _SYSTEM_PROMPT = f"""Você é um extrator de fatos de documentos oficiais de licitação pública.

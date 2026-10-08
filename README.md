@@ -157,6 +157,12 @@ para disco local ou use PostgreSQL.
   `python -m app.cli backfill-fields` recupera esses campos de coletas antigas.
 - A página `/empresas` consolida participações e eventos por CNPJ; desclassificação,
   inabilitação e recursos dependem de documentos oficiais e podem exigir revisão.
+- Empresas podem ser recortadas pelo período de publicação da contratação, por
+  "somente com lead" e por participação comprovada em processo ativo; contatos
+  corporativos aparecem nas páginas de empresa e de lead.
+- Participação comprovada por documento em processo que ainda recebe propostas
+  gera o evento `PARTICIPATION_DETECTED` e um lead (cobertura documental).
+- Os rótulos e filtros das telas têm ícones "i" com explicações objetivas.
 - Resultado homologado não equivale à lista de participantes.
 - Inabilitação, desclassificação e recursos normalmente dependem de documentos.
 - Valores negativos publicados por erro pela fonte são tratados como não

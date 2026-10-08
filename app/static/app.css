@@ -19,6 +19,7 @@ body { margin: 0; min-height: 100vh; }
 .topbar { display: flex; align-items: center; justify-content: space-between; gap: 2rem; padding: 1rem clamp(1rem, 4vw, 4rem); background: #082f34; color: #fff; }
 .brand { font-size: 1.15rem; font-weight: 800; color: #fff; text-decoration: none; }
 .topbar nav { display: flex; gap: 0.35rem; flex-wrap: wrap; }
+.nav-item { align-items: center; display: inline-flex; }
 .topbar nav a { color: #dceceb; text-decoration: none; padding: 0.45rem 0.65rem; border-radius: 0.45rem; }
 .topbar nav a:hover { background: #16474c; }
 .container { width: min(1180px, calc(100% - 2rem)); margin: 2rem auto 4rem; }
@@ -124,6 +125,29 @@ td small { display: block; color: var(--muted); max-width: 52rem; margin-top: 0.
 .reason-cell { min-width: 16rem; max-width: 28rem; }
 .badge.extraction-ocr_required, .badge.review-required { background: #fff0cf; color: #81520b; }
 .badge.extraction-failed, .badge.extraction-unsupported { background: #f7e4df; color: var(--danger); }
+
+.info-tip { display: inline-flex; position: relative; vertical-align: middle; margin-left: 0.3rem; }
+.info-tip-button {
+  align-items: center; background: #e4ebe8; border: 0; border-radius: 999px; color: #075a50;
+  cursor: help; display: inline-flex; font-size: 0.68rem; font-weight: 900; height: 1.05rem;
+  justify-content: center; line-height: 1; padding: 0; width: 1.05rem;
+}
+.info-tip-button:hover, .info-tip-button:focus-visible { background: #d3e2dd; outline: 2px solid #9dc3ba; }
+.info-tip-bubble {
+  background: #12312d; border-radius: 0.45rem; color: #f4faf8; display: none; font-size: 0.78rem;
+  font-weight: 500; line-height: 1.4; max-width: min(22rem, 70vw); padding: 0.55rem 0.7rem;
+  position: absolute; right: 0; top: 1.35rem; width: max-content; z-index: 30;
+}
+.info-tip:hover .info-tip-bubble, .info-tip:focus-within .info-tip-bubble { display: block; }
+
+.help-toc { display: grid; gap: 0.5rem; }
+.help-toc strong { font-size: 0.85rem; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); }
+.help-toc ul { display: flex; flex-wrap: wrap; gap: 0.4rem 1.4rem; list-style: none; margin: 0; padding: 0; }
+.help-toc a { color: var(--brand); font-weight: 700; text-decoration: none; }
+.help-toc a:hover { text-decoration: underline; }
+.panel h3 { margin-bottom: 0.3rem; }
+.panel h3 + p { margin-top: 0.2rem; }
+.panel code { background: #f2f6f4; border-radius: 0.3rem; padding: 0.1rem 0.3rem; font-size: 0.85em; }
 
 @media (max-width: 760px) {
   .procurement-header, .section-heading { align-items: stretch; flex-direction: column; }

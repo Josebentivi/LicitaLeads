@@ -83,7 +83,7 @@ CrawlRun --> SourceRecord (payload bruto, hash, endpoint, disponibilidade)
 |---|---|
 | `DataAvailability` | `available`, `empty`, `not_supported`, `not_published`, `access_restricted`, `temporary_error` |
 | `FieldValueStatus` | `observed`, `unknown`, `not_available`, `requires_manual_review` |
-| `ProcurementEventType` | `PROPOSAL_SUBMITTED`, `PROPOSAL_ACCEPTED`, `PROPOSAL_REJECTED`, `DISQUALIFIED`, `QUALIFIED`, `INELIGIBLE`, `INTENT_TO_APPEAL`, `APPEAL_SUBMITTED`, `COUNTERARGUMENT_OPENED`, `COUNTERARGUMENT_SUBMITTED`, `APPEAL_DECIDED`, `WINNER_DECLARED`, `ADJUDICATED`, `HOMOLOGATED`, `SESSION_SUSPENDED`, `SESSION_REOPENED`, `UNKNOWN` |
+| `ProcurementEventType` | `PROPOSAL_SUBMITTED`, `PROPOSAL_ACCEPTED`, `PROPOSAL_REJECTED`, `DISQUALIFIED`, `QUALIFIED`, `INELIGIBLE`, `INTENT_TO_APPEAL`, `APPEAL_SUBMITTED`, `COUNTERARGUMENT_OPENED`, `COUNTERARGUMENT_SUBMITTED`, `APPEAL_DECIDED`, `WINNER_DECLARED`, `ADJUDICATED`, `HOMOLOGATED`, `SESSION_SUSPENDED`, `SESSION_REOPENED`, `PARTICIPATION_DETECTED`, `UNKNOWN` |
 | `ReasonCategory` | `TECHNICAL_SPECIFICATION`, `MISSING_DOCUMENT`, `INVALID_DOCUMENT`, `FISCAL_REGULARITY`, `LABOR_REGULARITY`, `ECONOMIC_FINANCIAL`, `TECHNICAL_QUALIFICATION`, `PRICE_INEXEQUIBILITY`, `PRICE_ABOVE_ESTIMATE`, `LATE_SUBMISSION`, `PROPOSAL_FORMAT`, `SAMPLE_REJECTED`, `BRAND_OR_MODEL_NONCOMPLIANT`, `FAILURE_TO_RESPOND`, `OTHER`, `UNKNOWN` |
 | `ParticipantRole` | `participant`, `winner`, `awarded`, `contractor`, `unknown` |
 | `ParticipantStatus` | `winner`, `awarded`, `participant`, `disqualified`, `ineligible`, `unknown` |

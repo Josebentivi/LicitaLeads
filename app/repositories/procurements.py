@@ -13,6 +13,7 @@ from sqlalchemy.orm import selectinload
 from app.models import (
     Company,
     Evidence,
+    Lead,
     Participant,
     PriceRegistry,
     PriceRegistryItem,
@@ -24,10 +25,18 @@ from app.models import (
 from app.models.enums import ParticipantStatus, ProcurementEventType
 from app.repositories.base import BaseRepository, Page
 from app.services.identifiers import canonical_modality
-
-_STATUS_CANCELLED_TOKENS = ("cancel", "revog", "anulad", "exclu")
-_STATUS_SUSPENDED_TOKENS = ("suspens",)
-_STATUS_CLOSED_TOKENS = ("encerr", "homolog", "adjudic", "desert", "fracass")
+from app.services.procurement_status import (
+    CANCELLED_TOKENS as _STATUS_CANCELLED_TOKENS,
+)
+from app.services.procurement_status import (
+    CLOSED_TOKENS as _STATUS_CLOSED_TOKENS,
+)
+from app.services.procurement_status import (
+    OPEN_TOKENS as _STATUS_OPEN_TOKENS,
+)
+from app.services.procurement_status import (
+    SUSPENDED_TOKENS as _STATUS_SUSPENDED_TOKENS,
+)
 
 
 def _status_tokens_condition(tokens: tuple[str, ...]):
@@ -83,11 +92,20 @@ def _status_category_condition(category: str, *, now: datetime):
     if category == "suspensa":
         return (suspended,)
     if category == "aberta":
+        # Mirrors procurement_is_active(): closed status tokens win over a
+        # future proposal window, and a missing window only counts as open
+        # when the published status says so.
         return (
-            Procurement.proposal_end_at.is_not(None),
-            Procurement.proposal_end_at >= now,
             ~cancelled,
             ~suspended,
+            ~closed_tokens,
+            or_(
+                Procurement.proposal_end_at >= now,
+                and_(
+                    Procurement.proposal_end_at.is_(None),
+                    _status_tokens_condition(_STATUS_OPEN_TOKENS),
+                ),
+            ),
         )
     if category == "encerrada":
         return (
@@ -326,10 +344,16 @@ class CompanyRepository(BaseRepository[Company]):
         return list((await self.session.scalars(statement)).all())
 
     @staticmethod
-    def _stats_subquery():
+    def _stats_subquery(
+        *,
+        published_from: datetime | None = None,
+        published_to: datetime | None = None,
+        active_only: bool = False,
+        now: datetime | None = None,
+    ):
         """Aggregate auditable participation outcomes per company."""
 
-        return (
+        statement = (
             select(
                 Participant.company_id.label("company_id"),
                 func.count(Participant.id).label("participations"),
@@ -354,8 +378,16 @@ class CompanyRepository(BaseRepository[Company]):
             )
             .join(Procurement, Participant.procurement_id == Procurement.id)
             .group_by(Participant.company_id)
-            .subquery()
         )
+        if published_from is not None:
+            statement = statement.where(Procurement.publication_at >= published_from)
+        if published_to is not None:
+            statement = statement.where(Procurement.publication_at <= published_to)
+        if active_only:
+            statement = statement.where(
+                *_status_category_condition("aberta", now=now or datetime.now(UTC))
+            )
+        return statement.subquery()
 
     async def list_with_stats(
         self,
@@ -364,14 +396,27 @@ class CompanyRepository(BaseRepository[Company]):
         page_size: int = 50,
         search: str | None = None,
         uf: str | None = None,
+        published_from: datetime | None = None,
+        published_to: datetime | None = None,
+        has_lead: bool = False,
+        active_only: bool = False,
     ) -> Page[tuple[Company, dict[str, object]]]:
-        stats = self._stats_subquery()
-        statement = (
-            select(Company, stats)
-            .outerjoin(stats, stats.c.company_id == Company.id)
-            .order_by(
-                func.coalesce(stats.c.participations, 0).desc(), Company.legal_name, Company.id
-            )
+        stats = self._stats_subquery(
+            published_from=published_from,
+            published_to=published_to,
+            active_only=active_only,
+        )
+        participation_scoped = published_from is not None or published_to is not None or active_only
+        statement = select(Company, stats)
+        if participation_scoped:
+            # "Empresas identificadas no período" means companies with at least
+            # one participation matching the window; companies without it are
+            # not "identified" in that period.
+            statement = statement.join(stats, stats.c.company_id == Company.id)
+        else:
+            statement = statement.outerjoin(stats, stats.c.company_id == Company.id)
+        statement = statement.order_by(
+            func.coalesce(stats.c.participations, 0).desc(), Company.legal_name, Company.id
         )
         if search:
             term = f"%{search}%"
@@ -385,6 +430,10 @@ class CompanyRepository(BaseRepository[Company]):
             )
         if uf:
             statement = statement.where(Company.uf == uf.upper())
+        if has_lead:
+            statement = statement.where(
+                exists(select(Lead.id).where(Lead.company_id == Company.id))
+            )
         total = int(
             (
                 await self.session.scalar(

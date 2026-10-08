@@ -5,12 +5,14 @@ from __future__ import annotations
 from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
 from types import SimpleNamespace
+from typing import Annotated
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request
 from fastapi.responses import RedirectResponse
 from fastapi.templating import Jinja2Templates
+from pydantic import BeforeValidator
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -22,6 +24,7 @@ from app.connectors.capabilities import get_source_capabilities
 from app.dependencies import get_db
 from app.models import (
     Company,
+    CompanyContact,
     CrawlRun,
     CrawlRunStatus,
     Deadline,
@@ -34,6 +37,7 @@ from app.models import (
     ProcurementEvent,
     ProcurementItem,
 )
+from app.repositories.leads import CompanyContactRepository
 from app.repositories.price_registries import PriceRegistryRepository
 from app.repositories.procurements import (
     CompanyRepository,
@@ -54,6 +58,35 @@ from app.services.maintenance import (
 
 router = APIRouter(include_in_schema=False)
 templates = Jinja2Templates(directory="app/templates")
+
+
+def _empty_query_to_none(value: object) -> object:
+    """Treat blank HTML form fields as an omitted filter.
+
+    Browsers always submit ``name=`` for empty inputs, while FastAPI parses
+    typed query params strictly (``""`` is not ``None``), which would answer
+    ``422`` on ordinary form submissions.
+    """
+
+    if isinstance(value, str) and not value.strip():
+        return None
+    return value
+
+
+OptionalUfQuery = Annotated[str | None, BeforeValidator(_empty_query_to_none)]
+OptionalDateQuery = Annotated[date | None, BeforeValidator(_empty_query_to_none)]
+OptionalDecimalQuery = Annotated[Decimal | None, BeforeValidator(_empty_query_to_none)]
+OptionalScoreQuery = Annotated[int | None, BeforeValidator(_empty_query_to_none)]
+
+
+def _selected_uf(value: str | None) -> str | None:
+    """Keep the strict two-letter rule without rejecting blank form fields."""
+
+    if value is None:
+        return None
+    normalized = value.strip().upper()
+    return normalized if len(normalized) == 2 and normalized.isalpha() else None
+
 
 _SOURCE_LABELS = {"pncp": "PNCP", "compras_gov": "Compras.gov.br"}
 _CONNECTOR_LABELS = {**_SOURCE_LABELS, "all": "Todas as fontes"}
@@ -210,6 +243,7 @@ _EVENT_TYPE_LABELS = {
     "HOMOLOGATED": "Homologação",
     "SESSION_SUSPENDED": "Sessão suspensa",
     "SESSION_REOPENED": "Sessão reaberta",
+    "PARTICIPATION_DETECTED": "Participação em processo ativo",
     "UNKNOWN": "Não informado",
 }
 _REASON_CATEGORY_LABELS = {
@@ -240,6 +274,20 @@ _REVIEW_DECISION_LABELS = {
     "approved": "Aprovado",
     "rejected": "Rejeitado",
     "needs_changes": "Ajustes solicitados",
+}
+_CONTACT_TYPE_LABELS = {
+    "email": "E-mail",
+    "phone": "Telefone",
+    "whatsapp": "WhatsApp",
+    "form": "Formulário",
+    "website": "Site",
+    "linkedin": "LinkedIn",
+}
+_CONTACT_STATUS_LABELS = {
+    "discovered": "Descoberto",
+    "verified": "Verificado",
+    "invalid": "Inválido",
+    "requires_review": "Revisão necessária",
 }
 
 
@@ -455,6 +503,17 @@ def _event_view(event: ProcurementEvent) -> SimpleNamespace:
             source_record_id=event.source_record_id,
             evidence_id=evidence.id if evidence else None,
         ),
+    )
+
+
+def _contact_view(contact: CompanyContact) -> SimpleNamespace:
+    return SimpleNamespace(
+        contact_type=_label(contact.contact_type, _CONTACT_TYPE_LABELS),
+        value=contact.contact_value,
+        status=_label(contact.status, _CONTACT_STATUS_LABELS),
+        is_corporate=contact.is_corporate,
+        source_url=contact.source_url,
+        verified_at=_local_datetime(contact.verified_at) if contact.verified_at else None,
     )
 
 
@@ -805,7 +864,7 @@ async def dashboard(request: Request, db: AsyncSession = Depends(get_db)):
 @router.get("/procurements")
 async def procurements_page(
     request: Request,
-    uf: str | None = Query(None, min_length=2, max_length=2),
+    uf: OptionalUfQuery = None,
     municipality: str | None = None,
     agency: str | None = None,
     agency_cnpj: str | None = None,
@@ -814,8 +873,8 @@ async def procurements_page(
     procurement_type: str | None = None,
     status_category: str | None = None,
     is_srp: str | None = None,
-    value_min: Decimal | None = Query(None, ge=0),
-    value_max: Decimal | None = Query(None, ge=0),
+    value_min: OptionalDecimalQuery = None,
+    value_max: OptionalDecimalQuery = None,
     db: AsyncSession = Depends(get_db),
 ):
     selected_modalities = [
@@ -840,10 +899,15 @@ async def procurements_page(
         (agency_cnpj and selected_agency_cnpj is None)
         or (company_cnpj and selected_company_cnpj is None)
     )
+    selected_uf = _selected_uf(uf)
+    if value_min is not None and value_min < 0:
+        value_min = None
+    if value_max is not None and value_max < 0:
+        value_max = None
     page = await ProcurementRepository(db).list_filtered(
         page=1,
         page_size=200,
-        uf=uf,
+        uf=selected_uf,
         municipality=municipality,
         agency=agency,
         agency_cnpj=selected_agency_cnpj,
@@ -862,7 +926,7 @@ async def procurements_page(
             "procurements": page.items,
             "ufs": _BRAZILIAN_UFS,
             "filters": SimpleNamespace(
-                uf=uf.upper() if uf else None,
+                uf=selected_uf,
                 municipality=municipality,
                 agency=agency,
                 agency_cnpj=agency_cnpj,
@@ -985,13 +1049,27 @@ async def link_event_company(
 async def companies_page(
     request: Request,
     search: str | None = Query(None, max_length=120),
-    uf: str | None = Query(None, min_length=2, max_length=2),
+    uf: OptionalUfQuery = None,
+    published_from: OptionalDateQuery = None,
+    published_to: OptionalDateQuery = None,
+    has_lead: bool = False,
+    active_only: bool = False,
     db: AsyncSession = Depends(get_db),
 ):
     """List companies with auditable participation counters."""
 
+    start = _day_bounds(published_from)[0] if published_from else None
+    end = _day_bounds(published_to)[1] if published_to else None
+    selected_uf = _selected_uf(uf)
     result = await CompanyRepository(db).list_with_stats(
-        page=1, page_size=200, search=search, uf=uf
+        page=1,
+        page_size=200,
+        search=search,
+        uf=selected_uf,
+        published_from=start,
+        published_to=end,
+        has_lead=has_lead,
+        active_only=active_only,
     )
     companies = [
         SimpleNamespace(
@@ -1014,7 +1092,14 @@ async def companies_page(
         {
             "companies": companies,
             "ufs": _BRAZILIAN_UFS,
-            "filters": SimpleNamespace(uf=uf.upper() if uf else None, search=search),
+            "filters": SimpleNamespace(
+                uf=selected_uf,
+                search=search,
+                published_from=published_from.isoformat() if published_from else "",
+                published_to=published_to.isoformat() if published_to else "",
+                has_lead=has_lead,
+                active_only=active_only,
+            ),
         },
     )
 
@@ -1047,6 +1132,7 @@ async def company_page(
     events = await ProcurementEventRepository(db).list_for_company(
         company.id, page=1, page_size=200
     )
+    contacts = await CompanyContactRepository(db).list_for_company(company.id, corporate_only=True)
     return templates.TemplateResponse(
         request,
         "company_detail.html",
@@ -1063,6 +1149,7 @@ async def company_page(
             ),
             "stats": stats,
             "stats_last_participation_at": _stats_datetime(stats),
+            "contacts": [_contact_view(contact) for contact in contacts],
             "participations": [
                 SimpleNamespace(
                     procurement_id=item.procurement_id,
@@ -1105,7 +1192,7 @@ async def price_registries_page(
     agency: str | None = None,
     registry_number: str | None = None,
     supplier_cnpj: str | None = None,
-    valid_on: date | None = Query(None),
+    valid_on: OptionalDateQuery = None,
     db: AsyncSession = Depends(get_db),
 ):
     """List atas de registro de preços with vigência and supplier filters."""
@@ -1213,13 +1300,15 @@ async def price_registry_page(
 @router.get("/leads")
 async def leads_page(
     request: Request,
-    min_score: int | None = Query(None, ge=0, le=100),
+    min_score: OptionalScoreQuery = None,
     event_type: str | None = None,
     requires_review: bool = False,
-    created_from: date | None = Query(None),
-    created_to: date | None = Query(None),
+    created_from: OptionalDateQuery = None,
+    created_to: OptionalDateQuery = None,
     db: AsyncSession = Depends(get_db),
 ):
+    if min_score is not None and not 0 <= min_score <= 100:
+        min_score = None
     statement = select(Lead).options(
         selectinload(Lead.company), selectinload(Lead.triggering_event), selectinload(Lead.deadline)
     )
@@ -1273,7 +1362,7 @@ async def lead_page(request: Request, lead_id: UUID, db: AsyncSession = Depends(
         select(Lead)
         .where(Lead.id == lead_id)
         .options(
-            selectinload(Lead.company),
+            selectinload(Lead.company).selectinload(Company.contacts),
             selectinload(Lead.triggering_event).selectinload(ProcurementEvent.evidence),
             selectinload(Lead.deadline),
             selectinload(Lead.outreach_drafts),
@@ -1303,10 +1392,17 @@ async def lead_page(request: Request, lead_id: UUID, db: AsyncSession = Depends(
         for review in lead.reviews
     ]
     evidences = [lead.triggering_event.evidence] if lead.triggering_event.evidence else []
+    contacts = [_contact_view(contact) for contact in lead.company.contacts if contact.is_corporate]
     return templates.TemplateResponse(
         request,
         "lead_detail.html",
-        {"lead": view, "evidences": evidences, "draft": draft, "reviews": reviews},
+        {
+            "lead": view,
+            "evidences": evidences,
+            "draft": draft,
+            "reviews": reviews,
+            "contacts": contacts,
+        },
     )
 
 
@@ -1404,6 +1500,13 @@ async def retry_failed_crawl_source(
     retry_run = await IngestionPipeline().create_run(retry_request)
     launch_crawl(retry_run.id, retry_request)
     return RedirectResponse("/crawls", status_code=303)
+
+
+@router.get("/ajuda")
+async def help_page(request: Request):
+    """Render the lawyer-facing usage manual in plain Portuguese."""
+
+    return templates.TemplateResponse(request, "ajuda.html", {})
 
 
 @router.get("/settings")

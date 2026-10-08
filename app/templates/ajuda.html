@@ -1,0 +1,154 @@
+{% extends "base.html" %}
+{% block title %}Ajuda · LicitaLead Monitor{% endblock %}
+{% block content %}
+<div class="page-heading"><div><p class="eyebrow">Manual de uso</p><h1>Ajuda</h1></div></div>
+<p class="hint">Este manual explica, em linguagem simples, como usar a plataforma no dia a dia. Os ícones <strong>i</strong> espalhados pelas telas também trazem explicações curtas: passe o mouse ou clique neles.</p>
+
+<nav class="panel help-toc" aria-label="Índice do manual">
+  <strong>Nesta página</strong>
+  <ul>
+    <li><a href="#o-que-e">O que é a plataforma</a></li>
+    <li><a href="#palavras">Palavras que você vai ver</a></li>
+    <li><a href="#telas">Passo a passo por tela</a></li>
+    <li><a href="#score">Como ler o score de um lead</a></li>
+    <li><a href="#cuidados">O que a plataforma não faz (e cuidados)</a></li>
+    <li><a href="#faq">Perguntas frequentes</a></li>
+    <li><a href="#operacao">Para quem opera as coletas</a></li>
+  </ul>
+</nav>
+
+<section id="o-que-e" class="panel">
+  <h2>O que é a plataforma</h2>
+  <p>A plataforma acompanha as contratações públicas publicadas pelo <strong>PNCP</strong> e pelo <strong>Compras.gov.br</strong>, organiza esses dados e mostra oportunidades de atuação jurídica.</p>
+  <p>Ela faz três coisas principais:</p>
+  <ol>
+    <li><strong>Coleta</strong> os processos e os documentos oficiais.</li>
+    <li><strong>Encontra fatos</strong> que podem interessar ao escritório (desclassificação, inabilitação, recursos) e empresas participantes.</li>
+    <li><strong>Cria leads</strong> — oportunidades para revisão — sempre mostrando de onde a informação veio.</li>
+  </ol>
+  <p class="hint">Importante: a plataforma <strong>não envia mensagens</strong>. Todo contato fica como rascunho e depende de uma decisão humana.</p>
+</section>
+
+<section id="palavras" class="panel">
+  <h2>Palavras que você vai ver</h2>
+  <div class="table-wrap">
+  <table>
+    <thead><tr><th>Palavra</th><th>O que significa</th></tr></thead>
+    <tbody>
+      <tr><td>Contratação</td><td>Compra ou contratação feita por um órgão público: um pregão, uma concorrência, uma dispensa etc.</td></tr>
+      <tr><td>Órgão</td><td>Quem publica a compra: prefeitura, secretaria, tribunal, universidade...</td></tr>
+      <tr><td>Modalidade</td><td>A forma da licitação: pregão, concorrência, concurso, leilão, diálogo competitivo, dispensa ou inexigibilidade.</td></tr>
+      <tr><td>SRP / Ata (ARP)</td><td>Registro de preços. A ata guarda preços e fornecedores para compras futuras do órgão.</td></tr>
+      <tr><td>Participação comprovada</td><td>Empresa que aparece em resultado oficial ou em documento, com um trecho que comprova. Não é suposição.</td></tr>
+      <tr><td>Evento</td><td>Fato jurídico encontrado em documento oficial, por exemplo: empresa inabilitada ou recurso apresentado.</td></tr>
+      <tr><td>Evidência</td><td>O trecho exato do documento que comprova o fato, com página e link para abrir.</td></tr>
+      <tr><td>Lead</td><td>Oportunidade de atendimento criada a partir de um evento comprovado ou de participação em processo ativo.</td></tr>
+      <tr><td>Score</td><td>Nota de 0 a 100 que ajuda a priorizar os leads.</td></tr>
+      <tr><td>Revisão pendente</td><td>O lead precisa da conferência de uma pessoa antes de ser usado.</td></tr>
+      <tr><td>Rascunho</td><td>Sugestão de mensagem para o cliente. O sistema nunca envia sozinho.</td></tr>
+    </tbody>
+  </table>
+  </div>
+</section>
+
+<section id="telas" class="panel">
+  <h2>Passo a passo por tela</h2>
+
+  <h3>Dashboard</h3>
+  <p><strong>Para que serve:</strong> visão geral do dia — quantas contratações, eventos, empresas e leads existem, além dos prazos mais urgentes e dos últimos leads criados.</p>
+  <p><strong>O que fazer aqui:</strong> comece por esta tela para saber se há algo urgente (prazos em 24 horas, revisões pendentes) e depois siga para <a href="/leads">Leads</a>.</p>
+
+  <h3>Contratações</h3>
+  <p><strong>Para que serve:</strong> lista dos processos monitorados.</p>
+  <p><strong>O que fazer aqui:</strong> use os filtros para reduzir a lista — UF, município, órgão, <strong>CNPJ do órgão</strong>, <strong>CNPJ da empresa</strong>, modalidade, rota da contratação (licitação, contratação direta ou procedimento auxiliar), situação, SRP e faixa de valor. Clique em um processo para ver itens, documentos, participantes e eventos.</p>
+  <p class="hint">Se um evento aparecer sem empresa identificada, você pode vinculá-lo manualmente a uma empresa que já participa do processo, no detalhe da contratação.</p>
+
+  <h3>Empresas</h3>
+  <p><strong>Para que serve:</strong> mostra as empresas identificadas e o histórico delas.</p>
+  <p><strong>O que fazer aqui:</strong> filtre pelo <strong>período de publicação da contratação</strong> (empresas do período da coleta), por "somente com lead" e por "em processo ativo". Ao abrir uma empresa, você vê as participações comprovadas, os eventos (inabilitação, desclassificação, recursos) e os contatos corporativos, com a origem de cada informação.</p>
+
+  <h3>Atas (ARP)</h3>
+  <p><strong>Para que serve:</strong> lista as atas de registro de preços publicadas oficialmente.</p>
+  <p><strong>O que fazer aqui:</strong> filtre por órgão, número da ata, CNPJ do fornecedor e vigência. Abra uma ata para ver itens, valores e fornecedores registrados.</p>
+
+  <h3>Leads</h3>
+  <p><strong>Para que serve:</strong> lista as oportunidades geradas para o escritório.</p>
+  <p><strong>O que fazer aqui:</strong> filtre por score mínimo, tipo de evento, data e "revisão pendente". Abra um lead para ver o motivo, a evidência (com link para o documento) e os contatos da empresa. Depois, registre sua decisão na revisão e, se quiser, gere um rascunho de mensagem.</p>
+  <p class="hint">O lead pode vir de um <strong>evento comprovado</strong> (ex.: inabilitação) ou de uma <strong>participação em processo ativo</strong> comprovada por documento.</p>
+
+  <h3>Coletas</h3>
+  <p><strong>Para que serve:</strong> acompanha as execuções de coleta por fonte.</p>
+  <p><strong>O que fazer aqui:</strong> veja o andamento, encerre uma coleta em andamento ou repita apenas a fonte que falhou. Detalhes na seção <a href="#operacao">Para quem opera as coletas</a>.</p>
+
+  <h3>Fontes e Configurações</h3>
+  <p><strong>Fontes:</strong> mostra, de forma auditada, o que cada fonte oficial publica e o que depende de documento.</p>
+  <p><strong>Configurações:</strong> mostra a configuração pública (sem senhas) e a zona de risco para apagar os dados coletados. O apagamento é irreversível e fica bloqueado enquanto houver coleta em andamento.</p>
+</section>
+
+<section id="score" class="panel">
+  <h2>Como ler o score de um lead</h2>
+  <p>O score vai de 0 a 100 e serve para <strong>priorizar</strong>. Ele soma cinco pontos e desconta o que reduz a confiança:</p>
+  <div class="table-wrap">
+  <table>
+    <thead><tr><th>O que entra na conta</th><th>Peso</th><th>Em palavras simples</th></tr></thead>
+    <tbody>
+      <tr><td>Urgência do prazo</td><td>até 30</td><td>Quanto mais perto o prazo, maior a nota.</td></tr>
+      <tr><td>Força da prova</td><td>até 25</td><td>Confiança da detecção e existência de evidência direta.</td></tr>
+      <tr><td>Relevância jurídica do evento</td><td>até 20</td><td>Inabilitação e recursos pesam mais; homologação pesa menos.</td></tr>
+      <tr><td>Contato corporativo</td><td>até 15</td><td>Ter e-mail ou telefone corporativo aumenta a nota.</td></tr>
+      <tr><td>Valor estimado</td><td>até 10</td><td>Contratações de maior valor ganham pontos.</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>Depois, a nota <strong>diminui</strong> quando: a empresa não está confirmada, falta CNPJ, a evidência é fraca, o motivo é desconhecido, o prazo é estimado, o OCR está pendente, o processo está encerrado ou o prazo venceu.</p>
+  <p class="hint">Leads abaixo do mínimo configurado continuam aparecendo na lista, marcados como abaixo do limiar, para você não perder nada de vista. "Revisão pendente" significa que a prova é ambígua ou a empresa não foi confirmada com segurança.</p>
+</section>
+
+<section id="cuidados" class="panel">
+  <h2>O que a plataforma não faz (e cuidados)</h2>
+  <ul>
+    <li><strong>Não envia mensagens.</strong> Tudo é rascunho e depende de aprovação humana.</li>
+    <li><strong>Resultado homologado é o vencedor</strong>, não a lista de participantes. Empresas perdedoras só aparecem quando um documento comprova a participação.</li>
+    <li><strong>Sem documento, alguns fatos podem não aparecer</strong> (inabilitação, desclassificação, recursos). A cobertura é parcial e vem sempre com o selo de origem.</li>
+    <li><strong>Prazo estimado não substitui a conferência</strong> do edital, da ata, da plataforma oficial e da legislação aplicável.</li>
+    <li><strong>PDF escaneado</strong> pode ficar como "OCR necessário" e não gerar fatos até ser processado.</li>
+    <li><strong>Valores publicados com erro pela fonte</strong> (por exemplo, negativos) são tratados como "não informado"; o dado original continua guardado para auditoria.</li>
+    <li><strong>"Em processo ativo"</strong> considera apenas processos que ainda podem receber propostas e empresas com participação comprovada neles.</li>
+  </ul>
+</section>
+
+<section id="faq" class="panel">
+  <h2>Perguntas frequentes</h2>
+  <h3>Por que a empresa X não aparece?</h3>
+  <p>Porque a plataforma só mostra empresas com <strong>participação comprovada</strong>: resultado oficial ou documento com trecho que comprova. Sem essa prova, a empresa não é exibida — para não inventar informação.</p>
+
+  <h3>Por que este lead está como "revisão pendente"?</h3>
+  <p>Porque a prova é ambígua ou a empresa não foi confirmada com segurança. Abra a evidência, confira o trecho no documento e registre sua decisão.</p>
+
+  <h3>Por que uma coleta ficou "parcial"?</h3>
+  <p>Porque uma fonte falhou e a outra concluiu. Os dados válidos foram preservados. Na tela <a href="/crawls">Coletas</a>, use "Tentar novamente" para repetir só a fonte que falhou.</p>
+
+  <h3>O que significa "falha(s)" em uma coleta?</h3>
+  <p>Um registro com problema foi anotado (por exemplo, um dado inválido publicado pela fonte) e a coleta continuou. Os demais registros foram salvos normalmente; os detalhes técnicos ficam disponíveis na tela.</p>
+
+  <h3>Para que servem os ícones "i"?</h3>
+  <p>Dão uma explicação curta e objetiva sobre a opção ao lado — filtros, status, score e páginas. Passe o mouse ou clique.</p>
+
+  <h3>A plataforma envia e-mail ou mensagem ao cliente?</h3>
+  <p>Não. Ela apenas gera rascunhos. O envio, se houver, é feito por você, fora do sistema.</p>
+</section>
+
+<section id="operacao" class="panel">
+  <h2>Para quem opera as coletas</h2>
+  <p>Esta seção é curta e voltada a quem inicia e acompanha as coletas. O advogado não precisa dela no dia a dia.</p>
+  <ul>
+    <li><strong>Iniciar uma coleta:</strong> pelo terminal (<code>python -m app.cli run-pipeline --uf MA --days 7</code> ou <code>python -m app.cli crawl-atas all --days 365</code>) ou pela API (<code>POST /api/crawls/run</code>). A tela <a href="/crawls">Coletas</a> apenas acompanha.</li>
+    <li><strong>Encerrar:</strong> uma coleta em andamento pode ser encerrada na própria tela.</li>
+    <li><strong>Repetir:</strong> se uma fonte falhar, o botão "Tentar novamente" refaz somente aquela fonte, com os mesmos filtros.</li>
+    <li><strong>Parcial:</strong> uma fonte falhou e a outra concluiu; nada válido é perdido.</li>
+    <li><strong>Documentos:</strong> são baixados e processados automaticamente após a coleta; também podem ser processados pelo comando <code>python -m app.cli process-documents</code>.</li>
+    <li><strong>Atualizar campos antigos:</strong> <code>python -m app.cli backfill-fields</code> recupera SRP, amparo legal e rota de contratação de coletas anteriores, sem novo download.</li>
+    <li><strong>Cuidado com o reset:</strong> em Configurações, "Apagar todos os dados" remove tudo e não pode ser desfeito.</li>
+  </ul>
+</section>
+{% endblock %}

@@ -133,7 +133,12 @@ class LeadScorer:
             return 20
         if event in {"PROPOSAL_REJECTED", "COUNTERARGUMENT_SUBMITTED", "APPEAL_DECIDED"}:
             return 15
-        if event in {"SESSION_SUSPENDED", "QUALIFIED", "PROPOSAL_ACCEPTED"}:
+        if event in {
+            "SESSION_SUSPENDED",
+            "QUALIFIED",
+            "PROPOSAL_ACCEPTED",
+            "PARTICIPATION_DETECTED",
+        }:
             return 8
         if event in {"WINNER_DECLARED", "ADJUDICATED", "HOMOLOGATED"}:
             return 4
