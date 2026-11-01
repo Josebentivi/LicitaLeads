@@ -5,13 +5,20 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, cast
 
-from sqlalchemy import delete, select, update
+from sqlalchemy import delete, or_, select, text, update
 from sqlalchemy.engine import CursorResult
+from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import CrawlRun, JobLease
 from app.models.enums import CrawlRunStatus
 from app.repositories.base import BaseRepository, Page
+
+MAINTENANCE_LEASE = "maintenance:exclusive"
+
+
+class MaintenanceInProgress(RuntimeError):
+    """A database maintenance window currently excludes application writes."""
 
 
 class CrawlRunRepository(BaseRepository[CrawlRun]):
@@ -72,6 +79,28 @@ class JobLeaseRepository:
     def __init__(self, session: AsyncSession) -> None:
         self.session = session
 
+    async def lock_acquisitions(self) -> None:
+        """Serialize maintenance and worker admission until transaction commit."""
+        if self.session.get_bind().dialect.name == "postgresql":
+            await self.session.execute(text("SELECT pg_advisory_xact_lock(83850117047118)"))
+        else:
+            # Even an UPDATE matching zero rows takes SQLite's writer lock. No
+            # persistent guard row is needed, and acquisition stays atomic.
+            await self.session.execute(
+                update(JobLease)
+                .where(JobLease.name == MAINTENANCE_LEASE)
+                .values(version=JobLease.version)
+            )
+
+    async def assert_writes_allowed(self, *, now: datetime) -> None:
+        await self.lock_acquisitions()
+        if await self.session.scalar(
+            select(JobLease.name).where(
+                JobLease.name == MAINTENANCE_LEASE, JobLease.expires_at > now
+            )
+        ):
+            raise MaintenanceInProgress("manutenção exclusiva em andamento; tente novamente depois")
+
     async def acquire(
         self,
         *,
@@ -80,45 +109,58 @@ class JobLeaseRepository:
         now: datetime,
         expires_at: datetime,
     ) -> bool:
+        await self.lock_acquisitions()
+        if name == MAINTENANCE_LEASE:
+            active = await self.session.scalar(
+                select(JobLease.name).where(JobLease.expires_at > now).limit(1)
+            )
+            running = await self.session.scalar(
+                select(CrawlRun.id)
+                .where(CrawlRun.status.in_([CrawlRunStatus.PENDING, CrawlRunStatus.RUNNING]))
+                .limit(1)
+            )
+            if active or running:
+                return False
+        elif await self.session.scalar(
+            select(JobLease.name).where(
+                JobLease.name == MAINTENANCE_LEASE, JobLease.expires_at > now
+            )
+        ):
+            return False
         lease = await self.session.scalar(
             select(JobLease).where(JobLease.name == name).with_for_update()
         )
         if lease is None:
-            self.session.add(
-                JobLease(
-                    name=name,
-                    owner_id=owner_id,
-                    acquired_at=now,
-                    heartbeat_at=now,
-                    expires_at=expires_at,
-                )
-            )
-            await self.session.flush()
-            return True
-        if lease.owner_id != owner_id and lease.expires_at > now:
-            return False
-        lease.owner_id = owner_id
-        lease.acquired_at = now
-        lease.heartbeat_at = now
-        lease.expires_at = expires_at
-        lease.version += 1
-        await self.session.flush()
-        return True
-
-    async def renew(
-        self,
-        *,
-        name: str,
-        owner_id: str,
-        now: datetime,
-        expires_at: datetime,
-    ) -> bool:
+            try:
+                async with self.session.begin_nested():
+                    self.session.add(
+                        JobLease(
+                            name=name,
+                            owner_id=owner_id,
+                            acquired_at=now,
+                            heartbeat_at=now,
+                            expires_at=expires_at,
+                        )
+                    )
+                    await self.session.flush()
+                return True
+            except (IntegrityError, OperationalError):
+                return False
         result = cast(
             CursorResult[Any],
             await self.session.execute(
                 update(JobLease)
-                .where(JobLease.name == name, JobLease.owner_id == owner_id)
+                .where(
+                    JobLease.name == name,
+                    JobLease.version == lease.version,
+                    or_(
+                        JobLease.owner_id == owner_id,
+                        JobLease.expires_at <= now,
+                    ),
+                )
                 .values(
+                    owner_id=owner_id,
+                    acquired_at=now,
                     heartbeat_at=now,
                     expires_at=expires_at,
                     version=JobLease.version + 1,
@@ -127,11 +169,57 @@ class JobLeaseRepository:
         )
         return bool(result.rowcount)
 
-    async def release(self, *, name: str, owner_id: str) -> bool:
+    async def renew(
+        self,
+        *,
+        name: str,
+        owner_id: str,
+        now: datetime,
+        expires_at: datetime,
+        generation: int | None = None,
+    ) -> bool:
+        await self.lock_acquisitions()
+        statement = update(JobLease).where(
+            JobLease.name == name, JobLease.owner_id == owner_id, JobLease.expires_at > now
+        )
+        if generation is not None:
+            statement = statement.where(JobLease.version == generation)
         result = cast(
             CursorResult[Any],
             await self.session.execute(
-                delete(JobLease).where(JobLease.name == name, JobLease.owner_id == owner_id)
+                statement.values(
+                    heartbeat_at=now,
+                    expires_at=expires_at,
+                )
+            ),
+        )
+        return bool(result.rowcount)
+
+    async def release(self, *, name: str, owner_id: str, generation: int | None = None) -> bool:
+        await self.lock_acquisitions()
+        statement = delete(JobLease).where(JobLease.name == name, JobLease.owner_id == owner_id)
+        if generation is not None:
+            statement = statement.where(JobLease.version == generation)
+        result = cast(
+            CursorResult[Any],
+            await self.session.execute(statement),
+        )
+        return bool(result.rowcount)
+
+    async def fence(self, *, name: str, owner_id: str, generation: int, now: datetime) -> bool:
+        """Lock and validate ownership in the SAME transaction as protected writes."""
+        await self.lock_acquisitions()
+        result = cast(
+            CursorResult[Any],
+            await self.session.execute(
+                update(JobLease)
+                .where(
+                    JobLease.name == name,
+                    JobLease.owner_id == owner_id,
+                    JobLease.version == generation,
+                    JobLease.expires_at > now,
+                )
+                .values(version=JobLease.version)
             ),
         )
         return bool(result.rowcount)
@@ -144,6 +232,7 @@ class JobLeaseRepository:
         are preserved.
         """
 
+        await self.lock_acquisitions()
         removed = 0
         expired = cast(
             CursorResult[Any],
@@ -159,10 +248,13 @@ class JobLeaseRepository:
         )
         for run in active_runs.all():
             filters = run.filters if isinstance(run.filters, dict) else {}
-            connector = str(filters.get("connector") or run.connector)
+            connector = str(filters.get("connector") or run.connector).lower()
             uf = str(filters.get("uf") or "").upper()
-            if uf:
-                active_names.add(f"crawl:{connector.lower()}:{uf}")
+            if connector.startswith("municipal:"):
+                active_names.add(f"municipal:{connector.removeprefix('municipal:')}")
+            elif uf:
+                for name in ["pncp", "compras_gov"] if connector == "all" else [connector]:
+                    active_names.add(f"crawl:{name}:{uf}")
 
         crawl_delete = delete(JobLease).where(JobLease.name.like("crawl:%"))
         if active_names:

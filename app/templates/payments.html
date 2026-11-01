@@ -1,0 +1,79 @@
+{% extends "base.html" %}
+{% from "_macros.html" import pagination_nav %}
+{% block title %}Pagamentos - LicitaLead Monitor{% endblock %}
+{% block content %}
+<div class="page-heading"><div><p class="eyebrow">Execucao financeira</p><h1>Pagamentos</h1></div></div>
+{% if import_result %}<p class="hint">Importacao concluida: {{ import_result.created }} criado(s), {{ import_result.updated }} atualizado(s), {{ import_result.errors }} erro(s).</p>{% endif %}
+{% if municipal_result %}<p class="hint">Coleta municipal concluida em {{ municipal_result.source }}: {{ municipal_result.created }} criado(s), {{ municipal_result.updated }} atualizado(s), {{ municipal_result.linked }} conciliado(s), {{ municipal_result.unlinked }} nao conciliado(s).{% if municipal_result.diagnostic %} {{ municipal_result.diagnostic }}{% endif %}</p>{% endif %}
+{% include "_municipal_payment_cards.html" %}
+<section class="panel" id="importar">
+  <div class="section-heading"><div><h2>Importar exportação do portal</h2><p class="hint">Baixe o arquivo no portal oficial e importe CSV ou JSON em UTF-8. O arquivo original fica registrado como fonte; linhas inválidas são listadas e ignoradas.</p></div></div>
+  <div class="import-guide">
+    <div>
+      <h3>Como importar</h3>
+      <ol class="import-steps">
+        <li>Abra o portal do município nos links abaixo e exporte <strong>Despesas Gerais/Pagas</strong> em CSV.</li>
+        <li>Mantenha as colunas de data, fornecedor, CNPJ, valor e empenho; confira o cabeçalho antes de importar.</li>
+        <li>Em <strong>Portal de origem</strong>, selecione o município. O nome vira parte da proveniência e da deduplicação.</li>
+        <li>Selecione o arquivo e clique em <strong>Importar</strong>; confira criados, atualizados e erros.</li>
+      </ol>
+    </div>
+    <div class="import-columns">
+      <h3>Colunas aceitas</h3>
+      <p><strong>Obrigatório:</strong> <code>valor</code> e (<code>cnpj</code> válido ou <code>fornecedor</code>).</p>
+      <p><strong>Recomendado:</strong> <code>data</code>, <code>orgao</code>, <code>contrato</code>, <code>processo</code>, <code>fase</code>, <code>documento</code>, <code>empenho</code>.</p>
+      <p class="hint">Também aceita aliases como <code>amount</code>, <code>valor_pago</code>, <code>cnpj_fornecedor</code>, <code>nome_fornecedor</code>, <code>data_pagamento</code>, <code>numero_empenho</code> e <code>situacao</code>.</p>
+      <p class="hint">CSV com <code>;</code>, <code>,</code> ou tabulação; JSON com lista de objetos; limite de 10 MB. Sem CNPJ válido, o pagamento fica não conciliado e exige revisão. Não conciliado não prova inadimplência.</p>
+    </div>
+  </div>
+  <h3>Links exatos por portal</h3>
+  <div class="import-portals">
+    {% for source in municipal_sources %}
+    <article class="import-portal">
+      <div class="import-portal-head"><h4>{{ source.name }}</h4><span class="badge">{{ source.mode }}</span></div>
+      <p class="hint">Use <code>{{ source.name }}</code> em Portal de origem.</p>
+      <div class="import-links">
+        <a href="{{ source.portal_url }}" target="_blank" rel="noopener noreferrer">Portal oficial</a>
+        <a href="{{ source.export_url }}" target="_blank" rel="noopener noreferrer">Despesas / exportação</a>
+        {% if source.open_data_url and source.open_data_url not in [source.portal_url, source.export_url] %}
+        <a href="{{ source.open_data_url }}" target="_blank" rel="noopener noreferrer">Dados abertos</a>
+        {% endif %}
+      </div>
+      <code class="import-url">{{ source.portal_url }}</code>
+      <code class="import-url">{{ source.export_url }}</code>
+      <ol class="import-portal-steps">
+        {% for step in source.import_steps %}<li>{{ step }}</li>{% endfor %}
+      </ol>
+    </article>
+    {% endfor %}
+  </div>
+  <form method="post" action="/pagamentos/importar" enctype="multipart/form-data" class="filters">
+    <label>Portal de origem
+      <input name="source_name" list="payment-portal-options" placeholder="Ex.: Imperatriz" autocomplete="off" required>
+      <datalist id="payment-portal-options">
+        {% for source in municipal_sources %}<option value="{{ source.name }}"></option>{% endfor %}
+      </datalist>
+    </label>
+    <label>Arquivo <input type="file" name="file" accept=".csv,.json,text/csv,application/json" required></label>
+    <button type="submit">Importar</button>
+  </form>
+</section>
+<form method="get" class="filters">
+  <label>CNPJ do fornecedor <input name="supplier_cnpj" value="{{ filters.supplier_cnpj or '' }}"></label>
+  <label>Fase <input name="phase" value="{{ filters.phase or '' }}"></label>
+  <label>Fonte <input name="source" value="{{ filters.source or '' }}" placeholder="municipal:imperatriz"></label>
+  <button type="submit">Filtrar</button>
+</form>
+<section class="panel table-wrap">
+<table><thead><tr><th>Data</th><th>Fornecedor</th><th>Orgao</th><th>Valor</th><th>Fase</th><th>Documento</th><th>Contrato</th><th>Conciliacao</th><th>Fonte</th></tr></thead>
+<tbody>{% for item in payments %}<tr>
+  <td>{{ item.date }}</td>
+  <td>{% if item.supplier_cnpj %}<a href="/empresas/{{ item.supplier_cnpj }}">{{ item.supplier }}</a>{% else %}{{ item.supplier }}{% endif %}</td>
+  <td>{{ item.agency }}</td><td>{{ item.amount }}</td><td>{{ item.phase }}</td><td>{{ item.document_number }}</td>
+  <td>{% if item.contract_id %}<a href="/contratos/{{ item.contract_id }}">Ver contrato</a>{% else %}Nao conciliado{% endif %}</td>
+  <td>{{ item.match_status }}</td><td>{{ item.source }}<details><summary hx-get="/history/payment/{{ item.id }}" hx-target="#payment-history-{{ item.id }}" hx-trigger="click once">Histórico de alterações</summary><div id="payment-history-{{ item.id }}"></div></details></td>
+</tr>{% else %}<tr><td colspan="9" class="empty">Nenhum pagamento coletado.</td></tr>{% endfor %}</tbody></table>
+</section>
+<p class="hint">A ausencia de pagamento na base consultada nao prova inadimplencia. Confirme a fonte financeira e o contrato antes de qualquer cobranca.</p>
+{{ pagination_nav(request, pagination.page, pagination.page_size, pagination.total) }}
+{% endblock %}

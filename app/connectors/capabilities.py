@@ -311,6 +311,52 @@ SOURCE_CAPABILITIES: tuple[SourceCapability, ...] = (
                         path="/modulo-arp/2.1_consultarARPItem_Id",
                         parameters=["numeroControlePncpAta", "dataAtualizacao"],
                     ),
+                    EndpointDescription(
+                        path="/modulo-arp/3_consultarUnidadesItem",
+                        parameters=[
+                            "numeroAta",
+                            "unidadeGerenciadora",
+                            "numeroItem",
+                            "pagina",
+                            "tamanhoPagina",
+                        ],
+                    ),
+                    EndpointDescription(
+                        path="/modulo-arp/4_consultarEmpenhosSaldoItem",
+                        parameters=["numeroAta", "unidadeGerenciadora", "pagina", "tamanhoPagina"],
+                    ),
+                    EndpointDescription(
+                        path="/modulo-arp/5_consultarAdesoesItem",
+                        parameters=[
+                            "numeroAta",
+                            "unidadeGerenciadora",
+                            "numeroItem",
+                            "pagina",
+                            "tamanhoPagina",
+                        ],
+                    ),
+                ],
+            ),
+            SourceCapabilityItem(
+                name="Contratos e itens de contrato",
+                availability=CapabilityAvailability.AVAILABLE,
+                notes="Cabecalhos e itens publicados pelo modulo de contratos.",
+                endpoints=[
+                    EndpointDescription(
+                        path="/modulo-contratos/1_consultarContratos",
+                        parameters=[
+                            "pagina",
+                            "tamanhoPagina",
+                            "codigoOrgao",
+                            "dataVigenciaInicialMin",
+                            "dataVigenciaInicialMax",
+                        ],
+                        page_size_limit=500,
+                    ),
+                    EndpointDescription(
+                        path="/modulo-contratos/2.1_consultarContratosItem_Id",
+                        parameters=["tipo", "codigo"],
+                    ),
                 ],
             ),
             SourceCapabilityItem(
@@ -321,6 +367,64 @@ SOURCE_CAPABILITIES: tuple[SourceCapability, ...] = (
                     "original."
                 ),
             ),
+        ],
+    ),
+    SourceCapability(
+        id="pncp_contracts",
+        name="PNCP - Contratos e empenhos",
+        documentation_url="https://pncp.gov.br/manual/pt-br/latest/",
+        audited_at="2026-10-21",
+        capabilities=[
+            SourceCapabilityItem(
+                name="Contratos e empenhos por periodo/orgao",
+                availability=CapabilityAvailability.AVAILABLE,
+                notes=(
+                    "Lista contratos/empenhos publicados; valores contratados nao "
+                    "equivalem a pagamentos efetivos."
+                ),
+                endpoints=[
+                    EndpointDescription(
+                        path="/api/consulta/v1/contratos",
+                        parameters=[
+                            "dataInicial",
+                            "dataFinal",
+                            "cnpjOrgao",
+                            "codigoUnidadeAdministrativa",
+                            "pagina",
+                            "tamanhoPagina",
+                        ],
+                        page_size_limit=50,
+                    ),
+                    EndpointDescription(
+                        path="/api/pncp/v1/orgaos/{cnpj}/contratos/{ano}/{sequencial}/termos",
+                        parameters=["pagina", "tamanhoPagina"],
+                        page_size_limit=50,
+                    ),
+                ],
+            )
+        ],
+    ),
+    SourceCapability(
+        id="transparencia",
+        name="Portal da Transparencia - Pagamentos federais",
+        documentation_url="https://portaldatransparencia.gov.br/api-de-dados",
+        audited_at="2026-10-21",
+        capabilities=[
+            SourceCapabilityItem(
+                name="Pagamentos por favorecido",
+                availability=CapabilityAvailability.AVAILABLE,
+                notes=(
+                    "Exige token gratuito (chave-api-dados). Cobre o Poder Executivo "
+                    "federal; ausencia de pagamento na base nao prova inadimplencia."
+                ),
+                endpoints=[
+                    EndpointDescription(
+                        path="/api-de-dados/despesas/documentos-por-favorecido",
+                        parameters=["codigoPessoa", "fase", "ano", "pagina"],
+                        authentication_required=True,
+                    )
+                ],
+            )
         ],
     ),
 )

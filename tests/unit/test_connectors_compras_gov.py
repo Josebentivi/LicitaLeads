@@ -134,7 +134,9 @@ async def test_compras_arp_discovery_and_items_map_official_fields() -> None:
         _settings(), http_client=AsyncHTTPClient(_settings(), client=raw_client)
     )
     result = await connector.discover_price_registries(
-        ProcurementFilters(start_date=date(2026, 1, 1), end_date=date(2026, 1, 31))
+        ProcurementFilters(
+            start_date=date(2026, 1, 1), end_date=date(2026, 1, 31), unit_code="980921"
+        )
     )
 
     assert result.availability is DataAvailability.AVAILABLE
@@ -145,7 +147,9 @@ async def test_compras_arp_discovery_and_items_map_official_fields() -> None:
     assert registry.uasg == "980921"
     assert registry.total_value is not None
     assert registry.source_url == "https://pncp.gov.br/app/atas/12345678000199/2026/1"
+    assert registry.source_record_ref == result.raw_records[0].record_key
     assert requests[0].url.params["dataVigenciaInicialMin"] == "2026-01-01"
+    assert requests[0].url.params["codigoUnidadeGerenciadora"] == "980921"
 
     items = await connector.fetch_price_registry_items(registry.external_id)
     assert items.availability is DataAvailability.AVAILABLE
@@ -268,3 +272,153 @@ async def test_compras_documents_are_explicitly_not_supported_without_http_call(
     assert result.availability is DataAvailability.NOT_SUPPORTED
     assert not called
     await raw_client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_compras_arp_details_use_published_number_and_uasg() -> None:
+    from app.connectors.base import RawPriceRegistry
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path.endswith("/3_consultarUnidadesItem"):
+            row = {
+                "numeroItem": "1",
+                "codigoPdm": "12345",
+                "descricaoItem": "Cadeira",
+                "fornecedor": "Empresa",
+                "quantidadeRegistrada": 10,
+                "saldoAdesoes": 4,
+                "qtdLimiteAdesao": 20,
+                "aceitaAdesao": True,
+                "codigoUnidade": "980921",
+                "nomeUnidade": "Unidade",
+                "tipoUnidade": "gerenciadora",
+            }
+        elif path.endswith("/4_consultarEmpenhosSaldoItem"):
+            row = {
+                "numeroItem": "1",
+                "unidade": "980921",
+                "tipo": "empenho",
+                "quantidadeRegistrada": 10,
+                "quantidadeEmpenhada": 6,
+                "saldoEmpenho": 4,
+            }
+        else:
+            row = {
+                "numeroItem": "1",
+                "unidadeNaoParticipante": "12345678000199",
+                "dataAprovacaoAnalise": "2026-09-01",
+                "quantidadeAprovadaAdesao": 3,
+            }
+        return httpx.Response(
+            200,
+            json={"resultado": [row], "totalRegistros": 1, "totalPaginas": 1},
+            request=request,
+        )
+
+    raw_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    connector = ComprasGovConnector(
+        _settings(), http_client=AsyncHTTPClient(_settings(), client=raw_client)
+    )
+    registry = RawPriceRegistry(
+        source="compras_gov",
+        external_id="ata-1",
+        registry_number="1",
+        uasg="980921",
+    )
+
+    units = await connector.fetch_price_registry_units(registry)
+    commitments = await connector.fetch_price_registry_commitments(registry)
+    adhesions = await connector.fetch_price_registry_adhesions(registry)
+
+    assert units.availability is DataAvailability.AVAILABLE
+    assert units.data[0].adhesion_balance == 4
+    assert units.data[0].accepts_adhesion is True
+    assert commitments.data[0].balance == 4
+    assert adhesions.data[0].requesting_unit == "12345678000199"
+    await raw_client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_compras_contracts_and_items_are_mapped() -> None:
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("2.1_consultarContratosItem_Id"):
+            payload = {
+                "resultado": [
+                    {
+                        "numeroItem": "1",
+                        "descricaoIitem": "Cadeira",
+                        "quantidadeItem": 10,
+                        "valorUnitarioItem": 100,
+                        "valorTotalItem": 1000,
+                        "niFornecedor": "00000000000191",
+                        "nomeRazaoSocialFornecedor": "Empresa",
+                    }
+                ],
+                "totalPaginas": 1,
+            }
+        else:
+            payload = {
+                "resultado": [
+                    {
+                        "codigoOrgao": "12345678000199",
+                        "numeroContrato": "0001",
+                        "numeroControlePncpContrato": "contract-control-1",
+                        "numeroControlePncpCompra": "compra-control-1",
+                        "processo": "90001/2026",
+                        "nomeOrgao": "Orgao",
+                        "objeto": "Cadeiras",
+                        "dataVigenciaInicial": "2026-09-01",
+                        "dataVigenciaFinal": "2027-09-01",
+                        "valorGlobal": 1000,
+                        "valorAcumulado": 1000,
+                        "niFornecedor": "00000000000191",
+                        "nomeRazaoSocialFornecedor": "Empresa",
+                    }
+                ],
+                "totalPaginas": 1,
+            }
+        return httpx.Response(200, json=payload, request=request)
+
+    raw_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    connector = ComprasGovConnector(
+        _settings(), http_client=AsyncHTTPClient(_settings(), client=raw_client)
+    )
+    contracts = await connector.discover_contracts(
+        ProcurementFilters(
+            start_date=date(2026, 9, 1),
+            end_date=date(2026, 9, 30),
+            agency_cnpj="12345678000199",
+        )
+    )
+    contract = contracts.data[0]
+    items = await connector.fetch_contract_items(contract)
+
+    assert contracts.availability is DataAvailability.AVAILABLE
+    assert contract.contract_number == "0001"
+    assert contract.pncp_control_number == "contract-control-1"
+    assert contract.source_record_ref == contracts.raw_records[0].record_key
+    assert items.data[0].description == "Cadeira"
+    assert items.data[0].total_value == 1000
+    await raw_client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_compras_unexpected_json_is_not_empty() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"error": "maintenance"}, request=request)
+
+    raw_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    connector = ComprasGovConnector(
+        _settings(), http_client=AsyncHTTPClient(_settings(), client=raw_client)
+    )
+    try:
+        result = await connector.discover_procurements(
+            ProcurementFilters(start_date=date(2026, 1, 1), end_date=date(2026, 1, 2))
+        )
+    finally:
+        await connector.aclose()
+
+    assert result.availability is DataAvailability.TEMPORARY_ERROR
+    assert result.data == []

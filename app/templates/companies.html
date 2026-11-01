@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% from "_macros.html" import info_tip %}
+{% from "_macros.html" import info_tip, pagination_nav %}
 {% block title %}Empresas · LicitaLead Monitor{% endblock %}
 {% block content %}
 <div class="page-heading"><div><p class="eyebrow">Monitoramento</p><h1>Empresas</h1></div></div>
@@ -13,7 +13,7 @@
   <button type="submit">Filtrar</button>
 </form>
 <section class="panel table-wrap">
-<table><thead><tr><th>Empresa</th><th>CNPJ</th><th>Local</th><th>Participações{{ info_tip('Participações comprovadas: resultados homologados publicados pelas APIs e fatos extraídos de documentos oficiais com evidência.') }}</th><th>Adjudicações</th><th>Desclassificações</th><th>Inabilitações</th><th>Última participação</th></tr></thead>
+<table><thead><tr><th>Empresa</th><th>CNPJ</th><th>Local</th><th>Participações{{ info_tip('Participações comprovadas: resultados homologados publicados pelas APIs e fatos extraídos de documentos oficiais com evidência.') }}</th><th>Adjudicações</th><th>Desclassificações</th><th>Inabilitações</th><th>Derrotas documentadas{{ info_tip('Processos distintos com participante desclassificado ou inabilitado. Eventos adicionais aparecem no detalhe da empresa.') }}</th><th>Taxa</th><th>Última participação</th></tr></thead>
 <tbody>{% for item in companies %}<tr>
   <td><a href="/empresas/{{ item.cnpj }}">{{ item.name }}</a></td>
   <td>{{ item.cnpj_label }}</td>
@@ -22,8 +22,11 @@
   <td>{{ item.awarded }}</td>
   <td>{{ item.disqualified }}</td>
   <td>{{ item.ineligible }}</td>
+  <td>{{ item.documented_losses }}</td>
+  <td>{{ item.failure_rate }}</td>
   <td>{{ item.last_participation_at }}</td>
-</tr>{% else %}<tr><td colspan="8" class="empty">Nenhuma empresa identificada.</td></tr>{% endfor %}</tbody></table>
+</tr>{% else %}<tr><td colspan="10" class="empty">Nenhuma empresa identificada.</td></tr>{% endfor %}</tbody></table>
 </section>
 <p class="hint">Os números refletem apenas fatos comprovados: resultados homologados publicados pelas APIs e eventos extraídos de documentos oficiais com evidência e revisão humana quando aplicável. Participações sem documento não aparecem.</p>
+{{ pagination_nav(request, pagination.page, pagination.page_size, pagination.total) }}
 {% endblock %}

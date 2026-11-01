@@ -40,8 +40,32 @@ class ProcurementEventType(StrEnum):
     HOMOLOGATED = "HOMOLOGATED"
     SESSION_SUSPENDED = "SESSION_SUSPENDED"
     SESSION_REOPENED = "SESSION_REOPENED"
+    SESSION_OPENED = "SESSION_OPENED"
+    BEST_OFFER_DECLARED = "BEST_OFFER_DECLARED"
+    NEGOTIATION_REQUESTED = "NEGOTIATION_REQUESTED"
+    DILIGENCE_REQUESTED = "DILIGENCE_REQUESTED"
+    DOCUMENTATION_REQUESTED = "DOCUMENTATION_REQUESTED"
     PARTICIPATION_DETECTED = "PARTICIPATION_DETECTED"
     UNKNOWN = "UNKNOWN"
+
+
+class ProcurementPhase(StrEnum):
+    """Operational phase inferred from dated source facts, never from guesswork."""
+
+    UNKNOWN = "unknown"
+    PROPOSALS = "proposals"
+    DISPUTE = "dispute"
+    DILIGENCE = "diligence"
+    JUDGMENT = "judgment"
+    APPEAL = "appeal"
+    COUNTERARGUMENT = "counterargument"
+    QUALIFICATION = "qualification"
+    ADJUDICATION = "adjudication"
+    HOMOLOGATION = "homologation"
+    CLOSED = "closed"
+    SUSPENDED = "suspended"
+    CANCELLED = "cancelled"
+    FAILED = "failed"
 
 
 class ReasonCategory(StrEnum):
@@ -87,6 +111,7 @@ class ParticipantStatus(StrEnum):
     PARTICIPANT = "participant"
     DISQUALIFIED = "disqualified"
     INELIGIBLE = "ineligible"
+    CANCELLED = "cancelled"
     UNKNOWN = "unknown"
 
 

@@ -1,0 +1,38 @@
+{% extends "base.html" %}
+{% from "_macros.html" import pagination_nav %}
+{% block title %}Contratos - LicitaLead Monitor{% endblock %}
+{% block content %}
+<div class="page-heading"><div><p class="eyebrow">Monitoramento</p><h1>Contratos</h1></div></div>
+<section class="panel">
+  <h2>Coleta manual de contratos</h2>
+  <form method="post" action="/contratos/collect" class="filters">
+    <label>Fonte <select name="connector"><option value="all">Todas</option><option value="pncp">PNCP</option><option value="compras_gov">Compras.gov.br</option></select></label>
+    <label>CNPJ do órgão <input name="agency_cnpj" required maxlength="30"></label>
+    <label>Dias <input name="days" type="number" min="1" max="3650" value="30" required></label>
+    {% include "_force_refresh_option.html" %}
+    <button type="submit">Coletar contratos agora</button>
+  </form>
+  <p class="hint">O período corresponde à publicação no PNCP e ao início da vigência no Compras.gov.br.</p>
+</section>
+<form method="get" class="filters">
+  <label>Busca <input name="search" value="{{ filters.search or '' }}"></label>
+  <label>Orgao <input name="agency" value="{{ filters.agency or '' }}"></label>
+  <label>CNPJ do fornecedor <input name="supplier_cnpj" value="{{ filters.supplier_cnpj or '' }}"></label>
+  <button type="submit">Filtrar</button>
+</form>
+<section class="panel table-wrap">
+<table><thead><tr><th>Contrato</th><th>Orgao</th><th>Fornecedor</th><th>Objeto</th><th>Assinatura</th><th>Vigencia final</th><th>Valor</th><th>Fonte</th></tr></thead>
+<tbody>{% for item in contracts %}<tr>
+  <td><a href="/contratos/{{ item.id }}">{{ item.number }}/{{ item.year }}</a></td>
+  <td>{{ item.agency }}</td>
+  <td>{% if item.supplier_cnpj %}<a href="/empresas/{{ item.supplier_cnpj }}">{{ item.supplier }}</a>{% else %}{{ item.supplier }}{% endif %}</td>
+  <td><small>{{ item.object_description }}</small></td>
+  <td>{{ item.signed_at }}</td>
+  <td>{{ item.valid_until }}</td>
+  <td>{{ item.value }}</td>
+  <td>{{ item.source }}</td>
+</tr>{% else %}<tr><td colspan="8" class="empty">Nenhum contrato coletado. Rode uma coleta com modo contracts.</td></tr>{% endfor %}</tbody></table>
+</section>
+<p class="hint">Contrato assinado nao significa pagamento. O status financeiro aparece no detalhe e depende de fonte de pagamento conciliada.</p>
+{{ pagination_nav(request, pagination.page, pagination.page_size, pagination.total) }}
+{% endblock %}

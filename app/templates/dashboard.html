@@ -13,6 +13,7 @@
     <label>Documentos por lote <input name="batch_size" type="number" min="1" max="500" value="30" size="4"></label>
     <label class="checkbox"><input type="checkbox" name="process_documents" value="true" checked> Baixar/processar documentos</label>
     <button type="submit">Executar coleta</button>
+    {% include "_force_refresh_option.html" %}
   </form>
 </div>
 <section class="metrics" aria-label="Indicadores">

@@ -1,0 +1,314 @@
+{
+  "validation": {
+    "groups": [
+      {
+        "group": 0,
+        "tests": 172,
+        "failures": 0
+      },
+      {
+        "group": 1,
+        "tests": 316,
+        "failures": 0
+      },
+      {
+        "group": 2,
+        "tests": 230,
+        "failures": 0
+      },
+      {
+        "group": 3,
+        "tests": 197,
+        "failures": 0
+      }
+    ],
+    "tests": 915,
+    "failures": 0,
+    "coverage": 85.46691694040356,
+    "coverage_required": 80,
+    "late_regressions": 97,
+    "process_regressions": 45,
+    "first_group_1": "interrupted after test harness stalled; rerun whole group"
+  },
+  "backup": {
+    "path": "C:\\Users\\jjben\\AppData\\Local\\LicitaLeads\\data\\backups\\20261029T224257Z-3ee7678f36ea45129c00bfc749f0482f.sqlite3",
+    "backend": "sqlite",
+    "database_id": "ad0256f47591869e9a2ebca73a9b4541e4e3a6c17d0be8a2069352f87f19c6ee",
+    "revision": "0024_llm_queue",
+    "sha256": "65d9606803a9786eca25ec34cd549cf1b78362affa71aab5bd7f9334a4ba8684",
+    "maintenance_owner": null
+  },
+  "http_before_correction": [
+    {
+      "path": "/health",
+      "status": 200,
+      "seconds": 0.45,
+      "bytes": 108
+    },
+    {
+      "path": "/crawls",
+      "status": 200,
+      "seconds": 1.23,
+      "bytes": 150131
+    },
+    {
+      "path": "/crawls/progress",
+      "status": 200,
+      "seconds": 1.27,
+      "bytes": 2523
+    },
+    {
+      "path": "/crawls/table",
+      "status": 200,
+      "seconds": 0.5,
+      "bytes": 138136
+    },
+    {
+      "path": "/static/app.css",
+      "status": 200,
+      "seconds": 0.77,
+      "bytes": 25246
+    },
+    {
+      "path": "/crawls/56a23fd5-b788-48e7-8a16-748a44659903/documents",
+      "status": 200,
+      "seconds": 0.62,
+      "bytes": 25692
+    }
+  ],
+  "correction": {
+    "run_id": "b32cb22e-edd1-455a-9061-692a94cfcf17",
+    "status": "completed",
+    "filters": {
+      "connector": "all",
+      "mode": "documents",
+      "uf": "MA",
+      "days": 7,
+      "start_date": null,
+      "end_date": null,
+      "modalities": [
+        "pregao_eletronico"
+      ],
+      "municipality": null,
+      "agency": null,
+      "agency_cnpj": null,
+      "keyword": null,
+      "max_pages": null,
+      "process_documents": true,
+      "document_batch_size": 3,
+      "contract_details": true,
+      "discovery_kind": "publication",
+      "external_ids": [],
+      "document_ids": [
+        "b2ff533c-2587-4191-9baa-fc7fadd8ea96",
+        "88204bd8-d709-4602-9b56-7e36aac3d105",
+        "22a0a775-aee0-459b-9eeb-55c6c19f1783"
+      ],
+      "retry_of_run_id": "56a23fd5-b788-48e7-8a16-748a44659903",
+      "continuation_batch_id": null,
+      "resume_automatically": false,
+      "force_refresh": false,
+      "_document_correction": {
+        "key": "zip-appledouble-20261029-v1",
+        "reason": "Correção autorizada do extrator: ZIP interno e auxiliares AppleDouble. Dispensa única de espera, preservando limite de tentativas e histórico da coleta de origem.",
+        "created_at": "2026-10-29T22:50:43.927873+00:00",
+        "attempts_before": {
+          "b2ff533c-2587-4191-9baa-fc7fadd8ea96": 4,
+          "88204bd8-d709-4602-9b56-7e36aac3d105": 1,
+          "22a0a775-aee0-459b-9eeb-55c6c19f1783": 1
+        },
+        "retry_after_before": {
+          "b2ff533c-2587-4191-9baa-fc7fadd8ea96": "2026-10-29T23:10:10.337934+00:00",
+          "88204bd8-d709-4602-9b56-7e36aac3d105": "2026-10-29T21:26:31.182998+00:00",
+          "22a0a775-aee0-459b-9eeb-55c6c19f1783": "2026-10-29T21:32:58.459536+00:00"
+        }
+      }
+    },
+    "claims": {
+      "b2ff533c-2587-4191-9baa-fc7fadd8ea96": {
+        "at": "2026-10-29T22:50:45.087310+00:00",
+        "attempts_before": 4,
+        "wait_bypassed": true
+      },
+      "88204bd8-d709-4602-9b56-7e36aac3d105": {
+        "at": "2026-10-29T22:50:45.126536+00:00",
+        "attempts_before": 1,
+        "wait_bypassed": false
+      },
+      "22a0a775-aee0-459b-9eeb-55c6c19f1783": {
+        "at": "2026-10-29T22:50:45.143646+00:00",
+        "attempts_before": 1,
+        "wait_bypassed": false
+      }
+    },
+    "sources": {
+      "documents": {
+        "status": "completed",
+        "documents_processed": 3,
+        "documents_total": 3,
+        "events_created": 121,
+        "participants_created": 118,
+        "leads_created": 118,
+        "batch_size": 3,
+        "document_ids": [
+          "b2ff533c-2587-4191-9baa-fc7fadd8ea96",
+          "88204bd8-d709-4602-9b56-7e36aac3d105",
+          "22a0a775-aee0-459b-9eeb-55c6c19f1783"
+        ],
+        "documents_failed": 0,
+        "documents_skipped": 0
+      }
+    },
+    "roots": [
+      {
+        "id": "b2ff533c-2587-4191-9baa-fc7fadd8ea96",
+        "title": "ETP_PESQUISA_DE_PRECO_E_PLANILHA_DE_CONTRATACAO.zip",
+        "status": "extracted",
+        "attempts": 0,
+        "error": null,
+        "resolved_url": "https://pncp.gov.br/api/pncp/v1/orgaos/03204421000122/compras/2026/252/arquivos/1",
+        "nodes": 20,
+        "leaves": 17,
+        "leaf_states": [
+          "extracted",
+          "extracted",
+          "extracted",
+          "extracted",
+          "extracted",
+          "extracted",
+          "extracted",
+          "extracted",
+          "extracted",
+          "extracted",
+          "extracted",
+          "extracted",
+          "extracted",
+          "extracted",
+          "extracted",
+          "extracted",
+          "extracted"
+        ],
+        "evidences": 371,
+        "provenance_complete": true,
+        "active": true
+      },
+      {
+        "id": "88204bd8-d709-4602-9b56-7e36aac3d105",
+        "title": "Sems__MA.zip",
+        "status": "extracted",
+        "attempts": 0,
+        "error": "appledouble_metadata_ignored: 6",
+        "resolved_url": "https://pncp.gov.br/api/pncp/v1/orgaos/00394544000185/compras/2026/1733/arquivos/1",
+        "nodes": 7,
+        "leaves": 6,
+        "leaf_states": [
+          "extracted",
+          "extracted",
+          "extracted",
+          "extracted",
+          "extracted",
+          "extracted"
+        ],
+        "evidences": 0,
+        "provenance_complete": true,
+        "active": true
+      },
+      {
+        "id": "22a0a775-aee0-459b-9eeb-55c6c19f1783",
+        "title": "39303005900952025000",
+        "status": "extracted",
+        "attempts": 0,
+        "error": null,
+        "resolved_url": "https://pncp.gov.br/api/pncp/v1/orgaos/04892707002316/compras/2025/68/arquivos/1",
+        "nodes": 7,
+        "leaves": 5,
+        "leaf_states": [
+          "extracted",
+          "extracted",
+          "extracted",
+          "extracted",
+          "extracted"
+        ],
+        "evidences": 0,
+        "provenance_complete": true,
+        "active": true
+      }
+    ],
+    "cancelled_batch_still_cancelled": true,
+    "llm_counts": {
+      "cancelled": 8396,
+      "failed": 1,
+      "pending": 2468,
+      "succeeded": 327
+    },
+    "parent_unchanged": true,
+    "unsupported_unchanged": true,
+    "unsupported_count": 2
+  },
+  "scheduler_after": {
+    "at": "2026-10-29 22:52:41.410013+00:00",
+    "database": "sqlite:///C:/Users/jjben/AppData/Local/LicitaLeads/data/licita_lead.db",
+    "paused": false,
+    "archive_max_depth": 2,
+    "active_runs": [],
+    "live_leases": [],
+    "llm_counts": {
+      "cancelled": 8396,
+      "failed": 1,
+      "pending": 2468,
+      "succeeded": 327
+    },
+    "cancelled_llm_batches": [
+      "678d077b-2535-437e-80c4-628bbb28e9a9"
+    ],
+    "parent_status": "partial",
+    "documents": [
+      {
+        "id": "b2ff533c-2587-4191-9baa-fc7fadd8ea96",
+        "title": "ETP_PESQUISA_DE_PRECO_E_PLANILHA_DE_CONTRATACAO.zip",
+        "status": "extracted",
+        "attempts": 0,
+        "next_attempt": null,
+        "active": true
+      },
+      {
+        "id": "88204bd8-d709-4602-9b56-7e36aac3d105",
+        "title": "Sems__MA.zip",
+        "status": "extracted",
+        "attempts": 0,
+        "next_attempt": null,
+        "active": true
+      },
+      {
+        "id": "22a0a775-aee0-459b-9eeb-55c6c19f1783",
+        "title": "39303005900952025000",
+        "status": "extracted",
+        "attempts": 0,
+        "next_attempt": null,
+        "active": true
+      }
+    ]
+  },
+  "http_after_correction": [
+    {
+      "path": "/crawls",
+      "status": 200,
+      "seconds": 0.81
+    },
+    {
+      "path": "/crawls/progress",
+      "status": 200,
+      "seconds": 0.64
+    },
+    {
+      "path": "/crawls/table",
+      "status": 200,
+      "seconds": 0.19
+    },
+    {
+      "path": "/crawls/b32cb22e-edd1-455a-9061-692a94cfcf17/documents",
+      "status": 200,
+      "seconds": 0.19
+    }
+  ]
+}

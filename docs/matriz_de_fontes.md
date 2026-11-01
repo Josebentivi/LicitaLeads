@@ -1,7 +1,11 @@
 # Matriz de capacidades das fontes oficiais
 
-Auditoria técnica registrada em **2026-10-06**.
+Auditoria técnica registrada em **2026-10-06, 2026-10-21**.
 Esta matriz é gerada pelo mesmo registro usado por `GET /api/source-capabilities`.
+Ela registra capacidades e auditorias nas datas indicadas; uma fonte real pode
+estar indisponível ou ter mudado desde então. A suíte offline não confirma a
+disponibilidade atual dos portais. Veja [testes locais](testes_locais.md) e os
+relatórios datados de fontes para o alcance de cada verificação.
 
 ## PNCP
 
@@ -30,8 +34,6 @@ Documentação oficial: <https://pncp.gov.br/manual/pt-br/latest/>
 - `GET /api/consulta/v1/atas` — parâmetros: `dataInicial`, `dataFinal`, `idUsuario`, `cnpj`, `codigoUnidadeAdministrativa`, `pagina`, `tamanhoPagina`; máximo por página: 50; autenticação de leitura: não.
 - `GET /api/consulta/v1/atas/atualizacao` — parâmetros: `dataInicial`, `dataFinal`, `idUsuario`, `cnpj`, `codigoUnidadeAdministrativa`, `pagina`, `tamanhoPagina`; máximo por página: 50; autenticação de leitura: não.
 
-Limitações confirmadas: “propostas abertas” lista processos, e o resultado homologado identifica vencedor/adjudicatário. Participantes perdedores, habilitação, inabilitação, desclassificação, recursos, contrarrazões e estado completo da sessão não possuem feed estruturado público confirmado e exigem documento oficial como evidência. Documentos PNCP também podem ser publicados em ZIP.
-
 ## Compras.gov.br — Dados Abertos
 
 Documentação oficial: <https://dadosabertos.compras.gov.br/swagger-ui/index.html>
@@ -43,7 +45,8 @@ Documentação oficial: <https://dadosabertos.compras.gov.br/swagger-ui/index.ht
 | Documentos | `not_supported` | — | Nenhum endpoint de documentos foi encontrado no OpenAPI auditado. |
 | Participantes, propostas, habilitação e recursos | `not_supported` | — | Não há feed estruturado público confirmado; usar documentos oficiais do PNCP. |
 | SRP e amparo legal da contratação | `available` | — | O módulo de contratações publica srp, amparoLegalCodigoPncp, amparoLegalNome e amparoLegalDescricao. |
-| Atas de registro de preços (ARP) | `available` | `GET /modulo-arp/1_consultarARP`<br>`GET /modulo-arp/1.1_consultarARP_Id`<br>`GET /modulo-arp/2_consultarARPItem`<br>`GET /modulo-arp/2.1_consultarARPItem_Id` | Módulo ARP oficial com ata, itens, fornecedor e adesões; não substitui a proveniência do recurso original. |
+| Atas de registro de preços (ARP) | `available` | `GET /modulo-arp/1_consultarARP`<br>`GET /modulo-arp/1.1_consultarARP_Id`<br>`GET /modulo-arp/2_consultarARPItem`<br>`GET /modulo-arp/2.1_consultarARPItem_Id`<br>`GET /modulo-arp/3_consultarUnidadesItem`<br>`GET /modulo-arp/4_consultarEmpenhosSaldoItem`<br>`GET /modulo-arp/5_consultarAdesoesItem` | Módulo ARP oficial com ata, itens, fornecedor e adesões; não substitui a proveniência do recurso original. |
+| Contratos e itens de contrato | `available` | `GET /modulo-contratos/1_consultarContratos`<br>`GET /modulo-contratos/2.1_consultarContratosItem_Id` | Cabecalhos e itens publicados pelo modulo de contratos. |
 | UASG, fornecedores, ARP, contratos e OCDS | `available` | — | Módulos oficiais existem, mas não substituem a proveniência do recurso original. |
 
 ### Contratos auditados
@@ -56,8 +59,36 @@ Documentação oficial: <https://dadosabertos.compras.gov.br/swagger-ui/index.ht
 - `GET /modulo-arp/1.1_consultarARP_Id` — parâmetros: `numeroControlePncpAta`, `dataAtualizacao`; autenticação de leitura: não.
 - `GET /modulo-arp/2_consultarARPItem` — parâmetros: `pagina`, `tamanhoPagina`, `codigoUnidadeGerenciadora`, `codigoModalidadeCompra`, `dataVigenciaInicialMin`, `dataVigenciaInicialMax`, `numeroItem`, `codigoItem`, `tipoItem`, `niFornecedor`, `codigoPdm`, `numeroCompra`; máximo por página: 500; autenticação de leitura: não.
 - `GET /modulo-arp/2.1_consultarARPItem_Id` — parâmetros: `numeroControlePncpAta`, `dataAtualizacao`; autenticação de leitura: não.
+- `GET /modulo-arp/3_consultarUnidadesItem` — parâmetros: `numeroAta`, `unidadeGerenciadora`, `pagina`, `tamanhoPagina`; autenticação de leitura: não.
+- `GET /modulo-arp/4_consultarEmpenhosSaldoItem` — parâmetros: `numeroAta`, `unidadeGerenciadora`, `pagina`, `tamanhoPagina`; autenticação de leitura: não.
+- `GET /modulo-arp/5_consultarAdesoesItem` — parâmetros: `numeroAta`, `unidadeGerenciadora`, `pagina`, `tamanhoPagina`; autenticação de leitura: não.
+- `GET /modulo-contratos/1_consultarContratos` — parâmetros: `pagina`, `tamanhoPagina`, `dataPublicacaoPncpInicial`, `dataPublicacaoPncpFinal`, `orgaoEntidadeCnpj`, `unidadeOrgaoUfSigla`; máximo por página: 500; autenticação de leitura: não.
+- `GET /modulo-contratos/2.1_consultarContratosItem_Id` — parâmetros: `tipo`, `codigo`; autenticação de leitura: não.
 
-O OpenAPI também expõe módulos `legado`, `uasg`, `fornecedor`, `arp`, `contratos` e `ocds`. Não há endpoint confirmado para documentos, propostas individuais, participantes completos, habilitação, recursos ou contrarrazões.
+## PNCP - Contratos e empenhos
+
+Documentação oficial: <https://pncp.gov.br/manual/pt-br/latest/>
+
+| Capacidade | Situação | Endpoints oficiais | Observações |
+|---|---|---|---|
+| Contratos e empenhos por periodo/orgao | `available` | `GET /api/consulta/v1/contratos`<br>`GET /api/pncp/v1/orgaos/{cnpj}/contratos/{ano}/{sequencial}/termos` | Lista contratos/empenhos publicados; valores contratados nao equivalem a pagamentos efetivos. |
+
+### Contratos auditados
+
+- `GET /api/consulta/v1/contratos` — parâmetros: `dataInicial`, `dataFinal`, `cnpjOrgao`, `codigoUnidadeAdministrativa`, `pagina`, `tamanhoPagina`; máximo por página: 50; autenticação de leitura: não.
+- `GET /api/pncp/v1/orgaos/{cnpj}/contratos/{ano}/{sequencial}/termos` — parâmetros: `pagina`, `tamanhoPagina`; máximo por página: 50; autenticação de leitura: não.
+
+## Portal da Transparencia - Pagamentos federais
+
+Documentação oficial: <https://portaldatransparencia.gov.br/api-de-dados>
+
+| Capacidade | Situação | Endpoints oficiais | Observações |
+|---|---|---|---|
+| Pagamentos por favorecido | `available` | `GET /api-de-dados/despesas/documentos-por-favorecido` | Exige token gratuito (chave-api-dados). Cobre o Poder Executivo federal; ausencia de pagamento na base nao prova inadimplencia. |
+
+### Contratos auditados
+
+- `GET /api-de-dados/despesas/documentos-por-favorecido` — parâmetros: `codigoPessoa`, `fase`, `ano`, `pagina`; autenticação de leitura: sim.
 
 ## Regras transversais
 

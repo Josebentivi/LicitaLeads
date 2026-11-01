@@ -39,8 +39,40 @@
     <td>{{ item.unit_value }}</td>
     <td>{{ item.total_value }}</td>
     <td>{{ item.max_adhesion }}</td>
-    <td>{% if item.supplier_cnpj %}<a href="/empresas/{{ item.supplier_cnpj }}">{{ item.supplier_name }}</a><small>{{ item.supplier_cnpj_label }}</small>{% else %}{{ item.supplier_name }}{% endif %}</td>
+    <td>{% if item.supplier_cnpj %}<a href="/empresas/{{ item.supplier_cnpj }}">{{ item.supplier_name }}</a><small>{{ item.supplier_cnpj_label }}</small><small><a href="/empresas/{{ item.supplier_cnpj }}">Visão completa da empresa</a></small>{% else %}{{ item.supplier_name }}{% endif %}</td>
   </tr>{% else %}<tr><td colspan="8" class="empty">Nenhum item publicado para esta ata.</td></tr>{% endfor %}</tbody></table>
   </div>
 </section>
+
+<section class="panel procurement-section">
+  <div class="section-heading"><div><h2>Unidades e saldos</h2><p class="hint">Saldos publicados pelo modulo ARP do Compras.gov.br. Ausencia de linha significa que a fonte nao publicou o detalhe.</p></div></div>
+  <div class="table-wrap">
+  <table><thead><tr><th>Item</th><th>Codigo</th><th>Descricao</th><th>Fornecedor</th><th>Registrado</th><th>Saldo adesoes</th><th>Saldo remanejamento</th><th>Limite adesao</th><th>Unidade</th><th>Aceita adesao</th><th>Atualizado</th></tr></thead>
+  <tbody>{% for unit in units %}<tr>
+    <td>{{ unit.item_number }}</td><td>{{ unit.catalog_code }}</td><td><small>{{ unit.description }}</small></td><td>{{ unit.supplier_name }}</td>
+    <td>{{ unit.quantity_registered }}</td><td>{{ unit.adhesion_balance }}</td><td>{{ unit.remanejamento_balance }}</td><td>{{ unit.adhesion_limit }}</td>
+    <td>{{ unit.unit }} <small>{{ unit.unit_code }}</small></td><td>{{ unit.accepts_adhesion }}</td><td>{{ unit.updated_at }}</td>
+  </tr>{% else %}<tr><td colspan="11" class="empty">Nenhuma unidade/saldo publicado para esta ata.</td></tr>{% endfor %}</tbody></table>
+  </div>
+</section>
+<section class="panel procurement-section">
+  <div class="section-heading"><div><h2>Empenhos e saldo</h2><p class="hint">Quantidades empenhadas e saldo por item/unidade, quando publicados.</p></div></div>
+  <div class="table-wrap">
+  <table><thead><tr><th>Item</th><th>Unidade</th><th>Tipo</th><th>Registrado</th><th>Empenhado</th><th>Saldo</th><th>Atualizado</th></tr></thead>
+  <tbody>{% for commitment in commitments %}<tr>
+    <td>{{ commitment.item_number }}</td><td>{{ commitment.unit }}</td><td>{{ commitment.commitment_type }}</td>
+    <td>{{ commitment.quantity_registered }}</td><td>{{ commitment.quantity_committed }}</td><td>{{ commitment.balance }}</td><td>{{ commitment.updated_at }}</td>
+  </tr>{% else %}<tr><td colspan="7" class="empty">Nenhum empenho/saldo publicado para esta ata.</td></tr>{% endfor %}</tbody></table>
+  </div>
+</section>
+<section class="panel procurement-section">
+  <div class="section-heading"><div><h2>Adesoes de outros orgaos</h2><p class="hint">Adesoes registradas ("caronas"). Nao confundir com uso da ata apenas como referencia de preco.</p></div></div>
+  <div class="table-wrap">
+  <table><thead><tr><th>Item</th><th>Unidade aderente</th><th>Aprovada em</th><th>Quantidade</th></tr></thead>
+  <tbody>{% for adhesion in adhesions %}<tr>
+    <td>{{ adhesion.item_number }}</td><td>{{ adhesion.requesting_unit }}</td><td>{{ adhesion.approved_at }}</td><td>{{ adhesion.approved_quantity }}</td>
+  </tr>{% else %}<tr><td colspan="4" class="empty">Nenhuma adesao publicada para esta ata.</td></tr>{% endfor %}</tbody></table>
+  </div>
+</section>
+<div hx-get="/history/price_registry/{{ registry.id }}" hx-trigger="load" hx-swap="outerHTML"><p class="hint">Carregando histórico de alterações…</p></div>
 {% endblock %}

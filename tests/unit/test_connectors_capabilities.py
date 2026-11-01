@@ -9,7 +9,12 @@ def test_capability_registry_returns_independent_models() -> None:
     first = get_source_capabilities()
     second = get_source_capabilities()
 
-    assert {source.id for source in first} == {"pncp", "compras_gov"}
+    assert {source.id for source in first} == {
+        "pncp",
+        "compras_gov",
+        "pncp_contracts",
+        "transparencia",
+    }
     assert first[0] is not second[0]
     pncp = next(source for source in first if source.id == "pncp")
     events = next(item for item in pncp.capabilities if item.name == "Eventos da sessão")

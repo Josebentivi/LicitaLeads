@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import io
-import time
+import threading
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -25,9 +25,11 @@ from app.models import (
     Participant,
     Procurement,
     ProcurementEvent,
+    ProcurementPhase,
 )
+from app.services.documents import processes
 from app.services.ingestion.documents import DocumentDownloadError, DownloadedDocument
-from app.services.ingestion.processor import DocumentProcessingService
+from app.services.ingestion.processor import DocumentProcessingService, ProcessingSummary
 
 from .conftest import DatabaseContext
 
@@ -78,7 +80,8 @@ async def _pending_document(
             external_id="document-process-1",
             title="Pregão Eletrônico 14/2026",
             agency_name="Prefeitura Municipal de Exemplo",
-            agency_cnpj="00000000000191",
+            # The bidder in the document is a different legal entity from its buyer.
+            agency_cnpj="01612325000198",
             uf="MA",
             municipality="São Luís",
             estimated_value=180000,
@@ -228,6 +231,7 @@ async def test_zip_members_are_children_and_not_path_extracted(
 async def test_extraction_runs_off_the_event_loop(
     database: DatabaseContext,
     tmp_path: Path,
+    monkeypatch,
 ) -> None:
     """Heavy document extraction must not freeze the API event loop."""
 
@@ -237,20 +241,30 @@ async def test_extraction_runs_off_the_event_loop(
         session_factory=database.sessions,
         downloader=FakeDownloader(b"documento sem evento relevante"),
     )
-    real_extract = service.extractor.extract
+    entered, release = threading.Event(), threading.Event()
+    main_thread = threading.get_ident()
+    real_supervise = processes._supervise
 
-    def slow_extract(*args: object, **kwargs: object):
-        time.sleep(0.4)
-        return real_extract(*args, **kwargs)
+    def supervised(*args, **kwargs):
+        assert threading.get_ident() != main_thread
+        entered.set()
+        if not release.wait(timeout=10):
+            raise AssertionError("a API não respondeu enquanto o processo era preparado")
+        return real_supervise(*args, **kwargs)
 
-    service.extractor.extract = slow_extract
+    monkeypatch.setattr(processes, "_supervise", supervised)
     processing = asyncio.create_task(service.process_pending())
-    started = time.monotonic()
-    await asyncio.sleep(0.05)
-    elapsed = time.monotonic() - started
-    assert elapsed < 0.3, "extraction must not block the event loop"
-    summary = await asyncio.wait_for(processing, timeout=10)
-    assert summary.documents_processed == 1
+    try:
+        assert await asyncio.to_thread(entered.wait, 10)
+        await asyncio.sleep(0)
+        assert not processing.done()
+        release.set()
+        summary = await asyncio.wait_for(processing, timeout=20)
+        assert summary.documents_processed == 1
+    finally:
+        release.set()
+        processing.cancel()
+        await asyncio.gather(processing, return_exceptions=True)
 
 
 @pytest.mark.asyncio
@@ -314,3 +328,167 @@ async def test_closed_process_participation_does_not_trigger_lead(
     assert summary.leads_created == 0
     async with database.sessions() as session:
         assert await session.scalar(select(func.count()).select_from(Lead)) == 0
+
+
+@pytest.mark.asyncio
+async def test_recheck_reprocesses_changed_session_document(
+    database: DatabaseContext,
+    tmp_path: Path,
+) -> None:
+    document_id = await _pending_document(
+        database,
+        status="Em andamento",
+        proposal_end_at=datetime(2026, 9, 1, tzinfo=UTC),
+    )
+    async with database.sessions() as session, session.begin():
+        procurement = await session.scalar(select(Procurement))
+        assert procurement is not None
+        procurement.current_phase = ProcurementPhase.DISPUTE
+
+    downloader = FakeDownloader(
+        b"EMPRESA EXEMPLO LTDA., CNPJ 00.000.000/0001-91, licitante do item 3."
+    )
+    service = DocumentProcessingService(
+        _settings(tmp_path),
+        session_factory=database.sessions,
+        downloader=downloader,
+    )
+    first = await service.process_pending()
+    assert first.participants_created == 1
+
+    downloader.content = (
+        b"EMPRESA EXEMPLO LTDA., CNPJ 00.000.000/0001-91, foi convocada para "
+        b"diligencia e tera o prazo de 2 horas para apresentar documentos."
+    )
+    summary = await service.recheck_stale_session_documents()
+    await service.aclose()
+
+    assert summary.documents_processed == 1
+    assert summary.events_created >= 1
+    async with database.sessions() as session:
+        document = await session.get(Document, document_id)
+        events = list((await session.scalars(select(ProcurementEvent))).all())
+    assert document is not None and document.file_hash is not None
+    assert any(event.event_type.value == "DILIGENCE_REQUESTED" for event in events)
+
+
+@pytest.mark.asyncio
+async def test_recheck_unchanged_document_skips_extraction(
+    database: DatabaseContext,
+    tmp_path: Path,
+) -> None:
+    document_id = await _pending_document(
+        database, status="Em andamento", proposal_end_at=datetime(2026, 9, 1, tzinfo=UTC)
+    )
+    downloader = FakeDownloader(b"EMPRESA EXEMPLO LTDA., CNPJ 00.000.000/0001-91.")
+    service = DocumentProcessingService(
+        _settings(tmp_path), session_factory=database.sessions, downloader=downloader
+    )
+    await service.process_pending()
+
+    class CountingExtractor:
+        calls = 0
+
+        def extract(self, *args, **kwargs):
+            self.calls += 1
+            raise AssertionError("unchanged document must not be re-extracted")
+
+    counter = CountingExtractor()
+    service.extractor = counter
+    summary = await service.recheck_document(document_id)
+    await service.aclose()
+
+    assert summary.documents_processed == 0
+    assert counter.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_session_recheck_rotates_failed_documents(
+    database: DatabaseContext,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async with database.sessions() as session, session.begin():
+        procurement = Procurement(
+            source="pncp",
+            external_id="recheck-rotation",
+            status="Em andamento",
+            current_phase=ProcurementPhase.DISPUTE,
+            fingerprint="t" * 64,
+        )
+        session.add(procurement)
+        await session.flush()
+        documents = []
+        for index in (1, 2):
+            document = Document(
+                procurement_id=procurement.id,
+                document_type="ata_sessao",
+                title=f"Ata da sessao {index}",
+                original_url=f"https://pncp.gov.br/ata-{index}.txt",
+                extraction_status=ExtractionStatus.PENDING,
+                downloaded_at=datetime(2026, 9, 1, tzinfo=UTC),
+                fingerprint=str(index) * 64,
+            )
+            session.add(document)
+            documents.append(document)
+        await session.flush()
+        document_ids = [item.id for item in documents]
+
+    service = DocumentProcessingService(_settings(tmp_path), session_factory=database.sessions)
+    selected: list = []
+    failed_ids: list = []
+
+    async def fake_recheck(document_id):
+        selected.append(document_id)
+        if document_id == document_ids[0]:
+            failed_ids.append(document_id)
+            raise RuntimeError("download failed")
+        # Successful rechecks now mark their accepted version themselves;
+        # the polling wrapper only rotates failures with a version guard.
+        await service._mark_checked(document_id)
+        return ProcessingSummary()
+
+    monkeypatch.setattr(service, "recheck_document", fake_recheck)
+    first = await service.recheck_stale_session_documents(limit=1)
+    second = await service.recheck_stale_session_documents(limit=1)
+    await service.aclose()
+
+    assert first.documents_failed + second.documents_failed == 1
+    assert first.documents_processed + second.documents_processed == 1
+    assert set(selected) == set(document_ids)
+    async with database.sessions() as session:
+        failed = await session.get(Document, failed_ids[0])
+    assert failed is not None and failed.last_checked_at is not None
+
+
+@pytest.mark.asyncio
+async def test_transient_document_failure_is_retried(
+    database: DatabaseContext,
+    tmp_path: Path,
+) -> None:
+    document_id = await _pending_document(database)
+    downloader = FakeDownloader(b"", error=DocumentDownloadError("temporary timeout"))
+    service = DocumentProcessingService(
+        _settings(tmp_path),
+        session_factory=database.sessions,
+        downloader=downloader,
+    )
+    first = await service.process_pending()
+    assert first.documents_failed == 1
+    async with database.sessions() as session, session.begin():
+        document = await session.get(Document, document_id)
+        assert document is not None
+        assert document.extraction_attempts == 1
+        assert document.next_attempt_at is not None
+        document.next_attempt_at = datetime(2000, 1, 1, tzinfo=UTC)
+
+    downloader.error = None
+    downloader.content = b"EMPRESA EXEMPLO LTDA., CNPJ 00.000.000/0001-91."
+    second = await service.process_pending()
+    await service.aclose()
+    assert second.documents_processed == 1
+    async with database.sessions() as session:
+        document = await session.get(Document, document_id)
+    assert document is not None
+    assert document.extraction_attempts == 0
+    assert document.next_attempt_at is None

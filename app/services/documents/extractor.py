@@ -13,7 +13,8 @@ import re
 from collections.abc import Iterable
 from pathlib import PurePath
 
-from .security import ArchiveLimits, UnsafeArchiveError, read_safe_zip
+from .errors import ExtractionFailure
+from .security import ArchiveBudget, ArchiveLimits, UnsafeArchiveError, read_safe_zip
 from .types import (
     DocumentChunk,
     DocumentExtraction,
@@ -92,7 +93,7 @@ class DocumentExtractor:
         *,
         archive_limits: ArchiveLimits | None = None,
         min_pdf_text_characters: int = 20,
-        max_nested_archives: int = 1,
+        max_nested_archives: int = 2,
     ) -> None:
         self.archive_limits = archive_limits or ArchiveLimits()
         self.min_pdf_text_characters = min_pdf_text_characters
@@ -105,11 +106,13 @@ class DocumentExtractor:
         filename: str,
         mime_type: str | None = None,
         _archive_depth: int = 0,
+        _budget: ArchiveBudget | None = None,
     ) -> DocumentExtraction:
         digest = hashlib.sha256(content).hexdigest()
         detected = self.detect_mime(content, filename)
         supplied = mime_type.split(";", 1)[0].strip().lower() if mime_type else None
         warnings: list[str] = []
+        budget = _budget or ArchiveBudget(self.archive_limits)
         if supplied and supplied not in {detected, "application/octet-stream"}:
             warnings.append(f"declared MIME {supplied!r} differs from detected MIME {detected!r}")
         try:
@@ -118,30 +121,25 @@ class DocumentExtractor:
             if detected == "text/html":
                 return self._html(content, detected, digest, warnings)
             if detected.endswith("wordprocessingml.document"):
-                return self._docx(content, detected, digest, warnings)
+                return self._docx(content, detected, digest, warnings, budget)
             if detected.endswith("spreadsheetml.sheet"):
-                return self._xlsx(content, detected, digest, warnings)
+                return self._xlsx(content, detected, digest, warnings, budget)
             if detected == "text/csv":
                 return self._csv(content, detected, digest, warnings)
             if detected == "text/plain":
                 return self._plain(content, detected, digest, warnings)
             if detected == "application/zip":
-                return self._zip(content, detected, digest, warnings, _archive_depth)
+                return self._zip(content, detected, digest, warnings, _archive_depth, budget)
             return DocumentExtraction(
                 status=DocumentExtractionStatus.UNSUPPORTED,
                 mime_type=detected,
                 sha256=digest,
                 warnings=tuple(warnings),
             )
-        except (UnsafeArchiveError, ValueError):
+        except (UnsafeArchiveError, ExtractionFailure):
             raise
         except Exception as exc:  # malformed third-party file, kept as an auditable failure
-            return DocumentExtraction(
-                status=DocumentExtractionStatus.FAILED,
-                mime_type=detected,
-                sha256=digest,
-                warnings=tuple([*warnings, f"{type(exc).__name__}: {exc}"]),
-            )
+            raise ExtractionFailure.from_exception(exc, input_hash=digest) from None
 
     @staticmethod
     def detect_mime(content: bytes, filename: str) -> str:
@@ -208,10 +206,11 @@ class DocumentExtractor:
         return DocumentExtraction(status, mime, digest, text, chunks, warnings=tuple(warnings))
 
     def _docx(
-        self, content: bytes, mime: str, digest: str, warnings: list[str]
+        self, content: bytes, mime: str, digest: str, warnings: list[str], budget: ArchiveBudget
     ) -> DocumentExtraction:
         from docx import Document
 
+        read_safe_zip(content, self.archive_limits, budget=budget)
         document = Document(io.BytesIO(content))
         items: list[tuple[str, int | None, str | None, dict]] = []
         for index, paragraph in enumerate(document.paragraphs, start=1):
@@ -224,11 +223,12 @@ class DocumentExtractor:
         return DocumentExtraction(status, mime, digest, text, chunks, warnings=tuple(warnings))
 
     def _xlsx(
-        self, content: bytes, mime: str, digest: str, warnings: list[str]
+        self, content: bytes, mime: str, digest: str, warnings: list[str], budget: ArchiveBudget
     ) -> DocumentExtraction:
         from openpyxl import load_workbook  # type: ignore[import-untyped]
         from openpyxl.utils import get_column_letter  # type: ignore[import-untyped]
 
+        read_safe_zip(content, self.archive_limits, budget=budget)
         workbook = load_workbook(io.BytesIO(content), read_only=True, data_only=True)
         items: list[tuple[str, int | None, str | None, dict]] = []
         try:
@@ -236,7 +236,16 @@ class DocumentExtractor:
                 rows: list[str] = []
                 max_column = 0
                 last_row = 0
+                cell_count = 0
+                reset_dimensions = getattr(sheet, "reset_dimensions", None)
+                if callable(reset_dimensions):
+                    reset_dimensions()
                 for row_index, row in enumerate(sheet.iter_rows(values_only=True), start=1):
+                    if row_index > 100_000:
+                        raise UnsafeArchiveError("spreadsheet exceeds row limit")
+                    cell_count += len(row)
+                    if cell_count > 1_000_000:
+                        raise UnsafeArchiveError("spreadsheet exceeds cell limit")
                     values = ["" if value is None else str(value) for value in row]
                     while values and values[-1] == "":
                         values.pop()
@@ -291,17 +300,33 @@ class DocumentExtractor:
         digest: str,
         warnings: list[str],
         depth: int,
+        budget: ArchiveBudget,
     ) -> DocumentExtraction:
         if depth >= self.max_nested_archives:
-            raise UnsafeArchiveError("nested archive depth exceeded")
+            raise UnsafeArchiveError("nested archive depth exceeded", code="archive_depth_exceeded")
         members: list[ExtractedArchiveMember] = []
-        for filename, member_content in read_safe_zip(content, self.archive_limits):
-            extraction = self.extract(
-                member_content,
-                filename=filename,
-                _archive_depth=depth + 1,
-            )
+        ignored = 0
+        for filename, member_content in read_safe_zip(content, self.archive_limits, budget=budget):
+            # AppleDouble sidecars are not Office documents, despite their
+            # inherited suffix. They have already passed all archive guards.
+            if PurePath(filename).name.startswith("._") and member_content.startswith(
+                b"\x00\x05\x16\x07"
+            ):
+                ignored += 1
+                continue
+            try:
+                extraction = self.extract(
+                    member_content,
+                    filename=filename,
+                    _archive_depth=depth + 1,
+                    _budget=budget,
+                )
+            except (UnsafeArchiveError, ExtractionFailure) as exc:
+                exc.member_path = filename + (" / " + exc.member_path if exc.member_path else "")
+                raise
             members.append(ExtractedArchiveMember(filename, extraction))
+        if ignored:
+            warnings.append(f"appledouble_metadata_ignored: {ignored}")
         combined_items: list[tuple[str, int | None, str | None, dict]] = []
         for archive_member in members:
             if archive_member.extraction.text:

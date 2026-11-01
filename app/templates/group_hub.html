@@ -1,0 +1,99 @@
+{% extends "base.html" %}
+{% block title %}{{ hub.group.label }} - LicitaLead Monitor{% endblock %}
+{% block content %}
+<div class="page-heading">
+  <div>
+    <p class="eyebrow">Painel do grupo</p>
+    <h1>{{ hub.group.label }}</h1>
+    <p class="hint page-description">{{ hub.group.description }}</p>
+  </div>
+  {% if hub.primary_action %}
+  <div class="header-actions">
+    <a class="button" href="{{ hub.primary_action.href }}">{{ hub.primary_action.label }}</a>
+  </div>
+  {% endif %}
+</div>
+
+{% for alert in hub.alerts %}
+<div class="alert {{ 'error' if alert.severity == 'danger' else ('warning' if alert.severity == 'warning' else 'success') }}">
+  <strong>{{ alert.title }}.</strong> {{ alert.message }}
+  {% if alert.href %}<a href="{{ alert.href }}">{{ alert.label }}</a>{% endif %}
+</div>
+{% endfor %}
+
+<section class="metrics" aria-label="Indicadores de {{ hub.group.label }}">
+  {% for metric in hub.metrics %}
+  <article class="metric">
+    <span>{{ metric.label }}</span>
+    <strong>{{ metric.value }}</strong>
+    {% if metric.note %}<small>{{ metric.note }}</small>{% endif %}
+  </article>
+  {% endfor %}
+</section>
+
+<section class="panel">
+  <div class="section-heading">
+    <div><h2>Ações rápidas</h2><p class="hint">Atalhos para as tarefas mais comuns deste grupo.</p></div>
+  </div>
+  <div class="grid-cards action-grid">
+    {% for action in hub.actions %}
+    <article class="card action-card">
+      <div>
+        <h3>{{ action.title }}</h3>
+        <p class="hint">{{ action.description }}</p>
+      </div>
+      <div class="action-card-footer">
+        {% if action.count is not none %}<span class="action-count">{{ action.count }}</span>{% endif %}
+        <a class="{{ 'button' if loop.first else 'button secondary' }}" href="{{ action.href }}">{{ action.label }}</a>
+      </div>
+    </article>
+    {% endfor %}
+  </div>
+</section>
+
+{% if hub.show_crawl_form %}
+<section class="panel" id="executar-coleta">
+  <div class="section-heading">
+    <div><h2>Executar coleta</h2><p class="hint">Inicia uma coleta manual nas fontes de contratações.</p></div>
+  </div>
+  <form method="post" action="/crawls/run" class="filters">
+    <input type="hidden" name="connector" value="all">
+    <label>UF <input name="uf" value="{{ hub.selected_uf }}" minlength="2" maxlength="2" required></label>
+    <label>Dias <input name="days" type="number" min="1" max="365" value="7"></label>
+    <label>Documentos por lote <input name="batch_size" type="number" min="1" max="500" value="30"></label>
+    <label class="checkbox"><input type="checkbox" name="process_documents" value="true" checked> Baixar/processar documentos</label>
+    <button type="submit">Executar coleta</button>
+    {% include "_force_refresh_option.html" %}
+  </form>
+</section>
+{% endif %}
+
+{% if hub.recent_title %}
+<section class="panel">
+  <div class="section-heading">
+    <div><h2>{{ hub.recent_title }}</h2><p class="hint">Amostra recente; use as ações acima para ver a lista completa.</p></div>
+  </div>
+  {% if hub.recent_rows %}
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Item</th><th>Detalhe</th><th>Status</th></tr></thead>
+      <tbody>
+      {% for row in hub.recent_rows %}
+      <tr>
+        <td>
+          {% if row.href %}<a href="{{ row.href }}">{{ row.title }}</a>{% else %}{{ row.title }}{% endif %}
+          {% if row.subtitle %}<small>{{ row.subtitle }}</small>{% endif %}
+        </td>
+        <td>{{ row.meta or '-' }}</td>
+        <td>{% if row.status %}<span class="badge {{ row.status_class or '' }}">{{ row.status }}</span>{% else %}-{% endif %}</td>
+      </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <p class="empty">{{ hub.recent_empty }}</p>
+  {% endif %}
+</section>
+{% endif %}
+{% endblock %}

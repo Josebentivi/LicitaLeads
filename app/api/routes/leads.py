@@ -20,16 +20,19 @@ from app.models import (
     Company,
     CompanyContact,
     Deadline,
+    DeadlineStatus,
     Lead,
     LeadReview,
     LeadStatus,
     OutreachChannel,
     OutreachDraft,
     ProcurementEvent,
+    ProcurementEventType,
     ReviewDecision,
 )
 from app.schemas import LeadPatch, LeadReviewRequest, OutreachRequest
 from app.services.outreach import OutreachContext, OutreachDraftService
+from app.services.participation_integrity import lead_current
 
 router = APIRouter(prefix="/leads", tags=["leads"])
 
@@ -72,14 +75,15 @@ def _lead_dict(lead: Lead, *, nested: bool = False) -> dict[str, object]:
 async def list_leads(
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=200),
-    lead_status: str | None = Query(None, alias="status"),
+    lead_status: LeadStatus | None = Query(None, alias="status"),
     minimum_score: int | None = Query(None, ge=0, le=100),
-    event_type: str | None = None,
-    deadline_status: str | None = None,
+    event_type: ProcurementEventType | None = None,
+    deadline_status: DeadlineStatus | None = None,
     has_contact: bool | None = None,
     pending_review: bool | None = None,
     created_from: datetime | None = None,
     created_to: datetime | None = None,
+    include_history: bool = False,
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, object]:
     """List candidates, including below-threshold and expired opportunities."""
@@ -89,6 +93,8 @@ async def list_leads(
         selectinload(Lead.triggering_event),
         selectinload(Lead.deadline),
     )
+    if not include_history:
+        statement = statement.where(lead_current())
     if lead_status:
         statement = statement.where(Lead.lead_status == lead_status)
     if minimum_score is not None:
@@ -127,8 +133,19 @@ async def list_leads(
         .unique()
         .all()
     )
+    operational = (
+        set(
+            (
+                await db.scalars(
+                    select(Lead.id).where(Lead.id.in_([row.id for row in rows]), lead_current())
+                )
+            ).all()
+        )
+        if rows
+        else set()
+    )
     return {
-        "items": [_lead_dict(row) for row in rows],
+        "items": [dict(_lead_dict(row), is_operational=row.id in operational) for row in rows],
         "page": page,
         "page_size": page_size,
         "total": total,
@@ -137,7 +154,11 @@ async def list_leads(
 
 @router.get("/{lead_id}")
 async def get_lead(lead_id: UUID, db: AsyncSession = Depends(get_db)) -> dict[str, object]:
-    return _lead_dict(await _lead(lead_id, db), nested=True)
+    result = _lead_dict(await _lead(lead_id, db), nested=True)
+    result["is_operational"] = (
+        await db.scalar(select(Lead.id).where(Lead.id == lead_id, lead_current())) is not None
+    )
+    return result
 
 
 @router.post("/{lead_id}/review")
@@ -191,6 +212,15 @@ async def generate_outreach(
     settings = get_settings()
     lead = await _lead(lead_id, db)
     event = lead.triggering_event
+    from app.services.ingestion.processor import event_document_is_active
+
+    if await db.scalar(
+        select(Lead.id).where(Lead.id == lead.id, lead_current())
+    ) is None or not await event_document_is_active(db, event):
+        raise HTTPException(
+            status_code=409,
+            detail="Lead histórico ou sem evidência vigente; revise a atribuição antes de gerar outro rascunho",
+        )
     procurement = lead.procurement
     deadline = lead.deadline
     source_url = (

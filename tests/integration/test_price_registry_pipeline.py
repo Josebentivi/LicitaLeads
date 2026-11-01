@@ -14,14 +14,20 @@ from app.connectors.base import (
     DataAvailability,
     ProcurementFilters,
     RawPriceRegistry,
+    RawPriceRegistryAdhesion,
+    RawPriceRegistryCommitment,
     RawPriceRegistryItem,
+    RawPriceRegistryUnit,
 )
 from app.models import (
     Company,
     CrawlRun,
     CrawlRunStatus,
     PriceRegistry,
+    PriceRegistryAdhesion,
+    PriceRegistryCommitment,
     PriceRegistryItem,
+    PriceRegistryUnit,
     Procurement,
 )
 from app.services.ingestion import IngestionPipeline, PipelineRequest
@@ -76,13 +82,77 @@ def _registry_item() -> RawPriceRegistryItem:
     )
 
 
+def _registry_unit() -> RawPriceRegistryUnit:
+    return RawPriceRegistryUnit(
+        source="compras_gov",
+        source_url="https://compras.official.test/arp/1/units",
+        raw_payload={"numeroItem": "1"},
+        external_id=f"{REGISTRY_CONTROL}:unit:1:980921:Empresa Registrada Ltda.",
+        price_registry_external_id=REGISTRY_CONTROL,
+        item_number="1",
+        catalog_code="12345",
+        description="Cadeira escolar",
+        supplier_name="Empresa Registrada Ltda.",
+        quantity_registered=Decimal("10"),
+        adhesion_balance=Decimal("4"),
+        remanejamento_balance=Decimal("1"),
+        adhesion_limit=Decimal("20"),
+        purchase_limit=Decimal("30"),
+        accepts_adhesion=True,
+        unit_code="980921",
+        unit_name="Unidade Gerenciadora",
+        unit_type="gerenciadora",
+    )
+
+
+def _registry_commitment() -> RawPriceRegistryCommitment:
+    return RawPriceRegistryCommitment(
+        source="compras_gov",
+        source_url="https://compras.official.test/arp/1/commitments",
+        raw_payload={"numeroItem": "1"},
+        external_id=f"{REGISTRY_CONTROL}:commitment:1:980921:empenho",
+        price_registry_external_id=REGISTRY_CONTROL,
+        item_number="1",
+        unit="980921",
+        commitment_type="empenho",
+        quantity_registered=Decimal("10"),
+        quantity_committed=Decimal("6"),
+        balance=Decimal("4"),
+    )
+
+
+def _registry_adhesion() -> RawPriceRegistryAdhesion:
+    return RawPriceRegistryAdhesion(
+        source="compras_gov",
+        source_url="https://compras.official.test/arp/1/adhesions",
+        raw_payload={"numeroItem": "1"},
+        external_id=f"{REGISTRY_CONTROL}:adhesion:1:12345678000199:2026-09-01",
+        price_registry_external_id=REGISTRY_CONTROL,
+        item_number="1",
+        requesting_unit="12345678000199",
+        approved_at=datetime(2026, 9, 1, tzinfo=UTC),
+        approved_quantity=Decimal("3"),
+    )
+
+
 class PriceRegistryConnector(StaticConnector):
     """Procurement double extended with the price registry contract."""
 
-    def __init__(self, registry: RawPriceRegistry, items: list[RawPriceRegistryItem]) -> None:
+    def __init__(
+        self,
+        registry: RawPriceRegistry,
+        items: list[RawPriceRegistryItem],
+        *,
+        units: list[RawPriceRegistryUnit] | None = None,
+        commitments: list[RawPriceRegistryCommitment] | None = None,
+        adhesions: list[RawPriceRegistryAdhesion] | None = None,
+    ) -> None:
         super().__init__("compras_gov", _procurement("compras_gov", "98092105900012026"))
         self.registry = registry
         self.items = items
+        self.units = units or []
+        self.commitments = commitments or []
+        self.adhesions = adhesions or []
 
     async def discover_price_registries(
         self, filters: ProcurementFilters
@@ -104,6 +174,39 @@ class PriceRegistryConnector(StaticConnector):
             DataAvailability.AVAILABLE,
             source=self.name,
             operation="price_registry_items",
+        )
+
+    async def fetch_price_registry_units(
+        self, registry: RawPriceRegistry
+    ) -> ConnectorResult[list[RawPriceRegistryUnit]]:
+        assert registry.external_id == self.registry.external_id
+        return _result(
+            self.units,
+            DataAvailability.AVAILABLE,
+            source=self.name,
+            operation="price_registry_units",
+        )
+
+    async def fetch_price_registry_commitments(
+        self, registry: RawPriceRegistry
+    ) -> ConnectorResult[list[RawPriceRegistryCommitment]]:
+        assert registry.external_id == self.registry.external_id
+        return _result(
+            self.commitments,
+            DataAvailability.AVAILABLE,
+            source=self.name,
+            operation="price_registry_commitments",
+        )
+
+    async def fetch_price_registry_adhesions(
+        self, registry: RawPriceRegistry
+    ) -> ConnectorResult[list[RawPriceRegistryAdhesion]]:
+        assert registry.external_id == self.registry.external_id
+        return _result(
+            self.adhesions,
+            DataAvailability.AVAILABLE,
+            source=self.name,
+            operation="price_registry_adhesions",
         )
 
 
@@ -155,6 +258,55 @@ async def test_price_registry_pipeline_is_idempotent_and_links_procurement(
     assert item.company_id == company.id
     assert item.supplier_cnpj == SUPPLIER_CNPJ
     assert float(item.quantity) == 10.0
+
+
+@pytest.mark.asyncio
+async def test_price_registry_details_are_persisted_and_served(
+    database: DatabaseContext,
+    api_client: httpx.AsyncClient,
+) -> None:
+    """Units, commitments and adhesions keep their own auditable rows."""
+
+    connector = PriceRegistryConnector(
+        _registry(),
+        [_registry_item()],
+        units=[_registry_unit()],
+        commitments=[_registry_commitment()],
+        adhesions=[_registry_adhesion()],
+    )
+    pipeline = IngestionPipeline(
+        session_factory=database.sessions,
+        connectors={"compras_gov": connector},
+    )
+    summary = await pipeline.run(
+        PipelineRequest(
+            connector="compras_gov", mode="price_registries", days=365, process_documents=False
+        )
+    )
+
+    assert summary.records_created == 1
+    async with database.sessions() as session:
+        unit = await session.scalar(select(PriceRegistryUnit))
+        commitment = await session.scalar(select(PriceRegistryCommitment))
+        adhesion = await session.scalar(select(PriceRegistryAdhesion))
+        registry = await session.scalar(select(PriceRegistry))
+
+    assert unit is not None and unit.catalog_code == "12345"
+    assert float(unit.adhesion_balance) == 4.0
+    assert unit.accepts_adhesion is True
+    assert commitment is not None and float(commitment.balance) == 4.0
+    assert adhesion is not None and float(adhesion.approved_quantity) == 3.0
+
+    detail = await api_client.get(f"/api/price-registries/{registry.id}")
+    assert detail.status_code == 200
+    payload = detail.json()
+    assert payload["units"][0]["unit_code"] == "980921"
+    assert payload["commitments"][0]["balance"] == 4.0
+    assert payload["adhesions"][0]["requesting_unit"] == "12345678000199"
+    page = await api_client.get(f"/atas/{registry.id}")
+    assert page.status_code == 200
+    assert page.text.count("Unidades e saldos") == 1
+    assert page.text.count("Adesoes de outros orgaos") == 1
 
 
 @pytest.mark.asyncio

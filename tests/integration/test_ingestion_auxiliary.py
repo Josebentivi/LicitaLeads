@@ -34,7 +34,9 @@ async def test_source_audit_merges_pncp_contracts_and_writes_dated_report(
                     "/v1/contratacoes/proposta": {},
                     "/v1/atas": {},
                     "/v1/atas/atualizacao": {},
+                    "/v1/contratos": {},
                     "/v1/orgaos/{cnpj}/compras/{ano}/{sequencial}": {},
+                    "/v1/orgaos/{cnpj}/contratos/{ano}/{sequencial}/termos": {},
                 }
             },
         )
@@ -60,6 +62,11 @@ async def test_source_audit_merges_pncp_contracts_and_writes_dated_report(
         "/modulo-arp/1.1_consultarARP_Id": {},
         "/modulo-arp/2_consultarARPItem": {},
         "/modulo-arp/2.1_consultarARPItem_Id": {},
+        "/modulo-arp/3_consultarUnidadesItem": {},
+        "/modulo-arp/4_consultarEmpenhosSaldoItem": {},
+        "/modulo-arp/5_consultarAdesoesItem": {},
+        "/modulo-contratos/1_consultarContratos": {},
+        "/modulo-contratos/2.1_consultarContratosItem_Id": {},
     }
     respx.get("https://dadosabertos.compras.gov.br/v3/api-docs").mock(
         return_value=httpx.Response(200, json={"paths": compras_paths})
@@ -67,17 +74,28 @@ async def test_source_audit_merges_pncp_contracts_and_writes_dated_report(
     respx.get("https://dadosabertos.compras.gov.br/v3/api-docs/swagger-config").mock(
         return_value=httpx.Response(404)
     )
+    respx.get("https://api.portaldatransparencia.gov.br/v3/api-docs").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "paths": {
+                    "/api-de-dados/despesas/documentos-por-favorecido": {},
+                }
+            },
+        )
+    )
 
     result = await audit_sources(
         settings=Settings(app_env="test"),
         output_directory=tmp_path,
     )
 
-    assert result.checked_sources == 2
+    assert result.checked_sources == 4
     assert result.missing_paths == 0
     assert result.report_path.is_file()
     text = result.report_path.read_text(encoding="utf-8")
-    assert "compatível" in text
+    assert "operação não verificada" in text
+    assert "**compatível**" not in text
     assert "não altera automaticamente" in text
 
 
@@ -89,6 +107,7 @@ async def test_source_audit_records_unavailable_openapi_without_crashing(tmp_pat
         "https://pncp.gov.br/pncp-api/v3/api-docs",
         "https://dadosabertos.compras.gov.br/v3/api-docs",
         "https://dadosabertos.compras.gov.br/v3/api-docs/swagger-config",
+        "https://api.portaldatransparencia.gov.br/v3/api-docs",
     ):
         respx.get(url).mock(return_value=httpx.Response(503))
 
@@ -97,7 +116,7 @@ async def test_source_audit_records_unavailable_openapi_without_crashing(tmp_pat
         output_directory=tmp_path,
     )
 
-    assert len(result.warnings) == 2
+    assert len(result.warnings) == 4
     assert "não foi possível auditar" in result.report_path.read_text(encoding="utf-8")
 
 

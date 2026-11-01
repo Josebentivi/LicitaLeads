@@ -1,0 +1,16 @@
+<div class="header-actions test-actions" id="test-actions"{% if test_actions_oob %} hx-swap-oob="outerHTML"{% endif %}>
+  <form method="post" action="/testes/executar" class="inline-form">
+    <input type="hidden" name="mode" value="quick">
+    <label class="checkbox"><input type="checkbox" name="include_live" value="true"> Incluir conectividade externa</label>
+    <button type="submit" {% if running %}disabled{% endif %}>Executar diagnóstico</button>
+  </form>
+  <form method="post" action="/testes/executar" class="inline-form">
+    <input type="hidden" name="mode" value="full">
+    <button type="submit" class="button secondary" {% if running or not pytest_available %}disabled{% endif %}>Executar suíte completa</button>
+  </form>
+  {% if running %}
+  <form method="post" action="/testes/cancelar" class="inline-form">
+    <button type="submit" class="button secondary">Cancelar execução</button>
+  </form>
+  {% endif %}
+</div>

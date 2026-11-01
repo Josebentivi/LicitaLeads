@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from decimal import Decimal
-from typing import Literal
+from typing import Any, Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -13,9 +14,20 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.serialization import model_dict
 from app.dependencies import get_db
-from app.models import Document, Participant, Procurement, ProcurementEvent, ProcurementItem
+from app.models import (
+    Document,
+    Participant,
+    Procurement,
+    ProcurementEvent,
+    ProcurementItem,
+    ProcurementPhase,
+)
 from app.models.enums import ContractingType
-from app.repositories.procurements import _status_category_condition, company_cnpj_condition
+from app.repositories.procurements import (
+    _status_category_condition,
+    company_cnpj_condition,
+    participant_evidence_is_current,
+)
 from app.services.identifiers import canonical_modality, is_valid_cnpj, normalize_cnpj
 
 router = APIRouter(prefix="/procurements", tags=["procurements"])
@@ -58,6 +70,7 @@ def _filters(
     value_max: Decimal | None = None,
     status_category: StatusCategory | None = None,
     status: str | None = None,
+    phase: str | None = None,
 ):
     if uf:
         statement = statement.where(Procurement.uf == uf.upper())
@@ -84,6 +97,8 @@ def _filters(
         statement = statement.where(
             *_status_category_condition(status_category, now=datetime.now(UTC))
         )
+    if phase:
+        statement = statement.where(Procurement.current_phase == phase)
     if procurement_type:
         statement = statement.where(Procurement.procurement_type == procurement_type.value)
     if is_srp is not None:
@@ -109,6 +124,7 @@ async def list_procurements(
     published_to: datetime | None = None,
     procurement_status: str | None = Query(None, alias="status"),
     status_category: StatusCategory | None = None,
+    phase: ProcurementPhase | None = None,
     procurement_type: ContractingType | None = None,
     is_srp: bool | None = None,
     value_min: Decimal | None = Query(None, ge=0),
@@ -134,6 +150,7 @@ async def list_procurements(
         value_max=value_max,
         status_category=status_category,
         status=procurement_status,
+        phase=phase,
     )
     count_statement = _filters(
         select(func.count()).select_from(Procurement),
@@ -151,6 +168,7 @@ async def list_procurements(
         value_max=value_max,
         status_category=status_category,
         status=procurement_status,
+        phase=phase,
     )
     total = int((await db.scalar(count_statement)) or 0)
     rows = (
@@ -188,7 +206,10 @@ async def get_procurement(
 
 async def _children(model, procurement_id: UUID, db: AsyncSession) -> list[dict[str, object]]:
     await _get_procurement(procurement_id, db)
-    rows = (await db.scalars(select(model).where(model.procurement_id == procurement_id))).all()
+    statement = select(model).where(model.procurement_id == procurement_id)
+    if model is Participant:
+        statement = statement.where(participant_evidence_is_current())
+    rows: Sequence[Any] = (await db.scalars(statement)).all()
     return [model_dict(row) for row in rows]
 
 
@@ -198,15 +219,44 @@ async def get_items(procurement_id: UUID, db: AsyncSession = Depends(get_db)):
 
 
 @router.get("/{procurement_id}/documents")
-async def get_documents(procurement_id: UUID, db: AsyncSession = Depends(get_db)):
-    return await _children(Document, procurement_id, db)
+async def get_documents(
+    procurement_id: UUID, db: AsyncSession = Depends(get_db), include_history: bool = False
+):
+    from app.services.documents.identity import noncanonical_document_ids
+
+    await _get_procurement(procurement_id, db)
+    statement = select(Document).where(Document.procurement_id == procurement_id)
+    if not include_history:
+        statement = statement.where(Document.id.not_in(noncanonical_document_ids()))
+    return [model_dict(row) for row in (await db.scalars(statement)).all()]
 
 
 @router.get("/{procurement_id}/participants")
-async def get_participants(procurement_id: UUID, db: AsyncSession = Depends(get_db)):
-    return await _children(Participant, procurement_id, db)
+async def get_participants(
+    procurement_id: UUID, db: AsyncSession = Depends(get_db), include_history: bool = False
+):
+    from app.services.participation_integrity import participant_current, participant_payloads
+
+    await _get_procurement(procurement_id, db)
+    statement = select(Participant).where(Participant.procurement_id == procurement_id)
+    if not include_history:
+        statement = statement.where(participant_current())
+    return await participant_payloads(
+        db, list((await db.scalars(statement)).all()), historical=include_history
+    )
 
 
 @router.get("/{procurement_id}/events")
-async def get_events(procurement_id: UUID, db: AsyncSession = Depends(get_db)):
-    return await _children(ProcurementEvent, procurement_id, db)
+async def get_events(
+    procurement_id: UUID, db: AsyncSession = Depends(get_db), include_history: bool = False
+):
+    from app.repositories.current_evidence import evidence_current
+    from app.services.participation_integrity import event_verified
+
+    await _get_procurement(procurement_id, db)
+    statement = select(ProcurementEvent).where(ProcurementEvent.procurement_id == procurement_id)
+    if not include_history:
+        statement = statement.where(
+            event_verified(), evidence_current(ProcurementEvent.evidence_id)
+        )
+    return [model_dict(row) for row in (await db.scalars(statement)).all()]

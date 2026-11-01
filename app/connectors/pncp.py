@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 from dataclasses import dataclass
 from typing import Any
@@ -9,6 +11,7 @@ from typing import Any
 import httpx
 
 from app.connectors._common import (
+    combine_discoveries,
     contains_text,
     failed_result,
     is_corporate_identifier,
@@ -17,10 +20,13 @@ from app.connectors._common import (
     nonnegative_decimal,
     normalized_identifier,
     normalized_text,
+    observed_pages,
     positive_int,
+    repeated_page,
     runtime_settings,
     source_record,
     to_datetime,
+    to_decimal,
     to_int,
     unique_urls,
 )
@@ -29,6 +35,9 @@ from app.connectors.base import (
     DataAvailability,
     PaginationInfo,
     ProcurementFilters,
+    RawContract,
+    RawContractItem,
+    RawContractTerm,
     RawDocument,
     RawEvent,
     RawParticipant,
@@ -40,12 +49,17 @@ from app.connectors.base import (
     RawResult,
     RawSourceRecord,
 )
+from app.connectors.continuation import page_budget_exhausted
+from app.connectors.discovery_budget import DiscoveryBudget, DiscoveryLimitReached
 from app.connectors.http import (
     AsyncHTTPClient,
+    ConnectorContractError,
     ConnectorDecodeError,
     ConnectorHTTPError,
     setting,
 )
+from app.connectors.page_window import PageWindow
+from app.services.parallel import bounded_map
 
 PNCP_MODALITY_CODES: dict[str, int] = {
     "leilao_eletronico": 1,
@@ -74,10 +88,12 @@ _COMPOSITE_ID = re.compile(
 )
 _HTTP_EXCEPTIONS = (
     ConnectorHTTPError,
+    ConnectorContractError,
     ConnectorDecodeError,
     httpx.TimeoutException,
     httpx.TransportError,
 )
+_MAX_DETAIL_PAGES = 1000
 
 
 @dataclass(frozen=True, slots=True)
@@ -141,6 +157,28 @@ class PNCPConnector:
             lookback_days=int(setting(self.settings, "default_lookback_days", 30))
         )
         modality_values = filters.modalities or self._configured_modalities()
+        if len(modality_values) > 1:
+
+            async def partition(modality: str | int) -> ConnectorResult[Any]:
+                return await self.discover_procurements(
+                    filters.model_copy(update={"modalities": [modality]})
+                )
+
+            stream = bounded_map(
+                dict.fromkeys(modality_values),
+                partition,
+                capacity=min(4, int(setting(self.settings, "http_max_concurrency", 4))),
+            )
+            partitions = []
+            try:
+                async for _, partition_result in stream:
+                    partitions.append(partition_result)
+            finally:
+                await stream.aclose()
+            combined = combine_discoveries(partitions)
+            combined.data = self._deduplicate(combined.data)
+            return combined
+
         modalities = [self._modality_code(value) for value in modality_values]
         modalities = list(dict.fromkeys(modalities))
         kind = self._discovery_kind(filters.discovery_kind)
@@ -153,50 +191,113 @@ class PNCPConnector:
         total_pages = 0
         fetched_pages = 0
         truncated = False
+        invalid_rows = 0
 
         # Publication/update require a modality.  The proposals-open endpoint
         # makes it optional, but querying separately keeps source provenance and
         # behaviour consistent with the configured modality allow-list.
         for modality_code in modalities:
             page = 1
-            while True:
-                params: dict[str, Any] = {
-                    "dataFinal": end.strftime("%Y%m%d"),
-                    "codigoModalidadeContratacao": modality_code,
-                    "uf": filters.uf,
-                    "codigoMunicipioIbge": filters.municipality_code,
-                    "cnpj": filters.agency_cnpj,
-                    "codigoUnidadeAdministrativa": filters.unit_code,
-                    "pagina": page,
-                    "tamanhoPagina": page_size,
-                }
-                if kind != "proposta":
-                    params["dataInicial"] = start.strftime("%Y%m%d")
-                try:
-                    response = await self._http.request_json("GET", endpoint, params=params)
-                except _HTTP_EXCEPTIONS as exc:
-                    errors.append(exc)
-                    break
+            collected_rows = 0
+            observed_total_pages = 0
+            async with PageWindow(
+                concurrency=int(setting(self.settings, "http_max_concurrency", 4)),
+                max_pages=min(filters.max_pages or _MAX_DETAIL_PAGES, _MAX_DETAIL_PAGES),
+            ) as window:
+                while True:
+                    params: dict[str, Any] = {
+                        "dataFinal": end.strftime("%Y%m%d"),
+                        "codigoModalidadeContratacao": modality_code,
+                        "uf": filters.uf,
+                        "codigoMunicipioIbge": filters.municipality_code,
+                        "cnpj": filters.agency_cnpj,
+                        "codigoUnidadeAdministrativa": filters.unit_code,
+                        "pagina": page,
+                        "tamanhoPagina": page_size,
+                    }
+                    if kind != "proposta":
+                        params["dataInicial"] = start.strftime("%Y%m%d")
+                    try:
+                        response = await window.request(
+                            self._http,
+                            endpoint,
+                            params,
+                            total_pages=observed_total_pages if page > 1 else 0,
+                        )
+                    except _HTTP_EXCEPTIONS as exc:
+                        errors.append(exc)
+                        break
 
-                records.append(source_record(self.name, response))
-                payload = response.payload if isinstance(response.payload, dict) else {}
-                page_rows = list_payload(payload, "data")
-                for row in page_rows:
-                    if self._matches_client_filters(row, filters):
-                        mapped.append(self._map_procurement(row, response.url))
+                    record = source_record(self.name, response)
+                    repeated = repeated_page(records, record)
+                    records.append(record)
+                    if repeated:
+                        errors.append(
+                            ConnectorContractError("official source repeated a discovery page")
+                        )
+                        break
+                    payload = response.payload
+                    try:
+                        page_rows = list_payload(
+                            payload, "data", operation="PNCP procurement discovery"
+                        )
+                    except ConnectorContractError as exc:
+                        errors.append(exc)
+                        break
+                    for row in page_rows:
+                        if not self._has_procurement_identity(row):
+                            invalid_rows += 1
+                            continue
+                        try:
+                            if self._matches_client_filters(row, filters):
+                                mapped.append(
+                                    self._map_procurement(row, response.url).model_copy(
+                                        update={"source_record_ref": record.record_key}
+                                    )
+                                )
+                        except Exception:
+                            invalid_rows += 1
 
-                fetched_pages += 1
-                observed_total_pages = to_int(payload.get("totalPaginas")) or page
-                total_pages += observed_total_pages if page == 1 else 0
-                if page == 1:
-                    total_records += to_int(payload.get("totalRegistros")) or len(page_rows)
-                has_more = page < observed_total_pages
-                if filters.max_pages is not None and page >= filters.max_pages and has_more:
-                    truncated = True
-                    break
-                if not has_more:
-                    break
-                page += 1
+                    fetched_pages += 1
+                    try:
+                        collected_rows += len(page_rows)
+                        observed_total_pages = observed_pages(
+                            payload,
+                            page,
+                            row_count=len(page_rows),
+                            collected_rows=collected_rows,
+                            page_size=page_size,
+                        )
+                    except ConnectorContractError as exc:
+                        errors.append(exc)
+                        break
+                    total_pages += observed_total_pages if page == 1 else 0
+                    if page == 1:
+                        total_records += (
+                            to_int(payload.get("totalRegistros"))
+                            if isinstance(payload, dict)
+                            else None
+                        ) or len(page_rows)
+                    has_more = page < observed_total_pages
+                    if (
+                        page_budget_exhausted(
+                            self._http,
+                            page,
+                            min(filters.max_pages or _MAX_DETAIL_PAGES, _MAX_DETAIL_PAGES),
+                            url=endpoint,
+                            params=params,
+                        )
+                        and not window.has_pending
+                        and has_more
+                    ):
+                        truncated = True
+                        break
+                    if not has_more:
+                        break
+                    page += 1
+            records.extend(
+                source_record(self.name, response) for response in window.unconsumed_responses()
+            )
 
         mapped = self._deduplicate(mapped)
         pagination = PaginationInfo(
@@ -210,8 +311,8 @@ class PNCPConnector:
         )
         if mapped:
             diagnostic = None
-            if errors or truncated:
-                diagnostic = "partial result: one or more pages were not collected"
+            if errors or truncated or invalid_rows:
+                diagnostic = "partial result: one or more pages/rows were not usable"
             return ConnectorResult(
                 data=mapped,
                 availability=DataAvailability.AVAILABLE,
@@ -219,6 +320,7 @@ class PNCPConnector:
                 raw_records=records,
                 pagination=pagination,
                 diagnostic=diagnostic,
+                partial=bool(errors or truncated or invalid_rows),
             )
         if errors:
             result: ConnectorResult[list[RawProcurement]] = failed_result([], errors[0])
@@ -226,9 +328,26 @@ class PNCPConnector:
             result.raw_records = records
             result.pagination = pagination
             return result
+        if invalid_rows:
+            return ConnectorResult(
+                data=[],
+                availability=DataAvailability.TEMPORARY_ERROR,
+                source_urls=unique_urls(records),
+                raw_records=records,
+                pagination=pagination,
+                diagnostic=(
+                    "official response contained records without a usable procurement identity"
+                ),
+                partial=True,
+            )
         return ConnectorResult(
             data=[],
-            availability=DataAvailability.EMPTY,
+            availability=(
+                DataAvailability.TEMPORARY_ERROR
+                if truncated or invalid_rows
+                else DataAvailability.EMPTY
+            ),
+            partial=bool(truncated or invalid_rows),
             source_urls=unique_urls(records),
             raw_records=records,
             pagination=pagination,
@@ -236,7 +355,7 @@ class PNCPConnector:
         )
 
     async def fetch_procurement(
-        self, external_id: str
+        self, external_id: str, *, bypass_replay: bool = False
     ) -> ConnectorResult[RawProcurementDetail | None]:
         reference = parse_pncp_external_id(external_id)
         endpoint = join_url(
@@ -244,16 +363,23 @@ class PNCPConnector:
             f"orgaos/{reference.cnpj}/compras/{reference.year}/{reference.sequence}",
         )
         try:
-            response = await self._http.request_json("GET", endpoint)
+            response = await self._http.request_json(
+                "GET", endpoint, rate_scope="pncp.procurement_detail", bypass_replay=bypass_replay
+            )
         except _HTTP_EXCEPTIONS as exc:
             return failed_result(None, exc)
-        if not isinstance(response.payload, dict) or not response.payload:
-            return ConnectorResult(
-                data=None,
-                availability=DataAvailability.NOT_PUBLISHED,
-                source_urls=[response.url],
-                raw_records=[source_record(self.name, response)],
+        if not isinstance(response.payload, dict) or not self._has_procurement_identity(
+            response.payload
+        ):
+            failure: ConnectorResult[RawProcurementDetail | None] = failed_result(
+                None,
+                ConnectorContractError(
+                    "PNCP detail without procurement identity", url=response.url
+                ),
             )
+            failure.raw_records = [source_record(self.name, response)]
+            failure.source_urls = [response.url]
+            return failure
         procurement = self._map_procurement(response.payload, response.url, detail=True)
         return ConnectorResult(
             data=procurement,
@@ -262,41 +388,68 @@ class PNCPConnector:
             raw_records=[source_record(self.name, response)],
         )
 
+    async def verify_procurement_version(self, external_id: str) -> ConnectorResult[Any]:
+        return await self.fetch_procurement(external_id, bypass_replay=True)
+
     async def fetch_items(self, external_id: str) -> ConnectorResult[list[RawProcurementItem]]:
         reference = parse_pncp_external_id(external_id)
         path = f"orgaos/{reference.cnpj}/compras/{reference.year}/{reference.sequence}/itens"
-        rows, records, pagination, error = await self._collect_integration(path)
+        rows, row_refs, records, pagination, error = await self._collect_integration(path)
         if error is None:
             # Reuse the same audited item rows when the pipeline requests results.
             self._item_cache[external_id] = (rows, records, pagination)
         if error is not None and not records:
             return failed_result([], error)
-        items = [self._map_item(row, external_id, records[-1].endpoint) for row in rows]
+        records_by_ref = self._records_by_ref(records)
+        items = [
+            self._map_item(
+                row,
+                external_id,
+                records_by_ref[row_ref].endpoint,
+                source_record_ref=row_ref,
+            )
+            for row, row_ref in zip(rows, row_refs, strict=False)
+            if self._has_item_identity(row) and row_ref in records_by_ref
+        ]
         if error is not None and not items:
             result: ConnectorResult[list[RawProcurementItem]] = failed_result([], error)
             result.source_urls = unique_urls(records)
             result.raw_records = records
             result.pagination = pagination
             return result
+        partial = error is not None or len(items) != len(rows) or pagination.truncated
         return ConnectorResult(
             data=items,
-            availability=DataAvailability.AVAILABLE if items else DataAvailability.EMPTY,
+            availability=(
+                DataAvailability.AVAILABLE
+                if items
+                else DataAvailability.TEMPORARY_ERROR
+                if partial
+                else DataAvailability.EMPTY
+            ),
             source_urls=unique_urls(records),
             raw_records=records,
             pagination=pagination,
-            diagnostic="partial result: item pagination failed" if error and items else None,
+            diagnostic="partial result: item collection incomplete" if partial else None,
+            partial=partial,
         )
 
     async def fetch_documents(self, external_id: str) -> ConnectorResult[list[RawDocument]]:
         reference = parse_pncp_external_id(external_id)
         path = f"orgaos/{reference.cnpj}/compras/{reference.year}/{reference.sequence}/arquivos"
-        rows, records, pagination, error = await self._collect_integration(path)
+        rows, row_refs, records, pagination, error = await self._collect_integration(path)
         if error is not None and not records:
             return failed_result([], error)
+        records_by_ref = self._records_by_ref(records)
         documents = [
-            self._map_document(row, external_id, records[-1].endpoint)
-            for row in rows
-            if row.get("statusAtivo") is not False and (row.get("url") or row.get("uri"))
+            self._map_document(
+                row,
+                external_id,
+                records_by_ref[row_ref].endpoint,
+                source_record_ref=row_ref,
+            )
+            for row, row_ref in zip(rows, row_refs, strict=False)
+            if self._has_document_identity(row) and row_ref in records_by_ref
         ]
         if error is not None and not documents:
             result: ConnectorResult[list[RawDocument]] = failed_result([], error)
@@ -304,17 +457,21 @@ class PNCPConnector:
             result.raw_records = records
             result.pagination = pagination
             return result
+        partial = error is not None or len(documents) != len(rows) or pagination.truncated
         return ConnectorResult(
             data=documents,
             availability=(
-                DataAvailability.AVAILABLE if documents else DataAvailability.NOT_PUBLISHED
+                DataAvailability.AVAILABLE
+                if documents
+                else DataAvailability.TEMPORARY_ERROR
+                if partial
+                else DataAvailability.NOT_PUBLISHED
             ),
             source_urls=unique_urls(records),
             raw_records=records,
             pagination=pagination,
-            diagnostic="partial result: document pagination failed"
-            if error and documents
-            else None,
+            diagnostic="partial result: document collection incomplete" if partial else None,
+            partial=partial,
         )
 
     async def fetch_results(self, external_id: str) -> ConnectorResult[list[RawResult]]:
@@ -328,7 +485,7 @@ class PNCPConnector:
             items_path = (
                 f"orgaos/{reference.cnpj}/compras/{reference.year}/{reference.sequence}/itens"
             )
-            item_rows, records, _, item_error = await self._collect_integration(items_path)
+            item_rows, _, records, _, item_error = await self._collect_integration(items_path)
             if item_error is not None and not records:
                 return failed_result([], item_error)
 
@@ -340,27 +497,45 @@ class PNCPConnector:
             item_number = to_int(item.get("numeroItem"))
             if item_number is None:
                 continue
-            endpoint = join_url(
-                self.integration_base_url,
-                (
-                    f"orgaos/{reference.cnpj}/compras/{reference.year}/{reference.sequence}"
-                    f"/itens/{item_number}/resultados"
-                ),
+            path = (
+                f"orgaos/{reference.cnpj}/compras/{reference.year}/{reference.sequence}"
+                f"/itens/{item_number}/resultados"
             )
-            try:
-                response = await self._http.request_json("GET", endpoint)
-            except _HTTP_EXCEPTIONS as exc:
-                errors.append(exc)
-                continue
-            records.append(source_record(self.name, response))
-            for row in list_payload(response.payload, "listaResultados", "resultados", "data"):
-                results.append(self._map_result(row, external_id, item, response.url))
+            (
+                result_rows,
+                result_refs,
+                result_records,
+                pagination,
+                result_error,
+            ) = await self._collect_integration(path)
+            records.extend(result_records)
+            if result_error is not None:
+                errors.append(result_error)
+            if pagination.truncated and result_error is None:
+                errors.append(ConnectorContractError("PNCP result collection truncated"))
+            by_ref = self._records_by_ref(result_records)
+            for row, row_ref in zip(result_rows, result_refs, strict=True):
+                if not self._has_result_identity(row):
+                    errors.append(
+                        ConnectorContractError("PNCP result row without item/supplier identity")
+                    )
+                    continue
+                results.append(
+                    self._map_result(
+                        row,
+                        external_id,
+                        item,
+                        by_ref[row_ref].endpoint,
+                        source_record_ref=row_ref,
+                    )
+                )
 
         if not results and errors:
             result: ConnectorResult[list[RawResult]] = failed_result([], errors[0])
             result.source_urls = unique_urls(records)
             result.raw_records = records
             return result
+        partial = bool(errors)
         return ConnectorResult(
             data=results,
             availability=(
@@ -368,7 +543,8 @@ class PNCPConnector:
             ),
             source_urls=unique_urls(records),
             raw_records=records,
-            diagnostic="partial result: one or more item results failed" if errors else None,
+            diagnostic="partial result: one or more item results failed" if partial else None,
+            partial=partial,
         )
 
     async def fetch_participants(self, external_id: str) -> ConnectorResult[list[RawParticipant]]:
@@ -424,12 +600,15 @@ class PNCPConnector:
     async def discover_price_registries(
         self, filters: ProcurementFilters
     ) -> ConnectorResult[list[RawPriceRegistry]]:
-        """Collect atas de registro de preços published in the period."""
+        """Collect atas de registro de preços by the official validity-period query."""
 
         start, end = filters.resolved_period(
             lookback_days=int(setting(self.settings, "default_lookback_days", 30))
         )
-        endpoint = join_url(self.consulta_base_url, "atas")
+        endpoint = join_url(
+            self.consulta_base_url,
+            "atas/atualizacao" if filters.discovery_kind == "update" else "atas",
+        )
         page_size = min(max(filters.page_size or 50, 10), 50)
         records: list[RawSourceRecord] = []
         mapped: list[RawPriceRegistry] = []
@@ -438,38 +617,102 @@ class PNCPConnector:
         total_pages = 0
         total_records = 0
         truncated = False
+        invalid_rows = 0
         page = 1
-        while True:
-            params: dict[str, Any] = {
-                "dataInicial": start.strftime("%Y%m%d"),
-                "dataFinal": end.strftime("%Y%m%d"),
-                "cnpj": filters.agency_cnpj,
-                "codigoUnidadeAdministrativa": filters.unit_code,
-                "pagina": page,
-                "tamanhoPagina": page_size,
-            }
-            try:
-                response = await self._http.request_json("GET", endpoint, params=params)
-            except _HTTP_EXCEPTIONS as exc:
-                errors.append(exc)
-                break
-            records.append(source_record(self.name, response))
-            payload = response.payload if isinstance(response.payload, dict) else {}
-            for row in list_payload(payload, "data"):
-                mapped.append(self._map_price_registry(row, response.url))
-            fetched_pages += 1
-            observed_total_pages = to_int(payload.get("totalPaginas")) or page
-            total_pages += observed_total_pages if page == 1 else 0
-            if page == 1:
-                total_records += to_int(payload.get("totalRegistros")) or len(mapped)
-            has_more = page < observed_total_pages
-            if filters.max_pages is not None and page >= filters.max_pages and has_more:
-                truncated = True
-                break
-            if not has_more:
-                break
-            page += 1
+        collected_rows = 0
+        max_pages = min(filters.max_pages or _MAX_DETAIL_PAGES, _MAX_DETAIL_PAGES)
+        limit = int(setting(self.settings, "crawl_max_records_per_source", 0))
+        budget = getattr(self._http, "arp_discovery_budget", None)
+        if budget is None and limit:
+            budget = DiscoveryBudget(limit)
+        window = PageWindow(
+            concurrency=int(setting(self.settings, "http_max_concurrency", 4)),
+            max_pages=max_pages,
+            budget=budget,
+        )
+        async with window:
+            while True:
+                params: dict[str, Any] = {
+                    "dataInicial": start.strftime("%Y%m%d"),
+                    "dataFinal": end.strftime("%Y%m%d"),
+                    "cnpj": filters.agency_cnpj,
+                    "codigoUnidadeAdministrativa": filters.unit_code,
+                    "pagina": page,
+                    "tamanhoPagina": page_size,
+                }
+                try:
+                    response = await window.request(
+                        self._http, endpoint, params, total_pages=total_pages
+                    )
+                except DiscoveryLimitReached:
+                    truncated = True
+                    break
+                except _HTTP_EXCEPTIONS as exc:
+                    errors.append(exc)
+                    break
+                record = source_record(self.name, response)
+                repeated = repeated_page(records, record)
+                records.append(record)
+                if repeated:
+                    errors.append(
+                        ConnectorContractError("official source repeated a discovery page")
+                    )
+                    break
+                payload = response.payload
+                try:
+                    registry_rows = list_payload(
+                        payload, "data", operation="PNCP price registry discovery"
+                    )
+                except ConnectorContractError as exc:
+                    errors.append(exc)
+                    break
+                for row in registry_rows:
+                    if not (row.get("numeroControlePNCPAta") or row.get("numeroAtaRegistroPreco")):
+                        invalid_rows += 1
+                        continue
+                    mapped.append(
+                        self._map_price_registry(row, response.url).model_copy(
+                            update={"source_record_ref": record.record_key}
+                        )
+                    )
+                fetched_pages += 1
+                try:
+                    collected_rows += len(registry_rows)
+                    observed_total_pages = observed_pages(
+                        payload,
+                        page,
+                        row_count=len(registry_rows),
+                        collected_rows=collected_rows,
+                        page_size=page_size,
+                    )
+                except ConnectorContractError as exc:
+                    errors.append(exc)
+                    break
+                total_pages += observed_total_pages if page == 1 else 0
+                if page == 1:
+                    total_records += (
+                        to_int(payload.get("totalRegistros")) if isinstance(payload, dict) else None
+                    ) or len(mapped)
+                has_more = page < observed_total_pages
+                if (
+                    (
+                        page_budget_exhausted(
+                            self._http, page, max_pages, url=endpoint, params=params
+                        )
+                        or window.budget_exhausted
+                    )
+                    and has_more
+                    and not window.has_pending
+                ):
+                    truncated = True
+                    break
+                if not has_more:
+                    break
+                page += 1
 
+        records.extend(
+            source_record(self.name, response) for response in window.unconsumed_responses()
+        )
         pagination = PaginationInfo(
             page=1,
             page_size=page_size,
@@ -480,6 +723,7 @@ class PNCPConnector:
             truncated=truncated,
         )
         if mapped:
+            partial = bool(errors or truncated or invalid_rows)
             return ConnectorResult(
                 data=mapped,
                 availability=DataAvailability.AVAILABLE,
@@ -487,10 +731,9 @@ class PNCPConnector:
                 raw_records=records,
                 pagination=pagination,
                 diagnostic=(
-                    "partial result: one or more pages were not collected"
-                    if errors or truncated
-                    else None
+                    "partial result: one or more pages/rows were not usable" if partial else None
                 ),
+                partial=partial,
             )
         if errors:
             result: ConnectorResult[list[RawPriceRegistry]] = failed_result([], errors[0])
@@ -500,11 +743,300 @@ class PNCPConnector:
             return result
         return ConnectorResult(
             data=[],
-            availability=DataAvailability.EMPTY,
+            availability=(
+                DataAvailability.TEMPORARY_ERROR
+                if truncated or invalid_rows
+                else DataAvailability.EMPTY
+            ),
+            partial=bool(truncated or invalid_rows),
             source_urls=unique_urls(records),
             raw_records=records,
             pagination=pagination,
             diagnostic="no price registries matched the official response",
+        )
+
+    async def discover_contracts(
+        self, filters: ProcurementFilters
+    ) -> ConnectorResult[list[RawContract]]:
+        """Collect contracts/commitments published by PNCP for a period/agency."""
+
+        start, end = filters.resolved_period(
+            lookback_days=int(setting(self.settings, "default_lookback_days", 30))
+        )
+        endpoint = join_url(
+            self.consulta_base_url,
+            "contratos/atualizacao" if filters.discovery_kind == "update" else "contratos",
+        )
+        page_size = min(max(filters.page_size or 50, 10), 50)
+        records: list[RawSourceRecord] = []
+        contracts: list[RawContract] = []
+        errors: list[Exception] = []
+        page = 1
+        total_pages = 0
+        total_records = 0
+        fetched_pages = 0
+        truncated = False
+        invalid_rows = 0
+        collected_rows = 0
+        async with PageWindow(
+            concurrency=int(setting(self.settings, "http_max_concurrency", 4)),
+            max_pages=min(filters.max_pages or _MAX_DETAIL_PAGES, _MAX_DETAIL_PAGES),
+        ) as window:
+            while True:
+                params: dict[str, Any] = {
+                    "dataInicial": start.strftime("%Y%m%d"),
+                    "dataFinal": end.strftime("%Y%m%d"),
+                    "cnpjOrgao": filters.agency_cnpj,
+                    "codigoUnidadeAdministrativa": filters.unit_code,
+                    "pagina": page,
+                    "tamanhoPagina": page_size,
+                }
+                try:
+                    response = await window.request(
+                        self._http, endpoint, params, total_pages=total_pages or 0
+                    )
+                except _HTTP_EXCEPTIONS as exc:
+                    errors.append(exc)
+                    break
+                record = source_record(self.name, response)
+                repeated = repeated_page(records, record)
+                records.append(record)
+                if repeated:
+                    errors.append(
+                        ConnectorContractError("official source repeated a discovery page")
+                    )
+                    break
+                payload = response.payload
+                try:
+                    rows = list_payload(payload, "data", operation="PNCP contract discovery")
+                except ConnectorContractError as exc:
+                    errors.append(exc)
+                    break
+                invalid_rows += sum(
+                    not bool(
+                        row.get("numeroControlePNCP")
+                        or (
+                            (row.get("orgaoEntidade") or {}).get("cnpj")
+                            and row.get("anoContrato")
+                            and row.get("sequencialContrato")
+                        )
+                    )
+                    for row in rows
+                )
+                contracts.extend(
+                    self._map_contract(row, response.url).model_copy(
+                        update={"source_record_ref": record.record_key}
+                    )
+                    for row in rows
+                    if bool(
+                        row.get("numeroControlePNCP")
+                        or (
+                            (row.get("orgaoEntidade") or {}).get("cnpj")
+                            and row.get("anoContrato")
+                            and row.get("sequencialContrato")
+                        )
+                    )
+                )
+                fetched_pages += 1
+                try:
+                    collected_rows += len(rows)
+                    observed_total_pages = observed_pages(
+                        payload,
+                        page,
+                        row_count=len(rows),
+                        collected_rows=collected_rows,
+                        page_size=page_size,
+                    )
+                except ConnectorContractError as exc:
+                    errors.append(exc)
+                    break
+                total_pages += observed_total_pages if page == 1 else 0
+                if page == 1:
+                    total_records += to_int(payload.get("totalRegistros")) or len(rows)
+                has_more = page < observed_total_pages
+                if (
+                    page_budget_exhausted(
+                        self._http,
+                        page,
+                        min(filters.max_pages or _MAX_DETAIL_PAGES, _MAX_DETAIL_PAGES),
+                        url=endpoint,
+                        params=params,
+                    )
+                    and not window.has_pending
+                    and has_more
+                ):
+                    truncated = True
+                    break
+                if not has_more:
+                    break
+                page += 1
+        records.extend(
+            source_record(self.name, response) for response in window.unconsumed_responses()
+        )
+        pagination = PaginationInfo(
+            page=1,
+            page_size=page_size,
+            total_records=total_records,
+            total_pages=total_pages,
+            pages_remaining=max(total_pages - fetched_pages, 0),
+            fetched_pages=fetched_pages,
+            truncated=truncated,
+        )
+        if contracts:
+            partial = bool(errors or truncated or invalid_rows)
+            return ConnectorResult(
+                data=contracts,
+                availability=DataAvailability.AVAILABLE,
+                source_urls=unique_urls(records),
+                raw_records=records,
+                pagination=pagination,
+                diagnostic=(
+                    f"partial result: {invalid_rows} contract row(s) without official identity"
+                    if invalid_rows
+                    else "partial result: one or more pages were not collected"
+                    if partial
+                    else None
+                ),
+                partial=partial,
+            )
+        if errors:
+            result: ConnectorResult[list[RawContract]] = failed_result([], errors[0])
+            result.source_urls = unique_urls(records)
+            result.raw_records = records
+            result.pagination = pagination
+            return result
+        return ConnectorResult(
+            data=[],
+            availability=(
+                DataAvailability.TEMPORARY_ERROR
+                if truncated or invalid_rows
+                else DataAvailability.EMPTY
+            ),
+            partial=bool(truncated or invalid_rows),
+            source_urls=unique_urls(records),
+            raw_records=records,
+            pagination=pagination,
+            diagnostic=(
+                f"partial result: {invalid_rows} contract row(s) without official identity"
+                if invalid_rows
+                else "no contracts matched the official response"
+            ),
+        )
+
+    async def fetch_contract_items(
+        self, contract: RawContract
+    ) -> ConnectorResult[list[RawContractItem]]:
+        """PNCP publishes contract headers; items come from Compras.gov.br."""
+
+        del contract
+        return ConnectorResult(
+            data=[],
+            availability=DataAvailability.NOT_SUPPORTED,
+            diagnostic="PNCP publishes contract headers only; items come from Compras.gov.br",
+        )
+
+    async def fetch_contract_terms(
+        self, contract: RawContract
+    ) -> ConnectorResult[list[RawContractTerm]]:
+        if not contract.agency_cnpj or contract.year is None or contract.sequence is None:
+            return ConnectorResult(
+                data=[],
+                availability=DataAvailability.NOT_PUBLISHED,
+                diagnostic="contract agency/year/sequence not published; terms cannot be queried",
+            )
+        path = f"orgaos/{contract.agency_cnpj}/contratos/{contract.year}/{contract.sequence}/termos"
+        rows, refs, records, pagination, error = await self._collect_integration(path)
+        by_ref = self._records_by_ref(records)
+        valid = [
+            (row, ref)
+            for row, ref in zip(rows, refs, strict=True)
+            if row.get("sequencialTermoContrato") is not None or row.get("numeroTermoContrato")
+        ]
+        partial = error is not None or len(valid) != len(rows) or pagination.truncated
+        terms = [
+            self._map_contract_term(row, contract, by_ref[ref].endpoint).model_copy(
+                update={"source_record_ref": ref}
+            )
+            for row, ref in valid
+        ]
+        if not terms and error is not None:
+            failure: ConnectorResult[list[RawContractTerm]] = failed_result([], error)
+            failure.raw_records, failure.source_urls = records, unique_urls(records)
+            failure.pagination, failure.partial = pagination, True
+            return failure
+        return ConnectorResult(
+            data=terms,
+            availability=(
+                DataAvailability.AVAILABLE
+                if terms
+                else DataAvailability.TEMPORARY_ERROR
+                if partial
+                else DataAvailability.EMPTY
+            ),
+            source_urls=unique_urls(records),
+            raw_records=records,
+            pagination=pagination,
+            partial=partial,
+            diagnostic="partial result: contract term collection incomplete" if partial else None,
+        )
+
+    def _map_contract_term(
+        self, row: dict[str, Any], contract: RawContract, source_url: str
+    ) -> RawContractTerm:
+        sequence = row.get("sequencialTermoContrato") or row.get("numeroTermoContrato")
+        return RawContractTerm(
+            source=self.name,
+            source_url=source_url,
+            raw_payload=row,
+            external_id=f"{contract.external_id}:term:{sequence}",
+            contract_external_id=contract.external_id,
+            term_number=row.get("numeroTermoContrato")
+            or (str(sequence) if sequence is not None else None),
+            term_type=row.get("tipoTermoContratoNome"),
+            signed_at=to_datetime(row.get("dataAssinatura"), self.timezone),
+            published_at=to_datetime(row.get("dataPublicacaoPncp"), self.timezone),
+            value_delta=to_decimal(row.get("valorAcrescido")),
+            new_valid_until=to_datetime(row.get("dataVigenciaFim"), self.timezone),
+            object_description=row.get("objetoTermoContrato"),
+            status=row.get("informativoObservacao"),
+        )
+
+    def _map_contract(self, row: dict[str, Any], source_url: str) -> RawContract:
+        agency = row.get("orgaoEntidade") or {}
+        unit = row.get("unidadeOrgao") or {}
+        control = row.get("numeroControlePNCP")
+        agency_cnpj = normalized_identifier(agency.get("cnpj"))
+        year = to_int(row.get("anoContrato"))
+        sequence = row.get("sequencialContrato")
+        external_id = str(control or f"{agency_cnpj}:{year}:{sequence}")
+        return RawContract(
+            source=self.name,
+            source_updated_at=to_datetime(row.get("dataAtualizacao"), self.timezone),
+            source_update_field="dataAtualizacao" if row.get("dataAtualizacao") else None,
+            source_url=source_url,
+            raw_payload=row,
+            external_id=external_id,
+            pncp_control_number=str(control) if control else None,
+            procurement_control_number=row.get("numeroControlePncpCompra"),
+            price_registry_control_number=row.get("numeroControlePncpAta"),
+            contract_number=row.get("numeroContratoEmpenho"),
+            year=year,
+            sequence=to_int(sequence),
+            process_number=row.get("processo"),
+            agency_name=agency.get("razaoSocial"),
+            agency_cnpj=agency_cnpj,
+            uasg=unit.get("codigoUnidade") or unit.get("codigoUnidadeGestora"),
+            object_description=row.get("objetoContrato"),
+            signed_at=to_datetime(row.get("dataAssinatura"), self.timezone),
+            published_at=to_datetime(row.get("dataPublicacaoPncp"), self.timezone),
+            valid_from=to_datetime(row.get("dataVigenciaInicio"), self.timezone),
+            valid_until=to_datetime(row.get("dataVigenciaFim"), self.timezone),
+            initial_value=nonnegative_decimal(row.get("valorInicial")),
+            global_value=nonnegative_decimal(row.get("valorGlobal")),
+            accumulated_value=nonnegative_decimal(row.get("valorAcumulado")),
+            is_adhesion=row.get("frutoAdesao"),
+            supplier_cnpj=normalized_identifier(row.get("niFornecedor")),
+            supplier_name=row.get("nomeRazaoSocialFornecedor"),
         )
 
     async def fetch_price_registry_items(
@@ -666,6 +1198,8 @@ class PNCPConnector:
         cancelled = bool(row.get("cancelado")) or bool(row.get("dataCancelamento"))
         return RawPriceRegistry(
             source=self.name,
+            source_updated_at=to_datetime(row.get("dataAtualizacao"), self.timezone),
+            source_update_field="dataAtualizacao" if row.get("dataAtualizacao") else None,
             source_url=source_url,
             raw_payload=row,
             external_id=external_id,
@@ -691,12 +1225,18 @@ class PNCPConnector:
         )
 
     def _map_item(
-        self, row: dict[str, Any], procurement_external_id: str, source_url: str
+        self,
+        row: dict[str, Any],
+        procurement_external_id: str,
+        source_url: str,
+        *,
+        source_record_ref: str | None = None,
     ) -> RawProcurementItem:
         number = row.get("numeroItem")
         return RawProcurementItem(
             source=self.name,
             source_url=source_url,
+            source_record_ref=source_record_ref,
             raw_payload=row,
             external_id=f"{procurement_external_id}:item:{number}",
             procurement_external_id=procurement_external_id,
@@ -712,21 +1252,28 @@ class PNCPConnector:
         )
 
     def _map_document(
-        self, row: dict[str, Any], procurement_external_id: str, source_url: str
+        self,
+        row: dict[str, Any],
+        procurement_external_id: str,
+        source_url: str,
+        *,
+        source_record_ref: str | None = None,
     ) -> RawDocument:
         sequence = row.get("sequencialDocumento")
         download_url = str(row.get("url") or row.get("uri"))
+        external_key = sequence if sequence is not None else self._row_digest(row)[:16]
         return RawDocument(
             source=self.name,
             source_url=source_url,
+            source_record_ref=source_record_ref,
             raw_payload=row,
-            external_id=f"{procurement_external_id}:document:{sequence}",
+            external_id=f"{procurement_external_id}:document:{external_key}",
             procurement_external_id=procurement_external_id,
             document_type=row.get("tipoDocumentoNome") or row.get("tipoDocumentoDescricao"),
             title=row.get("titulo"),
             download_url=download_url,
             published_at=to_datetime(row.get("dataPublicacaoPncp"), self.timezone),
-            active=row.get("statusAtivo"),
+            active=row.get("statusAtivo") is not False,
         )
 
     def _map_result(
@@ -735,6 +1282,8 @@ class PNCPConnector:
         procurement_external_id: str,
         item: dict[str, Any],
         source_url: str,
+        *,
+        source_record_ref: str | None = None,
     ) -> RawResult:
         item_number = row.get("numeroItem", item.get("numeroItem"))
         sequence = row.get("sequencialResultado", 1)
@@ -749,6 +1298,7 @@ class PNCPConnector:
         return RawResult(
             source=self.name,
             source_url=source_url,
+            source_record_ref=source_record_ref,
             raw_payload=row,
             external_id=f"{procurement_external_id}:item:{item_number}:result:{sequence}",
             procurement_external_id=procurement_external_id,
@@ -774,6 +1324,7 @@ class PNCPConnector:
         self, path: str
     ) -> tuple[
         list[dict[str, Any]],
+        list[str],
         list[RawSourceRecord],
         PaginationInfo,
         Exception | None,
@@ -782,33 +1333,87 @@ class PNCPConnector:
         page_size = 50
         page = 1
         rows: list[dict[str, Any]] = []
+        row_refs: list[str] = []
         records: list[RawSourceRecord] = []
         error: Exception | None = None
         total_pages: int | None = None
         total_records: int | None = None
-        while True:
-            try:
-                response = await self._http.request_json(
-                    "GET", endpoint, params={"pagina": page, "tamanhoPagina": page_size}
-                )
-            except _HTTP_EXCEPTIONS as exc:
-                error = exc
-                break
-            record = source_record(self.name, response)
-            records.append(record)
-            page_rows = list_payload(
-                response.payload, "data", "itens", "documentos", "listaResultados"
-            )
-            rows.extend(page_rows)
-            if isinstance(response.payload, dict):
-                total_pages = to_int(response.payload.get("totalPaginas"))
-                total_records = to_int(response.payload.get("totalRegistros"))
-            has_more = (
-                page < total_pages if total_pages is not None else len(page_rows) >= page_size
-            )
-            if not has_more:
-                break
-            page += 1
+        seen_hashes: set[str] = set()
+        async with PageWindow(
+            concurrency=int(setting(self.settings, "http_max_concurrency", 4)),
+            max_pages=_MAX_DETAIL_PAGES,
+        ) as window:
+            while True:
+                try:
+                    response = await window.request(
+                        self._http,
+                        endpoint,
+                        {"pagina": page, "tamanhoPagina": page_size},
+                        total_pages=total_pages or 0,
+                    )
+                except _HTTP_EXCEPTIONS as exc:
+                    error = exc
+                    break
+                record = source_record(self.name, response)
+                if record.response_hash in seen_hashes:
+                    error = ConnectorContractError(
+                        f"PNCP detail endpoint repeated page {page}",
+                        url=response.url,
+                    )
+                    break
+                seen_hashes.add(record.response_hash)
+                records.append(record)
+                try:
+                    page_rows = list_payload(
+                        response.payload,
+                        "data",
+                        "itens",
+                        "documentos",
+                        "listaResultados",
+                        "resultados",
+                        "termos",
+                        operation="PNCP integration detail",
+                    )
+                except ConnectorContractError as exc:
+                    error = exc
+                    break
+                rows.extend(page_rows)
+                row_refs.extend(record.record_key for _ in page_rows)
+                try:
+                    total_pages = observed_pages(
+                        response.payload,
+                        page,
+                        row_count=len(page_rows),
+                        collected_rows=len(rows),
+                        page_size=page_size,
+                    )
+                    if isinstance(response.payload, dict):
+                        total_records = to_int(response.payload.get("totalRegistros"))
+                except ConnectorContractError as exc:
+                    error = exc
+                    break
+                has_more = page < total_pages
+                if not has_more:
+                    break
+                if (
+                    page_budget_exhausted(
+                        self._http,
+                        page,
+                        _MAX_DETAIL_PAGES,
+                        url=endpoint,
+                        params={"pagina": page, "tamanhoPagina": page_size},
+                    )
+                    and not window.has_pending
+                ):
+                    error = ConnectorContractError(
+                        f"PNCP detail exceeded {_MAX_DETAIL_PAGES} pages",
+                        url=response.url,
+                    )
+                    break
+                page += 1
+        records.extend(
+            source_record(self.name, response) for response in window.unconsumed_responses()
+        )
 
         pagination = PaginationInfo(
             page=1,
@@ -821,7 +1426,47 @@ class PNCPConnector:
             fetched_pages=len(records),
             truncated=error is not None and bool(records),
         )
-        return rows, records, pagination, error
+        return rows, row_refs, records, pagination, error
+
+    @staticmethod
+    def _records_by_ref(records: list[RawSourceRecord]) -> dict[str, RawSourceRecord]:
+        return {record.record_key: record for record in records}
+
+    @staticmethod
+    def _row_digest(row: dict[str, Any]) -> str:
+        encoded = json.dumps(
+            row,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        ).encode("utf-8")
+        return hashlib.sha256(encoded).hexdigest()
+
+    @staticmethod
+    def _has_procurement_identity(row: dict[str, Any]) -> bool:
+        if row.get("numeroControlePNCP"):
+            return True
+        agency = row.get("orgaoEntidade") or {}
+        return bool(
+            normalized_identifier(agency.get("cnpj"))
+            and to_int(row.get("anoCompra")) is not None
+            and to_int(row.get("sequencialCompra")) is not None
+        )
+
+    @staticmethod
+    def _has_item_identity(row: dict[str, Any]) -> bool:
+        return to_int(row.get("numeroItem")) is not None
+
+    @staticmethod
+    def _has_document_identity(row: dict[str, Any]) -> bool:
+        return bool(row.get("url") or row.get("uri"))
+
+    @staticmethod
+    def _has_result_identity(row: dict[str, Any]) -> bool:
+        return to_int(row.get("numeroItem")) is not None and bool(
+            normalized_identifier(row.get("niFornecedor")) or row.get("nomeRazaoSocialFornecedor")
+        )
 
     @staticmethod
     def _deduplicate(rows: list[RawProcurement]) -> list[RawProcurement]:

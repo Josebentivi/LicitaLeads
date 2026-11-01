@@ -1,0 +1,19 @@
+<section class="panel" id="field-history-{{ entity_type }}-{{ entity_id }}">
+  <h2>Histórico de alterações</h2>
+  <p class="hint">Histórico detalhado registrado a partir da ativação desta funcionalidade. Divergências preservam o valor recebido e a decisão aplicada.</p>
+  <div class="table-wrap"><table>
+    <thead><tr><th>Consulta</th><th>Campo / registro</th><th>Anterior</th><th>Recebido</th><th>Decisão</th><th>Origem</th></tr></thead>
+    <tbody>{% for item in history['items'] %}
+      <tr>
+        <td>{{ item.observed_at }}<small>Processada em: {{ item.recorded_at }}</small>{% if item.source_updated_at %}<small>Atualização na fonte: {{ item.source_updated_at }}</small>{% endif %}</td>
+        <td>{{ item.field_label }}<small>{{ item.entity_id }}</small></td>
+        <td>{{ item.previous_display if item.previous_display is not none else 'Não informado' }}</td>
+        <td>{{ item.received_display if item.received_display is not none else 'Removido explicitamente' }}</td>
+        <td>{% if item.decision == 'conflict_applied' %}<span class="badge status-pending">Divergência para revisão</span>{% endif %} {{ item.decision_label }}</td>
+        <td>{{ item.source }}{% if item.source_url %}<small><a href="{{ item.source_url }}" target="_blank" rel="noopener noreferrer">Fonte oficial</a></small>{% endif %}<small>Origem: {{ item.source_record_id or 'não disponível no registro legado' }}</small></td>
+      </tr>
+    {% else %}<tr><td colspan="6" class="empty">Nenhuma alteração detalhada registrada.</td></tr>{% endfor %}</tbody>
+  </table></div>
+  {% if history.page > 1 %}<a hx-get="/history/{{ entity_type }}/{{ entity_id }}?page={{ history.page - 1 }}" hx-target="#field-history-{{ entity_type }}-{{ entity_id }}" hx-swap="outerHTML" href="/history/{{ entity_type }}/{{ entity_id }}?page={{ history.page - 1 }}">Anteriores</a>{% endif %}
+  {% if history.page * history.page_size < history.total %}<a hx-get="/history/{{ entity_type }}/{{ entity_id }}?page={{ history.page + 1 }}" hx-target="#field-history-{{ entity_type }}-{{ entity_id }}" hx-swap="outerHTML" href="/history/{{ entity_type }}/{{ entity_id }}?page={{ history.page + 1 }}">Próximas</a>{% endif %}
+</section>

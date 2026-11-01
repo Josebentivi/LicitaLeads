@@ -47,6 +47,7 @@ from app.models.enums import (
     ParticipantRole,
     ParticipantStatus,
     ProcurementEventType,
+    ProcurementPhase,
     ReasonCategory,
     ReviewDecision,
     database_enum,
@@ -101,6 +102,13 @@ class Procurement(UUIDPrimaryKeyMixin, TimestampMixin, FingerprintMixin, Base):
     publication_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), index=True)
     last_source_update_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
     status: Mapped[str | None] = mapped_column(String(100), index=True)
+    current_phase: Mapped[ProcurementPhase] = mapped_column(
+        database_enum(ProcurementPhase),
+        default=ProcurementPhase.UNKNOWN,
+        nullable=False,
+        index=True,
+    )
+    phase_observed_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
     source_url: Mapped[str | None] = mapped_column(Text)
 
     @validates("modality")
@@ -148,6 +156,13 @@ class CrawlRun(UUIDPrimaryKeyMixin, Base):
         CheckConstraint("records_created >= 0", name="records_created_nonnegative"),
         CheckConstraint("records_updated >= 0", name="records_updated_nonnegative"),
         Index("ix_crawl_runs_connector_started", "connector", "started_at"),
+        Index(
+            "uq_crawl_runs_active_batch",
+            "batch_id",
+            unique=True,
+            sqlite_where=text("batch_id IS NOT NULL AND status IN ('pending', 'running')"),
+            postgresql_where=text("batch_id IS NOT NULL AND status IN ('pending', 'running')"),
+        ),
     )
 
     connector: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
@@ -159,6 +174,14 @@ class CrawlRun(UUIDPrimaryKeyMixin, Base):
     records_found: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     records_created: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     records_updated: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    records_changed: Mapped[int | None] = mapped_column(Integer)
+    records_unchanged: Mapped[int | None] = mapped_column(Integer)
+    records_stale_ignored: Mapped[int | None] = mapped_column(Integer)
+    records_conflicted: Mapped[int | None] = mapped_column(Integer)
+    counting_version: Mapped[int | None] = mapped_column(Integer)
+    batch_id: Mapped[UUID | None] = mapped_column(
+        GUID(), ForeignKey("collection_batches.id", ondelete="SET NULL"), index=True
+    )
     errors: Mapped[list[Any]] = mapped_column(
         MutableList.as_mutable(JSON), default=list, nullable=False
     )
@@ -168,6 +191,7 @@ class CrawlRun(UUIDPrimaryKeyMixin, Base):
     )
     diagnostic: Mapped[str | None] = mapped_column(Text)
     cancel_requested: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    heartbeat_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), index=True)
     created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utc_now, nullable=False)
 
     source_records: Mapped[list[SourceRecord]] = relationship(
@@ -200,6 +224,8 @@ class SourceRecord(UUIDPrimaryKeyMixin, FingerprintMixin, Base):
     diagnostic: Mapped[str | None] = mapped_column(Text)
 
     crawl_run: Mapped[CrawlRun | None] = relationship(back_populates="source_records")
+    collection_complete: Mapped[bool | None] = mapped_column(Boolean)
+    pagination_metadata: Mapped[dict[str, Any] | None] = mapped_column(JSON)
     procurement_sources: Mapped[list[ProcurementSource]] = relationship(
         back_populates="source_record"
     )
@@ -227,6 +253,7 @@ class ProcurementSource(UUIDPrimaryKeyMixin, FingerprintMixin, Base):
     source_url: Mapped[str | None] = mapped_column(Text)
     collected_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utc_now, nullable=False)
     is_primary: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    last_refresh_attempt_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), index=True)
 
     procurement: Mapped[Procurement] = relationship(back_populates="sources")
     source_record: Mapped[SourceRecord | None] = relationship(back_populates="procurement_sources")
@@ -343,10 +370,13 @@ class Document(UUIDPrimaryKeyMixin, FingerprintMixin, Base):
     document_type: Mapped[str | None] = mapped_column(String(100), index=True)
     title: Mapped[str | None] = mapped_column(String(500))
     original_url: Mapped[str] = mapped_column(Text, nullable=False)
+    resolved_url: Mapped[str | None] = mapped_column(Text)
     file_hash: Mapped[str | None] = mapped_column(String(64))
     mime_type: Mapped[str | None] = mapped_column(String(255))
     local_path: Mapped[str | None] = mapped_column(Text)
     extracted_text: Mapped[str | None] = mapped_column(Text)
+    extraction_attempts: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    next_attempt_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), index=True)
     extraction_status: Mapped[ExtractionStatus] = mapped_column(
         database_enum(ExtractionStatus),
         default=ExtractionStatus.PENDING,
@@ -354,8 +384,11 @@ class Document(UUIDPrimaryKeyMixin, FingerprintMixin, Base):
         index=True,
     )
     extraction_error: Mapped[str | None] = mapped_column(Text)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False, index=True)
+    deactivated_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
     published_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
     downloaded_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    last_checked_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), index=True)
     created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utc_now, nullable=False)
 
     procurement: Mapped[Procurement] = relationship(back_populates="documents")
@@ -624,10 +657,10 @@ class Lead(UUIDPrimaryKeyMixin, TimestampMixin, FingerprintMixin, Base):
         CheckConstraint("score >= 0 AND score <= 100", name="score_range"),
         CheckConstraint("urgency_score >= 0 AND urgency_score <= 30", name="urgency_score_range"),
         CheckConstraint(
-            "evidence_score >= 0 AND evidence_score <= 25", name="evidence_score_range"
+            "evidence_score >= 0 AND evidence_score <= 30", name="evidence_score_range"
         ),
         CheckConstraint(
-            "legal_relevance_score >= 0 AND legal_relevance_score <= 20",
+            "legal_relevance_score >= 0 AND legal_relevance_score <= 25",
             name="legal_score_range",
         ),
         CheckConstraint("contact_score >= 0 AND contact_score <= 15", name="contact_score_range"),
@@ -762,7 +795,7 @@ class PriceRegistry(UUIDPrimaryKeyMixin, TimestampMixin, FingerprintMixin, Base)
     registry_number: Mapped[str | None] = mapped_column(String(100), index=True)
     year: Mapped[int | None] = mapped_column(Integer)
     agency_name: Mapped[str | None] = mapped_column(String(500), index=True)
-    agency_cnpj: Mapped[str | None] = mapped_column(String(14), index=True)
+    agency_cnpj: Mapped[str | None] = mapped_column(String(14))
     uasg: Mapped[str | None] = mapped_column(String(30))
     object_description: Mapped[str | None] = mapped_column(Text)
     status: Mapped[str | None] = mapped_column(String(100), index=True)
@@ -777,6 +810,15 @@ class PriceRegistry(UUIDPrimaryKeyMixin, TimestampMixin, FingerprintMixin, Base)
     procurement: Mapped[Procurement | None] = relationship()
     source_record: Mapped[SourceRecord | None] = relationship(foreign_keys=[source_record_id])
     items: Mapped[list[PriceRegistryItem]] = relationship(
+        back_populates="price_registry", cascade="all, delete-orphan", passive_deletes=True
+    )
+    units: Mapped[list[PriceRegistryUnit]] = relationship(
+        back_populates="price_registry", cascade="all, delete-orphan", passive_deletes=True
+    )
+    commitments: Mapped[list[PriceRegistryCommitment]] = relationship(
+        back_populates="price_registry", cascade="all, delete-orphan", passive_deletes=True
+    )
+    adhesions: Mapped[list[PriceRegistryAdhesion]] = relationship(
         back_populates="price_registry", cascade="all, delete-orphan", passive_deletes=True
     )
 
@@ -806,6 +848,8 @@ class PriceRegistryItem(UUIDPrimaryKeyMixin, FingerprintMixin, Base):
         GUID(), ForeignKey("source_records.id", ondelete="SET NULL"), index=True
     )
     item_number: Mapped[str] = mapped_column(String(100), nullable=False)
+    catalog_code: Mapped[str | None] = mapped_column(String(100), index=True)
+    item_type: Mapped[str | None] = mapped_column(String(100))
     description: Mapped[str | None] = mapped_column(Text)
     unit: Mapped[str | None] = mapped_column(String(100))
     quantity: Mapped[Decimal | None] = mapped_column(Numeric(19, 4))
@@ -818,4 +862,266 @@ class PriceRegistryItem(UUIDPrimaryKeyMixin, FingerprintMixin, Base):
 
     price_registry: Mapped[PriceRegistry] = relationship(back_populates="items")
     company: Mapped[Company | None] = relationship()
+    source_record: Mapped[SourceRecord | None] = relationship(foreign_keys=[source_record_id])
+
+
+class PriceRegistryUnit(UUIDPrimaryKeyMixin, FingerprintMixin, Base):
+    """Unit-level balance published for one ARP item."""
+
+    __tablename__ = "price_registry_units"
+    __table_args__ = (
+        Index("ix_price_registry_units_registry_item", "price_registry_id", "item_number"),
+        Index("ix_price_registry_units_unit", "unit_code"),
+    )
+
+    price_registry_id: Mapped[UUID] = mapped_column(
+        GUID(), ForeignKey("price_registries.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    source_record_id: Mapped[UUID | None] = mapped_column(
+        GUID(), ForeignKey("source_records.id", ondelete="SET NULL"), index=True
+    )
+    item_number: Mapped[str | None] = mapped_column(String(100), index=True)
+    catalog_code: Mapped[str | None] = mapped_column(String(100), index=True)
+    description: Mapped[str | None] = mapped_column(Text)
+    supplier_name: Mapped[str | None] = mapped_column(String(500))
+    quantity_registered: Mapped[Decimal | None] = mapped_column(Numeric(19, 4))
+    adhesion_balance: Mapped[Decimal | None] = mapped_column(Numeric(19, 4))
+    remanejamento_balance: Mapped[Decimal | None] = mapped_column(Numeric(19, 4))
+    adhesion_limit: Mapped[Decimal | None] = mapped_column(Numeric(19, 4))
+    purchase_limit: Mapped[Decimal | None] = mapped_column(Numeric(19, 4))
+    accepts_adhesion: Mapped[bool | None] = mapped_column(Boolean)
+    unit_code: Mapped[str | None] = mapped_column(String(100))
+    unit_name: Mapped[str | None] = mapped_column(String(500))
+    unit_type: Mapped[str | None] = mapped_column(String(100))
+    included_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    updated_at_source: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    excluded_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utc_now, nullable=False)
+
+    price_registry: Mapped[PriceRegistry] = relationship(back_populates="units")
+    source_record: Mapped[SourceRecord | None] = relationship(foreign_keys=[source_record_id])
+
+
+class PriceRegistryCommitment(UUIDPrimaryKeyMixin, FingerprintMixin, Base):
+    """Commitment (empenho) balance published for one ARP item."""
+
+    __tablename__ = "price_registry_commitments"
+    __table_args__ = (
+        Index("ix_price_registry_commitments_registry_item", "price_registry_id", "item_number"),
+    )
+
+    price_registry_id: Mapped[UUID] = mapped_column(
+        GUID(), ForeignKey("price_registries.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    source_record_id: Mapped[UUID | None] = mapped_column(
+        GUID(), ForeignKey("source_records.id", ondelete="SET NULL"), index=True
+    )
+    item_number: Mapped[str | None] = mapped_column(String(100), index=True)
+    unit: Mapped[str | None] = mapped_column(String(100))
+    commitment_type: Mapped[str | None] = mapped_column(String(100))
+    quantity_registered: Mapped[Decimal | None] = mapped_column(Numeric(19, 4))
+    quantity_committed: Mapped[Decimal | None] = mapped_column(Numeric(19, 4))
+    balance: Mapped[Decimal | None] = mapped_column(Numeric(19, 4))
+    included_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    updated_at_source: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utc_now, nullable=False)
+
+    price_registry: Mapped[PriceRegistry] = relationship(back_populates="commitments")
+    source_record: Mapped[SourceRecord | None] = relationship(foreign_keys=[source_record_id])
+
+
+class PriceRegistryAdhesion(UUIDPrimaryKeyMixin, FingerprintMixin, Base):
+    """External agency adhesion (carona) published for one ARP item."""
+
+    __tablename__ = "price_registry_adhesions"
+    __table_args__ = (
+        Index("ix_price_registry_adhesions_registry_item", "price_registry_id", "item_number"),
+    )
+
+    price_registry_id: Mapped[UUID] = mapped_column(
+        GUID(), ForeignKey("price_registries.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    source_record_id: Mapped[UUID | None] = mapped_column(
+        GUID(), ForeignKey("source_records.id", ondelete="SET NULL"), index=True
+    )
+    item_number: Mapped[str | None] = mapped_column(String(100), index=True)
+    requesting_unit: Mapped[str | None] = mapped_column(String(500))
+    approved_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    approved_quantity: Mapped[Decimal | None] = mapped_column(Numeric(19, 4))
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utc_now, nullable=False)
+
+    price_registry: Mapped[PriceRegistry] = relationship(back_populates="adhesions")
+    source_record: Mapped[SourceRecord | None] = relationship(foreign_keys=[source_record_id])
+
+
+class Contract(UUIDPrimaryKeyMixin, TimestampMixin, FingerprintMixin, Base):
+    """Auditable contract/commitment header published by an official source."""
+
+    __tablename__ = "contracts"
+    __table_args__ = (
+        UniqueConstraint("source", "external_id", name="uq_contracts_source_external_id"),
+        Index("ix_contracts_validity", "valid_from", "valid_until"),
+        Index("ix_contracts_agency", "agency_cnpj"),
+        Index("ix_contracts_company", "company_id"),
+    )
+
+    source: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
+    external_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    pncp_control_number: Mapped[str | None] = mapped_column(String(100), unique=True, index=True)
+    procurement_control_number: Mapped[str | None] = mapped_column(String(100), index=True)
+    price_registry_control_number: Mapped[str | None] = mapped_column(String(100), index=True)
+    procurement_id: Mapped[UUID | None] = mapped_column(
+        GUID(), ForeignKey("procurements.id", ondelete="SET NULL"), index=True
+    )
+    company_id: Mapped[UUID | None] = mapped_column(
+        GUID(), ForeignKey("companies.id", ondelete="SET NULL")
+    )
+    price_registry_id: Mapped[UUID | None] = mapped_column(
+        GUID(), ForeignKey("price_registries.id", ondelete="SET NULL"), index=True
+    )
+    source_record_id: Mapped[UUID | None] = mapped_column(
+        GUID(), ForeignKey("source_records.id", ondelete="SET NULL"), index=True
+    )
+    contract_number: Mapped[str | None] = mapped_column(String(100), index=True)
+    year: Mapped[int | None] = mapped_column(Integer)
+    process_number: Mapped[str | None] = mapped_column(String(100))
+    agency_name: Mapped[str | None] = mapped_column(String(500), index=True)
+    agency_cnpj: Mapped[str | None] = mapped_column(String(14))
+    uasg: Mapped[str | None] = mapped_column(String(30))
+    object_description: Mapped[str | None] = mapped_column(Text)
+    status: Mapped[str | None] = mapped_column(String(100), index=True)
+    signed_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    published_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    valid_from: Mapped[datetime | None] = mapped_column(UTCDateTime(), index=True)
+    valid_until: Mapped[datetime | None] = mapped_column(UTCDateTime(), index=True)
+    initial_value: Mapped[Decimal | None] = mapped_column(Numeric(19, 2))
+    global_value: Mapped[Decimal | None] = mapped_column(Numeric(19, 2))
+    accumulated_value: Mapped[Decimal | None] = mapped_column(Numeric(19, 2))
+    is_adhesion: Mapped[bool | None] = mapped_column(Boolean)
+    supplier_cnpj: Mapped[str | None] = mapped_column(String(14), index=True)
+    supplier_name: Mapped[str | None] = mapped_column(String(500))
+    source_url: Mapped[str | None] = mapped_column(Text)
+
+    procurement: Mapped[Procurement | None] = relationship()
+    company: Mapped[Company | None] = relationship()
+    price_registry: Mapped[PriceRegistry | None] = relationship()
+    source_record: Mapped[SourceRecord | None] = relationship(foreign_keys=[source_record_id])
+    payments: Mapped[list[Payment]] = relationship(back_populates="contract")
+    items: Mapped[list[ContractItem]] = relationship(
+        back_populates="contract", cascade="all, delete-orphan", passive_deletes=True
+    )
+    terms: Mapped[list[ContractTerm]] = relationship(
+        back_populates="contract", cascade="all, delete-orphan", passive_deletes=True
+    )
+
+
+class Payment(UUIDPrimaryKeyMixin, TimestampMixin, FingerprintMixin, Base):
+    """Payment or execution document linked to a contract when possible."""
+
+    __tablename__ = "payments"
+    __table_args__ = (
+        UniqueConstraint("source", "external_id", name="uq_payments_source_external_id"),
+        Index("ix_payments_company_date", "company_id", "payment_date"),
+        Index("ix_payments_contract_date", "contract_id", "payment_date"),
+    )
+
+    source: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
+    external_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    contract_id: Mapped[UUID | None] = mapped_column(
+        GUID(), ForeignKey("contracts.id", ondelete="SET NULL"), index=True
+    )
+    procurement_id: Mapped[UUID | None] = mapped_column(
+        GUID(), ForeignKey("procurements.id", ondelete="SET NULL"), index=True
+    )
+    company_id: Mapped[UUID | None] = mapped_column(
+        GUID(), ForeignKey("companies.id", ondelete="SET NULL"), index=True
+    )
+    source_record_id: Mapped[UUID | None] = mapped_column(
+        GUID(), ForeignKey("source_records.id", ondelete="SET NULL"), index=True
+    )
+    contract_number: Mapped[str | None] = mapped_column(String(100), index=True)
+    procurement_control_number: Mapped[str | None] = mapped_column(String(100), index=True)
+    agency_name: Mapped[str | None] = mapped_column(String(500), index=True)
+    agency_cnpj: Mapped[str | None] = mapped_column(String(14), index=True)
+    uasg: Mapped[str | None] = mapped_column(String(30))
+    process_number: Mapped[str | None] = mapped_column(String(100))
+    payment_date: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    amount: Mapped[Decimal | None] = mapped_column(Numeric(19, 2))
+    phase: Mapped[str | None] = mapped_column(String(100), index=True)
+    document_number: Mapped[str | None] = mapped_column(String(100), index=True)
+    commitment_number: Mapped[str | None] = mapped_column(String(100))
+    commitment_external_id: Mapped[str | None] = mapped_column(String(255), index=True)
+    is_current: Mapped[bool] = mapped_column(Boolean, default=True, server_default="1", index=True)
+    status: Mapped[str | None] = mapped_column(String(100))
+    supplier_cnpj: Mapped[str | None] = mapped_column(String(14), index=True)
+    supplier_name: Mapped[str | None] = mapped_column(String(500))
+    source_url: Mapped[str | None] = mapped_column(Text)
+    match_status: Mapped[str] = mapped_column(String(50), default="unlinked", nullable=False)
+    match_confidence: Mapped[Decimal | None] = mapped_column(Numeric(5, 4))
+    match_reason: Mapped[str | None] = mapped_column(String(255))
+    requires_manual_review: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+
+    contract: Mapped[Contract | None] = relationship(back_populates="payments")
+    procurement: Mapped[Procurement | None] = relationship()
+    company: Mapped[Company | None] = relationship()
+    source_record: Mapped[SourceRecord | None] = relationship(foreign_keys=[source_record_id])
+
+
+class ContractItem(UUIDPrimaryKeyMixin, FingerprintMixin, Base):
+    """One item published for a contract, kept separate from the header."""
+
+    __tablename__ = "contract_items"
+    __table_args__ = (
+        UniqueConstraint("contract_id", "item_number", name="uq_contract_items_contract_item"),
+        Index("ix_contract_items_supplier", "supplier_cnpj"),
+    )
+
+    contract_id: Mapped[UUID] = mapped_column(
+        GUID(), ForeignKey("contracts.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    source_record_id: Mapped[UUID | None] = mapped_column(
+        GUID(), ForeignKey("source_records.id", ondelete="SET NULL"), index=True
+    )
+    item_number: Mapped[str] = mapped_column(String(100), nullable=False)
+    description: Mapped[str | None] = mapped_column(Text)
+    unit: Mapped[str | None] = mapped_column(String(100))
+    quantity: Mapped[Decimal | None] = mapped_column(Numeric(19, 4))
+    unit_value: Mapped[Decimal | None] = mapped_column(Numeric(19, 4))
+    total_value: Mapped[Decimal | None] = mapped_column(Numeric(19, 2))
+    supplier_cnpj: Mapped[str | None] = mapped_column(String(14), index=True)
+    supplier_name: Mapped[str | None] = mapped_column(String(500))
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utc_now, nullable=False)
+
+    contract: Mapped[Contract] = relationship(back_populates="items")
+    source_record: Mapped[SourceRecord | None] = relationship(foreign_keys=[source_record_id])
+
+
+class ContractTerm(UUIDPrimaryKeyMixin, FingerprintMixin, Base):
+    """One additive term or apostilamento published for a contract."""
+
+    __tablename__ = "contract_terms"
+    __table_args__ = (
+        UniqueConstraint(
+            "contract_id", "term_number", "term_type", name="uq_contract_terms_identity"
+        ),
+    )
+
+    contract_id: Mapped[UUID] = mapped_column(
+        GUID(), ForeignKey("contracts.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    source_record_id: Mapped[UUID | None] = mapped_column(
+        GUID(), ForeignKey("source_records.id", ondelete="SET NULL"), index=True
+    )
+    term_number: Mapped[str | None] = mapped_column(String(100))
+    term_type: Mapped[str | None] = mapped_column(String(100))
+    signed_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    published_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    value_delta: Mapped[Decimal | None] = mapped_column(Numeric(19, 2))
+    new_valid_until: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    object_description: Mapped[str | None] = mapped_column(Text)
+    status: Mapped[str | None] = mapped_column(String(100))
+    source_url: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utc_now, nullable=False)
+
+    contract: Mapped[Contract] = relationship(back_populates="terms")
     source_record: Mapped[SourceRecord | None] = relationship(foreign_keys=[source_record_id])

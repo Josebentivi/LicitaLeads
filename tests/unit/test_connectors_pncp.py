@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import date
 from types import SimpleNamespace
 
@@ -22,6 +23,20 @@ def _settings() -> SimpleNamespace:
         http_max_concurrency=2,
         http_min_request_interval_seconds=0,
     )
+
+
+async def test_detail_throttle_is_scoped_across_records_without_throttling_items():
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda request: httpx.Response(429))
+    ) as raw:
+        http = AsyncHTTPClient(_settings(), client=raw)
+        connector = PNCPConnector(_settings(), http_client=http)
+        result = await connector.fetch_procurement("12345678000199-1-000001/2026")
+        assert result.availability is DataAvailability.TEMPORARY_ERROR
+        state = http._scope_pacing[("https://pncp.test/", "pncp.procurement_detail")]
+        assert state.interval == 0.5
+        assert http._origin_pacing["https://pncp.test/"].interval == 0
+        assert http._origin_pacing["https://pncp.test/"].cooldown_until > 0
 
 
 @pytest.mark.asyncio
@@ -91,6 +106,7 @@ async def test_pncp_discovery_paginates_filters_and_deduplicates() -> None:
     assert result.data[0].legal_basis == "Lei 14.133/2021, art. 75, inciso I"
     assert result.data[0].publication_at is not None
     assert result.data[0].publication_at.utcoffset().total_seconds() == 0
+    assert result.data[0].source_record_ref == result.raw_records[0].record_key
     assert len(result.raw_records) == 2
     assert result.pagination is not None and result.pagination.fetched_pages == 2
     assert all(request.url.params["codigoModalidadeContratacao"] == "6" for request in requests)
@@ -131,7 +147,12 @@ async def test_pncp_price_registry_discovery_maps_audited_fields() -> None:
         _settings(), http_client=AsyncHTTPClient(_settings(), client=raw_client)
     )
     result = await connector.discover_price_registries(
-        ProcurementFilters(start_date=date(2026, 1, 1), end_date=date(2026, 1, 31))
+        ProcurementFilters(
+            start_date=date(2026, 1, 1),
+            end_date=date(2026, 1, 31),
+            agency_cnpj="12345678000199",
+            unit_code="980921",
+        )
     )
 
     assert result.availability is DataAvailability.AVAILABLE
@@ -146,7 +167,10 @@ async def test_pncp_price_registry_discovery_maps_audited_fields() -> None:
     assert registry.valid_from is not None and registry.valid_until is not None
     assert registry.allows_adhesion is True
     assert registry.status is None
+    assert registry.source_record_ref == result.raw_records[0].record_key
     assert requests[0].url.params["dataInicial"] == "20260101"
+    assert requests[0].url.params["cnpj"] == "12345678000199"
+    assert requests[0].url.params["codigoUnidadeAdministrativa"] == "980921"
     assert "codigoModalidadeContratacao" not in requests[0].url.params
 
     items = await connector.fetch_price_registry_items(registry.external_id)
@@ -187,6 +211,64 @@ async def test_pncp_partial_pagination_does_not_claim_empty_data() -> None:
     assert result.availability is DataAvailability.TEMPORARY_ERROR
     assert len(result.raw_records) == 1
     assert result.data == []
+    await raw_client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_pncp_no_content_is_empty_not_a_decode_error() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(204, request=request)
+
+    raw_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    connector = PNCPConnector(
+        _settings(), http_client=AsyncHTTPClient(_settings(), client=raw_client)
+    )
+    result = await connector.discover_procurements(
+        ProcurementFilters(
+            start_date=date(2026, 10, 26),
+            end_date=date(2026, 10, 26),
+            uf="MA",
+            modalities=["pregao_eletronico"],
+        )
+    )
+
+    assert result.availability is DataAvailability.EMPTY
+    assert result.data == []
+    assert (
+        result.diagnostic == "no procurements matched the official response and client-side filters"
+    )
+    assert len(result.raw_records) == 1
+    assert result.raw_records[0].http_status == 204
+    await raw_client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_pncp_html_service_error_is_temporary() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            503,
+            text="<html>No server is available</html>",
+            headers={"content-type": "text/html"},
+            request=request,
+        )
+
+    raw_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    connector = PNCPConnector(
+        _settings(), http_client=AsyncHTTPClient(_settings(), client=raw_client)
+    )
+    result = await connector.discover_procurements(
+        ProcurementFilters(
+            start_date=date(2026, 10, 26),
+            end_date=date(2026, 10, 26),
+            uf="MA",
+            modalities=["pregao_eletronico"],
+        )
+    )
+
+    assert result.availability is DataAvailability.TEMPORARY_ERROR
+    assert result.data == []
+    assert "temporary official source error" in (result.diagnostic or "")
+    assert "503" in (result.diagnostic or "")
     await raw_client.aclose()
 
 
@@ -340,3 +422,227 @@ def test_parse_pncp_external_id_accepts_alphanumeric_cnpj() -> None:
     assert reference.cnpj == "ABC123450001ZZ"
     assert reference.year == 2026
     assert reference.sequence == 11
+
+
+@pytest.mark.asyncio
+async def test_pncp_contract_discovery_maps_contract_and_provenance() -> None:
+    row = {
+        "numeroControlePNCP": "contract-control-1",
+        "numeroControlePncpCompra": "12345678000199-1-000001/2026",
+        "numeroControlePncpAta": "ata-control-1",
+        "numeroContratoEmpenho": "0001",
+        "anoContrato": 2026,
+        "sequencialContrato": 1,
+        "processo": "90001/2026",
+        "orgaoEntidade": {"cnpj": "12345678000199", "razaoSocial": "Orgao de Exemplo"},
+        "unidadeOrgao": {"codigoUnidade": "980921"},
+        "objetoContrato": "Contrato de cadeiras",
+        "dataAssinatura": "2026-09-15",
+        "dataPublicacaoPncp": "2026-09-15T10:00:00",
+        "dataVigenciaInicio": "2026-09-15",
+        "dataVigenciaFim": "2027-09-15",
+        "valorInicial": 1000,
+        "valorGlobal": 1000,
+        "valorAcumulado": 800,
+        "frutoAdesao": False,
+        "niFornecedor": "00000000000191",
+        "nomeRazaoSocialFornecedor": "Empresa Contratada Ltda.",
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "data": [row],
+                "totalRegistros": 1,
+                "totalPaginas": 1,
+                "numeroPagina": 1,
+                "paginasRestantes": 0,
+            },
+            request=request,
+        )
+
+    raw_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    connector = PNCPConnector(
+        _settings(), http_client=AsyncHTTPClient(_settings(), client=raw_client)
+    )
+    result = await connector.discover_contracts(
+        ProcurementFilters(
+            start_date=date(2026, 9, 15), end_date=date(2026, 9, 16), agency_cnpj="12345678000199"
+        )
+    )
+
+    assert result.availability is DataAvailability.AVAILABLE
+    assert result.data[0].contract_number == "0001"
+    assert result.data[0].agency_name == "Orgao de Exemplo"
+    assert result.data[0].procurement_control_number == "12345678000199-1-000001/2026"
+    assert result.data[0].price_registry_control_number == "ata-control-1"
+    assert result.data[0].supplier_cnpj == "00000000000191"
+    assert result.data[0].global_value == 1000
+    assert result.data[0].source_record_ref == result.raw_records[0].record_key
+    await raw_client.aclose()
+
+
+@pytest.mark.parametrize("discovery_kind", ["publication", "update"])
+@pytest.mark.parametrize("valid_count,invalid_count", [(1, 1), (0, 2), (1, 0), (0, 0)])
+async def test_contract_discovery_retains_rows_but_rejects_incomplete_coverage(
+    discovery_kind, valid_count, invalid_count
+):
+    valid = {
+        "numeroControlePNCP": "00000000000191-2-000001/2026",
+        "numeroContratoEmpenho": "0001",
+        "anoContrato": 2026,
+        "sequencialContrato": 1,
+        "orgaoEntidade": {"cnpj": "00000000000191"},
+    }
+    rows = [valid] * valid_count + [{"numeroContratoEmpenho": "sem-identidade"}] * invalid_count
+    payload = {
+        "data": rows,
+        "totalRegistros": len(rows),
+        "totalPaginas": 1,
+        "numeroPagina": 1,
+        "paginasRestantes": 0,
+    }
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda request: httpx.Response(200, json=payload))
+    ) as raw_client:
+        connector = PNCPConnector(
+            _settings(), http_client=AsyncHTTPClient(_settings(), client=raw_client)
+        )
+        result = await connector.discover_contracts(
+            ProcurementFilters(
+                start_date=date(2026, 9, 15),
+                end_date=date(2026, 9, 16),
+                agency_cnpj="00000000000191",
+                discovery_kind=discovery_kind,
+            )
+        )
+    assert len(result.data) == valid_count
+    assert result.raw_records[0].raw_payload == payload
+    assert result.partial is bool(invalid_count)
+    assert result.is_complete is (not bool(invalid_count))
+    assert not result.pagination.truncated  # invalid source rows are not a collection limit
+    assert result.availability is (
+        DataAvailability.AVAILABLE
+        if valid_count
+        else DataAvailability.TEMPORARY_ERROR
+        if invalid_count
+        else DataAvailability.EMPTY
+    )
+    if valid_count:
+        assert result.data[0].source_record_ref == result.raw_records[0].record_key
+    if invalid_count:
+        assert f"{invalid_count} contract row(s) without official identity" in result.diagnostic
+
+
+@pytest.mark.asyncio
+async def test_pncp_contract_terms_are_mapped() -> None:
+    from app.connectors.base import RawContract
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "data": [
+                    {
+                        "sequencialTermoContrato": 1,
+                        "numeroTermoContrato": "1",
+                        "tipoTermoContratoNome": "Aditivo de valor",
+                        "dataAssinatura": "2026-09-15",
+                        "dataPublicacaoPncp": "2026-09-15T10:00:00",
+                        "valorAcrescido": 100,
+                        "dataVigenciaFim": "2027-09-15",
+                        "objetoTermoContrato": "Acrescimo",
+                    }
+                ],
+                "totalPaginas": 1,
+            },
+            request=request,
+        )
+
+    raw_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    connector = PNCPConnector(
+        _settings(), http_client=AsyncHTTPClient(_settings(), client=raw_client)
+    )
+    result = await connector.fetch_contract_terms(
+        RawContract(
+            source="pncp",
+            external_id="contract-control-1",
+            agency_cnpj="12345678000199",
+            year=2026,
+            sequence=1,
+        )
+    )
+
+    assert result.availability is DataAvailability.AVAILABLE
+    assert result.data[0].term_type == "Aditivo de valor"
+    assert result.data[0].value_delta == 100
+    await raw_client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_pncp_unexpected_json_is_not_empty() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"error": "maintenance"}, request=request)
+
+    raw_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    connector = PNCPConnector(
+        _settings(), http_client=AsyncHTTPClient(_settings(), client=raw_client)
+    )
+    try:
+        result = await connector.discover_procurements(
+            ProcurementFilters(start_date=date(2026, 1, 1), end_date=date(2026, 1, 2))
+        )
+    finally:
+        await connector.aclose()
+
+    assert result.availability is DataAvailability.TEMPORARY_ERROR
+    assert result.data == []
+    assert "contract" in (result.diagnostic or "")
+
+
+@pytest.mark.asyncio
+async def test_pncp_repeated_detail_page_is_bounded() -> None:
+    row = {"numeroItem": 1, "descricao": "Item"}
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(200, json=[row] * 50, request=request)
+
+    raw_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    connector = PNCPConnector(
+        _settings(), http_client=AsyncHTTPClient(_settings(), client=raw_client)
+    )
+    try:
+        result = await asyncio.wait_for(
+            connector.fetch_items("12345678000199-1-000001/2026"), timeout=5
+        )
+    finally:
+        await connector.aclose()
+
+    assert calls == 2
+    assert result.availability is DataAvailability.AVAILABLE
+    assert result.partial is True
+    assert len(result.data) == 50
+    assert "partial" in (result.diagnostic or "")
+
+
+@pytest.mark.asyncio
+async def test_pncp_empty_object_with_200_is_contract_error() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={}, request=request)
+
+    raw_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    connector = PNCPConnector(
+        _settings(), http_client=AsyncHTTPClient(_settings(), client=raw_client)
+    )
+    try:
+        result = await connector.discover_procurements(
+            ProcurementFilters(start_date=date(2026, 1, 1), end_date=date(2026, 1, 2))
+        )
+    finally:
+        await connector.aclose()
+
+    assert result.availability is DataAvailability.TEMPORARY_ERROR

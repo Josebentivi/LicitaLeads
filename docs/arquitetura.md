@@ -3,7 +3,7 @@
 ## Visão em camadas
 
 ```text
-PNCP / Compras.gov.br
+PNCP / Compras.gov.br / pagamentos federais, municipais e importações
         |
         v
 app/connectors          descoberta e coleta (DTOs + payload bruto)
@@ -52,6 +52,22 @@ app/api / app/web / app/cli / app/jobs  apresentacao e operacao
    `Lead`.
 9. Contadores e diagnósticos por fonte são persistidos no `CrawlRun`; uma fonte
    que falha não descarta os registros válidos das demais.
+
+As rotas de atas, contratos e pagamentos têm entidades e persistência próprias.
+Empenho, pagamento, contrato e termo não são fundidos em um único valor. Em
+coletas com continuação, `CollectionBatch` congela filtros e período, enquanto
+`CollectionWorkItem` conserva respostas recebidas e registros pendentes. A
+confirmação do trabalho e a gravação dos fatos compartilham transação e fencing.
+O scheduler retoma apenas lotes agendados limitados; falhas e cancelamentos
+exigem ação explícita.
+
+Para licitações, atas e contratos, estados de sincronização e comprovações
+prospectivas permitem reaproveitar somente operações cobertas por versões e
+evidências válidas. Revisões periódicas reconsultam a janela configurada. A
+fila de IA é independente da extração: grava a solicitação com o documento e
+executa chamadas fora da transação, com lease e conferência da versão antes de
+aplicar o resultado. Os fluxos são detalhados em [coletas incrementais](coletas_incrementais.md)
+e [fila de IA](fila_ia.md).
 
 ## Componentes
 
@@ -102,6 +118,7 @@ duas instâncias não executam o mesmo job ao mesmo tempo; a segunda pula.
 - SQLAlchemy assíncrono (aiosqlite por padrão; PostgreSQL via `DATABASE_URL`).
 - SQLite usa `foreign_keys=ON`, `busy_timeout=30000`, `synchronous=NORMAL` e
   `journal_mode=WAL`.
-- Timestamps são armazenados em UTC e exibidos em `America/Sao_Paulo`.
+- Timestamps são armazenados em UTC; a exibição operacional usa o fuso
+  configurado em `TIMEZONE`, cujo valor de exemplo é `America/Sao_Paulo`.
 - O banco é único por instância: nunca rode duas instâncias contra o mesmo
   arquivo SQLite (especialmente em pastas sincronizadas).

@@ -1,0 +1,22 @@
+{% extends "base.html" %}
+{% block title %}Documentos da coleta · LicitaLead Monitor{% endblock %}
+{% block content %}
+<div class="page-heading"><div><p class="eyebrow">Coletas</p><h1>Documentos da coleta</h1><p class="hint">{{ run.id }} · {{ run.status_label }}</p></div><a href="/crawls" class="button secondary">Voltar às coletas</a></div>
+<section class="panel">
+  <p>Esta ação tenta novamente apenas os documentos com falha deste lote que já podem receber nova tentativa. Não repete a busca de processos, não altera o estado do agendador e não força arquivos inativos ou tentativas esgotadas.</p>
+  {% if legacy_scope %}<p class="alert warning">Esta coleta antiga não registrou os IDs do lote processado. São mostrados somente os documentos atualmente vinculados às respostas oficiais desta coleta; outras falhas não são incluídas automaticamente.</p>{% endif %}
+  {% if processing_busy %}<p class="alert warning">Já existe uma coleta ou processamento de documentos em andamento. Aguarde sua conclusão.</p>{% endif %}
+  <p><strong>{{ eligible_count }}</strong> documento(s) elegível(is) agora. Limite: {{ max_attempts }} tentativas de processamento por documento. As tentativas curtas de download ficam dentro de cada processamento.</p>
+  <form class="document-retry-actions" method="post" action="/crawls/{{ run.id }}/retry-documents"><button type="submit"{% if not eligible_count or processing_busy %} disabled{% endif %}>Reprocessar documentos com falha</button></form>
+  <p class="hint">A próxima tentativa indica quando o arquivo fica elegível, não um horário garantido de execução. Se a automação estiver pausada, esta ação manual continua disponível.</p>
+</section>
+<section class="panel table-wrap"><table>
+  <thead><tr><th>Arquivo</th><th>Situação</th><th>Tentativas</th><th>Próxima tentativa</th><th>Diagnóstico</th></tr></thead>
+  <tbody>{% for document in documents %}<tr>
+    <td>{{ document.title }}</td>
+    <td>{% if not document.active %}Inativo{% elif document.status == 'failed' %}{{ 'Falha de download' if 'DocumentDownloadError' in document.error else 'Falha de processamento' }}{% elif document.status == 'extracted' %}Analisado{% elif document.status == 'ocr_required' %}Requer OCR{% elif document.status == 'unsupported' %}Formato não suportado{% else %}Pendente{% endif %}{% if document.eligible %}<small>Elegível agora</small>{% endif %}</td>
+    <td>{{ document.attempts }}/{{ max_attempts }}{% if document.attempts >= max_attempts %}<small>Limite atingido; requer revisão</small>{% endif %}</td>
+    <td>{{ document.next_attempt }}</td><td>{{ document.error or 'Nenhuma falha registrada.' }}</td>
+  </tr>{% else %}<tr><td colspan="5" class="empty">Nenhum documento identificado neste lote.</td></tr>{% endfor %}</tbody>
+</table></section>
+{% endblock %}

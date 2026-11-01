@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from uuid import UUID
 
-from sqlalchemy import Select, exists, select
+from sqlalchemy import exists, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -20,6 +20,7 @@ from app.models import (
 )
 from app.models.enums import DeadlineStatus, LeadStatus, ProcurementEventType
 from app.repositories.base import BaseRepository, Page
+from app.services.participation_integrity import lead_current
 
 
 class LeadRepository(BaseRepository[Lead]):
@@ -54,7 +55,7 @@ class LeadRepository(BaseRepository[Lead]):
         created_from: datetime | None = None,
         created_to: datetime | None = None,
     ) -> Page[Lead]:
-        statement: Select[tuple[Lead]] = select(Lead)
+        statement = select(Lead).where(lead_current())
         if event_type is not None:
             statement = statement.join(Lead.triggering_event).where(
                 ProcurementEvent.event_type == event_type

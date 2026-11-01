@@ -7,7 +7,16 @@ import logging
 from datetime import UTC, datetime
 from typing import Any
 
-_REDACTED_KEYS = {"authorization", "api_key", "token", "password", "secret"}
+_REDACTED_KEYS = {
+    "authorization",
+    "api_key",
+    "token",
+    "password",
+    "secret",
+    "chave-api-dados",
+    "cookie",
+    "x-api-key",
+}
 
 
 def _redact(value: Any) -> Any:
@@ -39,8 +48,12 @@ class JsonFormatter(logging.Formatter):
         return json.dumps(payload, ensure_ascii=False, default=str)
 
 
-def configure_logging(level: int = logging.INFO) -> None:
+def configure_logging(level: int | str = logging.INFO) -> None:
     """Configure the root logger exactly once."""
     handler = logging.StreamHandler()
     handler.setFormatter(JsonFormatter())
     logging.basicConfig(level=level, handlers=[handler], force=True)
+    # Transport/driver debug records can contain SQL values, document text or
+    # credentials. Application debug diagnostics use sanitized context instead.
+    for name in ("sqlalchemy", "sqlalchemy.engine", "aiosqlite", "httpx", "httpcore"):
+        logging.getLogger(name).setLevel(logging.WARNING)

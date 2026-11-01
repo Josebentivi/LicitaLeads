@@ -1,0 +1,21 @@
+{% macro monetary_values(values) %}
+<dl class="cell-list">{% for value in values %}<div>
+  <dt>{{ value.kind_label }} · {{ value.scope_label }}</dt>
+  <dd>{{ value.amount_display }}{% if value.verification_status != 'confirmed' %} <span class="badge">Divergência — revisar</span>{% endif %}{% if not value.is_current %} <span class="badge">Histórico</span>{% endif %}</dd>
+  <dd><a href="{{ value.evidence_url }}">Fonte do valor{% if value.evidence_page %}, página {{ value.evidence_page }}{% endif %}</a></dd>
+</div>{% endfor %}</dl>
+{% endmacro %}
+
+{% macro participant_table(rows, origin_renderer) %}
+<div class="table-wrap"><table class="detail-table participant-table">
+  <thead><tr><th>Empresa</th><th>Item / lote</th><th>Papel</th><th>Valores</th><th>Situação</th><th>Confiança</th><th>Evidência</th><th>Origem</th></tr></thead>
+  <tbody>{% for participant in rows %}<tr>
+    <td><strong>{{ participant.company_name }}</strong><small>CNPJ {{ participant.cnpj }}</small>{% if participant.verification_reason %}<small>{{ participant.verification_reason }}</small>{% endif %}{% if participant.website %}<small><a href="{{ participant.website }}" target="_blank" rel="noopener">{{ participant.domain or participant.website }}</a></small>{% endif %}</td>
+    <td>{% if participant.monetary_values %}{% for scope in participant.monetary_values|map(attribute='scope_label')|unique %}<div>{{ scope }}</div>{% endfor %}{% else %}{{ participant.item_number }}{% endif %}</td>
+    <td>{{ participant.role }}</td>
+    <td>{% if participant.monetary_values %}{{ monetary_values(participant.monetary_values) }}{% else %}<dl class="cell-list"><div><dt>Proposta</dt><dd>{{ participant.proposal_value }}</dd></div><div><dt>Final</dt><dd>{{ participant.final_value }}</dd></div></dl>{% endif %}</td>
+    <td><span class="badge">{{ participant.status }}</span></td><td>{{ participant.confidence }}</td>
+    <td>{% if participant.evidence_url %}<a href="{{ participant.evidence_url }}">Abrir evidência</a>{% else %}Não informado{% endif %}</td><td>{{ origin_renderer(participant.origin) }}</td>
+  </tr>{% endfor %}</tbody>
+</table></div>
+{% endmacro %}

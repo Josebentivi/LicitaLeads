@@ -32,6 +32,7 @@ from app.models import (
     ParticipantStatus,
     Procurement,
     ProcurementSource,
+    SourceRecord,
 )
 from app.services.ingestion import IngestionPipeline, PipelineRequest
 
@@ -191,6 +192,43 @@ class MultiRecordConnector(StaticConnector):
     async def fetch_results(self, external_id: str) -> ConnectorResult[list[RawResult]]:
         del external_id
         return _result([], DataAvailability.NOT_PUBLISHED, source=self.name, operation="results")
+
+
+class PerRecordSourceConnector(MultiRecordConnector):
+    """Discovery returns one source record per item; detail is unavailable."""
+
+    async def discover_procurements(
+        self, filters: ProcurementFilters
+    ) -> ConnectorResult[list[RawProcurement]]:
+        assert filters.uf == "MA"
+        raw_records = [
+            RawSourceRecord.build(
+                source=self.name,
+                endpoint=f"https://{self.name}.official.test/page/{index}",
+                request_parameters={"pagina": index},
+                raw_payload={"records": [item.external_id]},
+                http_status=200,
+                collected_at=COLLECTED_AT,
+            )
+            for index, item in enumerate(self.records.values(), start=1)
+        ]
+        data = [
+            item.model_copy(update={"source_record_ref": record.record_key})
+            for item, record in zip(self.records.values(), raw_records, strict=True)
+        ]
+        return ConnectorResult(
+            data=data,
+            availability=DataAvailability.AVAILABLE,
+            source_urls=[record.endpoint for record in raw_records],
+            raw_records=raw_records,
+            collected_at=COLLECTED_AT,
+        )
+
+    async def fetch_procurement(
+        self, external_id: str
+    ) -> ConnectorResult[RawProcurementDetail | None]:
+        del external_id
+        return _result(None, DataAvailability.NOT_SUPPORTED, source=self.name, operation="detail")
 
 
 def _winner_results(external_id: str) -> list[RawResult]:
@@ -405,6 +443,42 @@ async def test_pipeline_isolates_record_failure_and_keeps_crawling(
 
 
 @pytest.mark.asyncio
+async def test_pipeline_links_each_record_to_its_own_source_page(
+    database: DatabaseContext,
+) -> None:
+    """Without detail data, provenance must fall back to the record's own page."""
+
+    first = _procurement("pncp", CONTROL_NUMBER)
+    second_control = "00000000000191-1-000002/2026"
+    second = _procurement("pncp", second_control).model_copy(
+        update={"pncp_control_number": second_control}
+    )
+    connector = PerRecordSourceConnector("pncp", [first, second])
+    pipeline = IngestionPipeline(
+        session_factory=database.sessions,
+        connectors={"pncp": connector},
+    )
+
+    summary = await pipeline.run(
+        PipelineRequest(connector="pncp", uf="MA", process_documents=False)
+    )
+
+    assert summary.status is CrawlRunStatus.COMPLETED
+    async with database.sessions() as session:
+        links = list((await session.scalars(select(ProcurementSource))).all())
+        source_records = {item.id: item for item in await session.scalars(select(SourceRecord))}
+
+    assert len(links) == 2
+    endpoints = {
+        link.external_id: source_records[link.source_record_id].endpoint
+        for link in links
+        if link.source_record_id is not None
+    }
+    assert endpoints[first.external_id].endswith("/1")
+    assert endpoints[second.external_id].endswith("/2")
+
+
+@pytest.mark.asyncio
 async def test_same_pncp_control_number_merges_sources_without_merging_provenance(
     database: DatabaseContext,
 ) -> None:
@@ -573,3 +647,38 @@ async def test_pipeline_stops_between_records_when_cancelled(
     assert summary.status is CrawlRunStatus.CANCELLED
     assert summary.records_found == 1
     assert summary.records_created == 0
+
+
+@pytest.mark.asyncio
+async def test_cancelled_result_retracts_existing_award(database: DatabaseContext) -> None:
+    raw = _procurement("pncp", CONTROL_NUMBER)
+    awarded = RawResult(
+        source="pncp",
+        source_url="https://pncp.official.test/result",
+        external_id="result-1",
+        procurement_external_id=raw.external_id,
+        item_number="1",
+        supplier_cnpj="00000000000191",
+        supplier_name="Empresa Vencedora Ltda.",
+        person_type="PJ",
+        role="awarded",
+        result_status="homologado",
+        total_value=Decimal("100.00"),
+    )
+    cancelled = awarded.model_copy(update={"is_cancelled": True, "result_status": "cancelado"})
+    connector = StaticConnector("pncp", raw, results=[awarded])
+    pipeline = IngestionPipeline(
+        session_factory=database.sessions,
+        connectors={"pncp": connector},
+    )
+    request = PipelineRequest(connector="pncp", uf="MA", process_documents=False)
+
+    await pipeline.run(request)
+    connector.results = [cancelled]
+    await pipeline.run(request)
+
+    async with database.sessions() as session:
+        participant = await session.scalar(select(Participant))
+
+    assert participant is not None
+    assert participant.status_code is ParticipantStatus.CANCELLED

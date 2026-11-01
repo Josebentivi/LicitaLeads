@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from "_participant_values.html" import participant_table %}
 {% macro origin_details(origin) %}
 <details class="technical-details">
   <summary>Ver origem técnica</summary>
@@ -35,6 +36,7 @@
     <div><dt>Controle PNCP</dt><dd>{{ procurement.pncp_control_number }}</dd></div>
     <div><dt>Local</dt><dd>{{ procurement.location }}</dd></div>
     <div><dt>Situação</dt><dd>{{ procurement.status }}</dd></div>
+    <div><dt>Fase inferida</dt><dd>{{ procurement.phase }}</dd></div>
     <div><dt>Valor estimado</dt><dd>{{ procurement.estimated_value }}</dd></div>
   </dl>
   {% if procurement.dates %}
@@ -91,17 +93,10 @@
 
 <section class="panel procurement-section">
   <h2>Participantes confirmados</h2>
-  {% if participants %}
-  <div class="table-wrap"><table class="detail-table participant-table">
-    <thead><tr><th>Empresa</th><th>Item</th><th>Papel</th><th>Valores</th><th>Situação</th><th>Confiança</th><th>Evidência</th><th>Origem</th></tr></thead>
-    <tbody>{% for participant in participants %}<tr>
-      <td><strong>{{ participant.company_name }}</strong><small>CNPJ {{ participant.cnpj }}</small>{% if participant.website %}<small><a href="{{ participant.website }}" target="_blank" rel="noopener">{{ participant.domain or participant.website }}</a></small>{% endif %}</td><td>{{ participant.item_number }}</td><td>{{ participant.role }}</td>
-      <td><dl class="cell-list"><div><dt>Proposta</dt><dd>{{ participant.proposal_value }}</dd></div><div><dt>Final</dt><dd>{{ participant.final_value }}</dd></div></dl></td>
-      <td><span class="badge">{{ participant.status }}</span></td><td>{{ participant.confidence }}</td>
-      <td>{% if participant.evidence_url %}<a href="{{ participant.evidence_url }}">Abrir evidência</a>{% else %}Não informado{% endif %}</td><td>{{ origin_details(participant.origin) }}</td>
-    </tr>{% endfor %}</tbody>
-  </table></div>
-  {% else %}<p class="empty">Nenhum participante confirmado por evidência oficial.</p>{% endif %}
+  {% if monetary_reviews %}<details><summary>Valores documentais para revisão · {{ monetary_reviews|length }}</summary>{% for review in monetary_reviews %}<p><a href="/api/documents/{{ review.document_id }}/view">Abrir documento armazenado</a></p><ul>{% for diagnostic in review.diagnostics %}<li>{{ diagnostic }}</li>{% endfor %}</ul>{% endfor %}</details>{% endif %}
+  {% if participants %}{{ participant_table(participants, origin_details) }}{% else %}<p class="empty">Nenhum participante confirmado por evidência oficial.</p>{% endif %}
+  {% if participant_candidates %}<details><summary>Referências para revisão · {{ participant_candidates|length }}</summary><p class="hint">Estas referências não comprovam participação e não compõem os indicadores atuais.</p>{{ participant_table(participant_candidates, origin_details) }}</details>{% endif %}
+  {% if include_history %}{% if historical_participants %}<details><summary>Participações históricas ou invalidadas · {{ historical_participants|length }}</summary>{{ participant_table(historical_participants, origin_details) }}</details>{% endif %}{% else %}<p><a href="{{ request.url.include_query_params(include_history='true') }}">Mostrar histórico e registros invalidados</a></p>{% endif %}
 </section>
 
 <section class="panel procurement-section">
@@ -132,4 +127,5 @@
   </table></div>
   {% else %}<p class="empty">Nenhum evento detectado.</p>{% endif %}
 </section>
+<div hx-get="/history/procurement/{{ procurement.id }}" hx-trigger="load" hx-swap="outerHTML"><p class="hint">Carregando histórico de alterações…</p></div>
 {% endblock %}

@@ -194,6 +194,8 @@ def participant_status_code(role: str | None, status: str | None) -> Participant
     """
 
     normalized = _strip_accents(status or "").lower()
+    if any(token in normalized for token in ("cancel", "revog", "anulad", "exclu")):
+        return ParticipantStatus.CANCELLED
     if "inabilit" in normalized or "ineligible" in normalized:
         return ParticipantStatus.INELIGIBLE
     if "desclassific" in normalized or "disqualified" in normalized:

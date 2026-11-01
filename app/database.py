@@ -2,13 +2,18 @@
 
 from __future__ import annotations
 
+import asyncio
+import os
+import sqlite3
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
+from weakref import WeakKeyDictionary, WeakValueDictionary
 
 from sqlalchemy import event, text
 from sqlalchemy.engine import Engine
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -18,6 +23,7 @@ from sqlalchemy.ext.asyncio import (
 
 from app.config import get_settings
 from app.models import Base
+from app.services.write_admission import ApplicationSession
 
 
 def normalize_async_database_url(database_url: str) -> str:
@@ -69,7 +75,7 @@ def create_database_engine(database_url: str, *, echo: bool = False) -> AsyncEng
 
     async_url = normalize_async_database_url(database_url)
     _ensure_sqlite_parent(async_url)
-    kwargs: dict[str, Any] = {"echo": echo, "pool_pre_ping": True}
+    kwargs: dict[str, Any] = {"echo": echo, "pool_pre_ping": True, "hide_parameters": True}
     if async_url.startswith("sqlite"):
         kwargs["connect_args"] = {"timeout": 30, "check_same_thread": False}
     created_engine = create_async_engine(async_url, **kwargs)
@@ -84,13 +90,68 @@ def create_session_factory(engine: AsyncEngine) -> async_sessionmaker[AsyncSessi
     return async_sessionmaker(
         bind=engine,
         class_=AsyncSession,
+        sync_session_class=ApplicationSession,
         autoflush=False,
         expire_on_commit=False,
     )
 
 
+_write_queues: WeakKeyDictionary[
+    asyncio.AbstractEventLoop, WeakValueDictionary[str, asyncio.Lock]
+] = WeakKeyDictionary()
+
+
+@asynccontextmanager
+async def write_session(
+    sessions: async_sessionmaker[AsyncSession],
+) -> AsyncIterator[AsyncSession]:
+    """Queue SQLite writers before opening a connection; readers keep using WAL.
+
+    BEGIN IMMEDIATE also obtains the inter-process writer lock before any reads.
+    Only admission is retried: the transaction body is never replayed, and callers
+    still validate their maintenance gate, lease generation and cancellation.
+    """
+    bind = getattr(sessions, "kw", {}).get("bind")
+    if not isinstance(bind, AsyncEngine) or bind.dialect.name != "sqlite":
+        async with sessions() as session, session.begin():
+            yield session
+        return
+    database = bind.url.database
+    key = (
+        os.path.normcase(str(Path(database).resolve()))
+        if database and database != ":memory:"
+        else f"memory:{id(bind)}"
+    )
+    queues = _write_queues.setdefault(asyncio.get_running_loop(), WeakValueDictionary())
+    queue = queues.get(key)
+    if queue is None:
+        queue = asyncio.Lock()
+        queues[key] = queue
+    async with queue:
+        for attempt in range(3):
+            async with sessions() as session:
+                try:
+                    await session.execute(text("BEGIN IMMEDIATE"))
+                except OperationalError as exc:
+                    code = getattr(exc.orig, "sqlite_errorcode", 0) or 0
+                    if (
+                        code & 255 not in {sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED}
+                        or attempt == 2
+                    ):
+                        raise
+                else:
+                    try:
+                        yield session
+                        await session.commit()
+                    except BaseException:
+                        await session.rollback()
+                        raise
+                    return
+            await asyncio.sleep(0.1 * (attempt + 1))
+
+
 settings = get_settings()
-engine = create_database_engine(settings.database_url, echo=settings.app_env == "development")
+engine = create_database_engine(settings.database_url)
 async_session_factory = create_session_factory(engine)
 
 

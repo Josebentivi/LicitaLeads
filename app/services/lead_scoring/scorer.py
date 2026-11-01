@@ -48,6 +48,9 @@ _HIGH_RELEVANCE = {
     "INTENT_TO_APPEAL",
     "APPEAL_SUBMITTED",
     "COUNTERARGUMENT_OPENED",
+    "DILIGENCE_REQUESTED",
+    "DOCUMENTATION_REQUESTED",
+    "NEGOTIATION_REQUESTED",
 }
 
 
@@ -135,6 +138,8 @@ class LeadScorer:
             return 15
         if event in {
             "SESSION_SUSPENDED",
+            "SESSION_OPENED",
+            "BEST_OFFER_DECLARED",
             "QUALIFIED",
             "PROPOSAL_ACCEPTED",
             "PARTICIPATION_DETECTED",

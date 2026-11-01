@@ -1,0 +1,120 @@
+{
+  "at_local": "2026-10-30T13:05:22.483272-05:00",
+  "changes": {
+    "effective_period_days": 30,
+    "eligible_units": {
+      "pncp": 364,
+      "compras_gov": 36
+    },
+    "discovery_limit_per_source": 2000,
+    "pages_for_full_headers": {
+      "pncp": 40,
+      "compras_gov": 4
+    },
+    "migration_required": false
+  },
+  "backup": {
+    "path": "C:\\Users\\jjben\\AppData\\Local\\LicitaLeads\\data\\backups\\20261030T172956Z-2aa904a7828b469a97fac6bd30dd9256.sqlite3",
+    "backend": "sqlite",
+    "database_id": "ad0256f47591869e9a2ebca73a9b4541e4e3a6c17d0be8a2069352f87f19c6ee",
+    "revision": "0024_llm_queue",
+    "sha256": "8f3a3bc03659f38da3723f9c869dc51fc83911d340d7060e1531802ca30d18e8",
+    "maintenance_owner": null
+  },
+  "validation": {
+    "unique_tests": 956,
+    "initial_failures": [
+      [
+        "tests.integration.test_document_processing",
+        "test_extraction_runs_off_the_event_loop"
+      ]
+    ],
+    "retry_file_tests": 10,
+    "retry_file_failures": 0,
+    "unresolved": []
+  },
+  "checks": {
+    "ruff": "passed",
+    "format": "passed",
+    "mypy": "passed (133 app files)",
+    "coverage": 86.15192680898254,
+    "no_migration": true
+  },
+  "stored_responses": {
+    "mapped_rows": {
+      "item": 10807,
+      "unit": 1202,
+      "adhesion": 372
+    },
+    "validation_errors": {},
+    "responses": 2984,
+    "read_only": true,
+    "network_requests": 0
+  },
+  "application": {
+    "at": "2026-10-30T18:04:10.308859+00:00",
+    "scheduler_paused": false,
+    "scheduler_heartbeat_age": 14.145168,
+    "crawl_count": 78,
+    "crawl_history_unchanged": true,
+    "cancelled_llm_preserved": true,
+    "archive_failure_preserved": true,
+    "next_collection": "manual or regular schedule; no corrective collection started"
+  },
+  "smoke": {
+    "at": "2026-10-30T18:03:41.394455+00:00",
+    "endpoints": [
+      {
+        "path": "/health",
+        "status": 200,
+        "seconds": 0.003,
+        "bytes": 108
+      },
+      {
+        "path": "/atas",
+        "status": 200,
+        "seconds": 0.144,
+        "bytes": 89020
+      },
+      {
+        "path": "/crawls",
+        "status": 200,
+        "seconds": 0.32,
+        "bytes": 779480
+      },
+      {
+        "path": "/crawls/progress",
+        "status": 200,
+        "seconds": 0.182,
+        "bytes": 3088
+      },
+      {
+        "path": "/crawls/table",
+        "status": 200,
+        "seconds": 0.094,
+        "bytes": 766920
+      },
+      {
+        "path": "/api/crawls?page_size=20",
+        "status": 200,
+        "seconds": 0.08,
+        "bytes": 1824572
+      },
+      {
+        "path": "/settings",
+        "status": 200,
+        "seconds": 0.149,
+        "bytes": 16623
+      },
+      {
+        "path": "/static/app.css",
+        "status": 200,
+        "seconds": 0.133,
+        "bytes": 25246
+      }
+    ]
+  },
+  "source_history_hash": "d45deb361f3699ba05a6e489fa1eb1eca07d61346e827c3fe11596fec63663e7",
+  "validation_directory": "C:\\Users\\jjben\\AppData\\Local\\Temp\\LicitaLeads-arp-validation-pvo7rt_j",
+  "artifact_directory": "C:\\Users\\jjben\\AppData\\Local\\Temp\\LicitaLeads-arp-corrections-eflpa156"
+}

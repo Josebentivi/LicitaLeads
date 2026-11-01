@@ -1,0 +1,8 @@
+{
+  "provenance": "Synthetic values reproducing documented Compras.gov.br ARP response shapes; not a live-source certification.",
+  "numeric_code": {"numeroItem": "1", "codigoPdm": 13768, "descricaoItem": "Cadeira sintética"},
+  "empty": {"resultado": [], "totalRegistros": 0, "totalPaginas": 0},
+  "incomplete": {"resultado": [{"numeroItem": "1", "codigoPdm": 13768}], "totalRegistros": 2, "totalPaginas": 2, "paginasRestantes": 1},
+  "duplicates": [{"numeroItem": "1", "codigoPdm": 13768}, {"numeroItem": "1", "codigoPdm": 13768}],
+  "child_update": [{"numeroItem": "1", "codigoPdm": 13768}, {"numeroItem": "1", "codigoPdm": 24680}]
+}

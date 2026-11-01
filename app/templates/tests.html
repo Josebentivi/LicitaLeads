@@ -1,0 +1,50 @@
+{% extends "base.html" %}
+{% block title %}Testes da aplicação - LicitaLead Monitor{% endblock %}
+{% block content %}
+<div class="page-heading">
+  <div>
+    <p class="eyebrow">Sistema</p>
+    <h1>Testes da aplicação</h1>
+    <p class="hint page-description">Execute o diagnóstico rápido, que não altera os dados coletados, ou a suíte completa de testes em um banco temporário.</p>
+  </div>
+  {% include "_test_actions.html" %}
+</div>
+
+{% if request.query_params.get("status") == "busy" %}
+<div class="alert warning"><strong>Já existe uma execução em andamento.</strong> Aguarde a conclusão antes de iniciar outra.</div>
+{% elif request.query_params.get("status") == "invalid" %}
+<div class="alert error"><strong>Modo de teste inválido.</strong> Use o diagnóstico rápido ou a suíte completa.</div>
+{% endif %}
+
+{% if not pytest_available %}
+<div class="alert warning">
+  <strong>Suíte completa indisponível neste ambiente.</strong>
+  Instale as dependências de desenvolvimento com <code>iniciar.bat --dev</code> e reinicie a aplicação.
+  O diagnóstico rápido continua disponível.
+</div>
+{% endif %}
+
+<section class="panel">
+  {% set run_labels = {'completed':'concluída', 'completed_with_pending':'com pendências', 'failed':'falhou', 'cancelled':'cancelada', 'warning':'aviso'} %}
+  {% if reports_by_mode %}<p class="hint">Últimos resultados separados: {% for mode, previous in reports_by_mode.items() %}{{ 'Diagnóstico' if mode == 'quick' else 'Suíte completa' }}: {% if previous %}{{ previous.finished_at.strftime('%d/%m/%Y %H:%M %z') }} ({{ run_labels.get(previous.status, previous.status) }}){% else %}indisponível{% endif %}. {% endfor %}</p>{% endif %}
+  <div class="section-heading">
+    <div><h2>Resultado</h2><p class="hint">O último relatório também fica em <code>{{ report_path }}</code>.</p></div>
+  </div>
+  {% include "_test_status.html" %}
+</section>
+
+<section class="panel">
+  <div class="section-heading">
+    <div><h2>O que é verificado</h2><p class="hint">O diagnóstico rápido verifica a operação local; a suíte completa valida fluxos locais com banco temporário e fontes simuladas.</p></div>
+  </div>
+  <div class="grid-cards">
+    <article class="card"><h3>Ambiente e banco</h3><p class="hint">Python 3.12, diretórios, arquivos obrigatórios, conexão SQLite/PostgreSQL e revisão Alembic.</p></article>
+    <article class="card"><h3>Páginas e API</h3><p class="hint">GET nas páginas operacionais, endpoints REST, OpenAPI e validação de parâmetros.</p></article>
+    <article class="card"><h3>Segurança</h3><p class="hint">Headers, TrustedHost, CSP e bloqueio de formulário cross-origin.</p></article>
+    <article class="card"><h3>Domínio</h3><p class="hint">CNPJ, prazos explícitos, detector de eventos e regra de negação.</p></article>
+    <article class="card"><h3>Fontes e scheduler</h3><p class="hint">Catálogo municipal, matriz de capacidades, pausa, leases e coletas presas.</p></article>
+    <article class="card"><h3>Suíte completa</h3><p class="hint">Testes Python, navegador, OCR real, API e scheduler separados, Ruff, formatação e mypy. Etapas sequenciais com banco e armazenamento temporários.</p></article>
+  </div>
+  <p class="hint">As jornadas usam fontes simuladas. Integrações oficiais e provedores pagos ficam não verificados. A matriz de jornadas documenta o alcance, sem afirmar cobertura integral. Prepare o navegador com <code>prepare-test-browser</code>; OCR requer Tesseract com português. Relatórios por execução são preservados ao lado do último relatório.</p>
+</section>
+{% endblock %}

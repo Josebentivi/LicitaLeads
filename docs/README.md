@@ -17,6 +17,9 @@ comportamento que o sistema não implemente.
 | [Configuração](configuracao.md) | Variáveis de ambiente e valores padrão |
 | [Segurança](seguranca.md) | Downloads, arquivos ZIP, segredos e privacidade |
 | [Operação](operacao.md) | Banco, migrations, testes, lint e troubleshooting |
+| [Coletas incrementais](coletas_incrementais.md) | Cobertura, versões, continuidade e histórico |
+| [Fila de IA](fila_ia.md) | Análises assíncronas, limites, custos e retentativas |
+| [Testes locais](testes_locais.md) | Etapas da suíte, preparação e alcance da validação |
 
 ## Documentos de referência
 
@@ -29,6 +32,12 @@ comportamento que o sistema não implemente.
 Relatórios de auditoria de contratos são gravados como
 `source_audit_AAAA-MM-DD.md` pelo comando `audit-sources`; divergências exigem
 revisão humana e não alteram a matriz automaticamente.
+
+Arquivos datados de auditoria, diagnóstico e `evidencias/` são registros
+históricos da execução indicada, não uma descrição garantida do estado atual.
+Para o comportamento vigente, consulte os guias acima e o código. O
+[plano de implementação](plano_de_implementacao.md) também registra decisões
+históricas; não substitui a documentação operacional atual.
 
 ## Regras que valem para toda a documentação
 

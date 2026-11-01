@@ -3,10 +3,17 @@
 {% block title %}Lead · LicitaLead Monitor{% endblock %}
 {% block content %}
 <p><a href="/leads">← Leads</a></p>
-<div class="page-heading"><div><p class="eyebrow">Score {{ lead.score }}/100{{ info_tip('Nota de 0 a 100: urgência do prazo, força da evidência, relevância jurídica do evento, contatos corporativos e valor estimado, menos penalidades.') }}</p><h1>{% if lead.cnpj %}<a href="/empresas/{{ lead.cnpj }}">{{ lead.company_name or 'Empresa não confirmada' }}</a>{% else %}{{ lead.company_name or 'Empresa não confirmada' }}{% endif %}</h1><p>{{ lead.cnpj or 'CNPJ não disponível' }}{% if lead.cnpj %} · <a href="/empresas/{{ lead.cnpj }}">ver empresa</a>{% endif %}</p></div><span class="badge">{{ lead.lead_status }}</span></div>
+<div class="page-heading"><div><p class="eyebrow">Score {{ lead.score }}/100{{ info_tip('Pontuação versionada de 0 a 100. A versão 2.0 prioriza urgência e prova; o detalhamento está na visão completa da empresa.') }}</p><h1>{% if lead.cnpj %}<a href="/empresas/{{ lead.cnpj }}">{{ lead.company_name or 'Empresa não confirmada' }}</a>{% else %}{{ lead.company_name or 'Empresa não confirmada' }}{% endif %}</h1><p>{{ lead.cnpj or 'CNPJ não disponível' }}{% if lead.cnpj %} · <a href="/empresas/{{ lead.cnpj }}">Visão completa da empresa</a>{% endif %}</p></div><span class="badge">{{ lead.lead_status }}</span></div>
+<section class="panel"><h2>Origem e prazo</h2>
+  <div class="facts">
+    <div><dt>Processo de origem</dt><dd><a href="/procurements/{{ lead.procurement_id }}">Abrir contratação</a></dd></div>
+    <div><dt>Evento</dt><dd>{{ lead.triggering_event_id }}</dd></div>
+    <div><dt>Prazo</dt><dd>{% if deadline %}{{ deadline.when }} — {{ deadline.status }} — {{ deadline.type }}{% else %}Sem prazo vinculado{% endif %}</dd></div>
+  </div>
+</section>
 <section class="panel"><h2>Oportunidade</h2><p>{{ lead.reason_summary or 'Motivo requer revisão manual.' }}</p><p><strong>Ação recomendada:</strong> {{ lead.recommended_action or 'Revisar evidências.' }}</p></section>
 <section class="panel"><h2>Contatos corporativos</h2><div class="table-wrap"><table><thead><tr><th>Tipo</th><th>Contato</th><th>Status</th><th>Origem</th></tr></thead>
-<tbody>{% for contact in contacts %}<tr><td>{{ contact.contact_type }}</td><td>{{ contact.value }}</td><td>{{ contact.status }}</td><td>{% if contact.source_url %}<a href="{{ contact.source_url }}" target="_blank" rel="noopener">Abrir origem</a>{% else %}—{% endif %}</td></tr>{% else %}<tr><td colspan="4" class="empty">Nenhum contato corporativo registrado para esta empresa.</td></tr>{% endfor %}</tbody></table></div></section>
+<tbody>{% for contact in contacts %}<tr><td>{{ contact.contact_type }}</td><td>{% if contact.contact_type_key == 'email' %}<a href="mailto:{{ contact.value }}">{{ contact.value }}</a>{% elif contact.contact_type_key in ('phone', 'whatsapp') %}<a href="tel:{{ contact.value }}">{{ contact.value }}</a>{% else %}{{ contact.value }}{% endif %}</td><td>{{ contact.status }}</td><td>{% if contact.source_url %}<a href="{{ contact.source_url }}" target="_blank" rel="noopener">Abrir origem</a>{% else %}—{% endif %}</td></tr>{% else %}<tr><td colspan="4" class="empty">Nenhum contato corporativo registrado para esta empresa.</td></tr>{% endfor %}</tbody></table></div></section>
 <section class="panel"><h2>Cronologia</h2><div class="relevant-dates">
   <span><strong>Adicionado em</strong>{{ lead.created_at }}</span>
   <span><strong>Atualizado em</strong>{{ lead.updated_at }}</span>
@@ -14,5 +21,25 @@
   {% if draft %}<span><strong>Rascunho gerado em</strong>{{ lead.draft_created_at }}</span>{% endif %}
 </div>{% if not reviews %}<p class="hint">Nenhuma revisão registrada. Mudanças de status feitas fora do fluxo de revisão não geram evento.</p>{% endif %}</section>
 <section class="panel"><h2>Rastreabilidade</h2>{% for evidence in evidences %}<article class="evidence"><blockquote>{{ evidence.text_excerpt }}</blockquote><a href="/api/evidence/{{ evidence.id }}">Abrir evidência{% if evidence.page_number %}, página {{ evidence.page_number }}{% endif %}</a></article>{% else %}<p class="empty">Nenhuma evidência vinculada.</p>{% endfor %}</section>
-<section class="panel"><h2>Rascunho</h2>{% if draft %}<h3>{{ draft.subject }}</h3><pre class="draft">{{ draft.message }}</pre>{% else %}<button hx-post="/api/leads/{{ lead.id }}/generate-outreach" hx-vals='{"channel":"email","force_regenerate":false}' hx-headers='{"Content-Type":"application/json"}' hx-swap="none">Gerar rascunho</button><p class="hint">Nenhuma mensagem será enviada.</p>{% endif %}</section>
+<section class="panel"><h2>Revisão humana</h2>
+  <form method="post" action="/leads/{{ lead.id }}/review" class="filters">
+    <label>Decisão <select name="decision" required><option value="">Selecione</option><option value="approved">Aprovar</option><option value="rejected">Rejeitar</option><option value="needs_changes">Solicitar ajustes</option></select></label>
+    <label>Revisor <input name="reviewer" required maxlength="255" placeholder="Seu nome"></label>
+    <label>Observações <input name="notes" maxlength="4000" placeholder="Opcional"></label>
+    <button type="submit">Registrar revisão</button>
+  </form>
+</section>
+<section class="panel" id="rascunho">
+  <h2>Rascunho</h2>
+  {% if integrity_notice %}<p role="alert">{{ integrity_notice }}</p>{% endif %}
+  {% if draft_error %}<p class="error" role="alert">{{ draft_error }}</p>{% endif %}
+  {% if draft %}
+    <h3>{{ draft.subject }}</h3><pre class="draft">{{ draft.message }}</pre>
+  {% elif not integrity_notice %}
+    <form method="post" action="/leads/{{ lead.id }}/draft">
+      <button type="submit">Gerar rascunho</button>
+      <p class="hint">Nenhuma mensagem será enviada.</p>
+    </form>
+  {% endif %}
+</section>
 {% endblock %}

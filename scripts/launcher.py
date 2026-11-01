@@ -35,6 +35,8 @@ LAUNCHER_PATH = Path(__file__).resolve()
 SCHEDULER_LOG = REPO_ROOT / "data" / "scheduler.log"
 SCHEDULER_PID = REPO_ROOT / "data" / "scheduler.pid"
 PYTHON_DOWNLOAD_URL = "https://www.python.org/downloads/windows/"
+TESSERACT_PACKAGE_ID = "UB-Mannheim.TesseractOCR"
+TESSERACT_FALLBACK_PATHS = (Path(r"C:\Program Files\Tesseract-OCR\tesseract.exe"),)
 JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x2000
 JOB_OBJECT_EXTENDED_LIMIT_INFORMATION = 9
 CLOUD_SYNC_MARKERS = ("My Drive", "Meu Drive", "Google Drive", "OneDrive")
@@ -45,7 +47,6 @@ import json
 from app.config import get_settings
 
 settings = get_settings()
-settings.ensure_directories()
 print(json.dumps({
     "host": settings.app_host,
     "port": settings.app_port,
@@ -56,21 +57,47 @@ print(json.dumps({
 
 DATABASE_SNIPPET = """\
 import asyncio
+import sqlite3
+from contextlib import closing
 from pathlib import Path
 
 from alembic.config import Config
 from alembic.script import ScriptDirectory
-from sqlalchemy import text
 
-from app.database import engine
+from app.config import get_settings
+
+
+def sqlite_path(url: str) -> Path | None:
+    if not url.startswith("sqlite") or ":memory:" in url:
+        return None
+    fragment = url.split("///", 1)
+    if len(fragment) != 2 or not fragment[1]:
+        return None
+    return Path(fragment[1].split("?", 1)[0])
 
 
 async def check() -> int:
     config = Config(str(Path("alembic.ini")))
     expected = ScriptDirectory.from_config(config).get_current_head()
+    database_url = get_settings().database_url
     try:
-        async with engine.connect() as connection:
-            current = await connection.scalar(text("SELECT version_num FROM alembic_version"))
+        path = sqlite_path(database_url)
+        if path is not None:
+            wal = path.with_name(path.name + "-wal")
+            if wal.exists() and wal.stat().st_size:
+                print("banco com WAL ativo; revisao nao confirmada sem alterar arquivos")
+                return 1
+            uri = path.resolve().as_uri() + "?mode=ro&immutable=1"
+            with closing(sqlite3.connect(uri, uri=True)) as connection:
+                current = connection.execute(
+                    "SELECT version_num FROM alembic_version"
+                ).fetchone()[0]
+        else:
+            from sqlalchemy import text
+            from app.database import engine
+
+            async with engine.connect() as connection:
+                current = await connection.scalar(text("SELECT version_num FROM alembic_version"))
     except Exception as exc:
         print(f"banco inacessivel ({exc.__class__.__name__})")
         return 1
@@ -433,7 +460,13 @@ def _hash_inputs(pyproject: Path, python_version: tuple[int, int, int]) -> str:
     return digest.hexdigest()
 
 
-def _needs_install(state_file: Path, expected_hash: str, *, include_dev: bool = False) -> bool:
+def _needs_install(
+    state_file: Path,
+    expected_hash: str,
+    *,
+    include_dev: bool = False,
+    include_ocr: bool = False,
+) -> bool:
     """Decide whether dependencies must be (re)installed."""
 
     try:
@@ -444,7 +477,10 @@ def _needs_install(state_file: Path, expected_hash: str, *, include_dev: bool = 
         return True
     if state.get("inputs_sha256") != expected_hash:
         return True
-    return bool(state.get("include_dev", False)) != include_dev
+    return (
+        bool(state.get("include_dev", False)) != include_dev
+        or bool(state.get("include_ocr", False)) != include_ocr
+    )
 
 
 def _confirm(question: str, *, input_fn: Callable[[str], str] = input) -> bool:
@@ -569,6 +605,81 @@ def _install_python_with_winget() -> bool:
     return result.returncode == 0
 
 
+def _tesseract_command() -> str | None:
+    """Return the Tesseract executable, including its usual Windows install path."""
+
+    found = shutil.which("tesseract")
+    if found is not None:
+        return found
+    candidates = []
+    program_files = os.environ.get("ProgramFiles")
+    if program_files:
+        candidates.append(Path(program_files) / "Tesseract-OCR" / "tesseract.exe")
+    candidates.extend(TESSERACT_FALLBACK_PATHS)
+    for candidate in candidates:
+        if candidate.is_file():
+            return str(candidate)
+    return None
+
+
+def _register_tesseract_path(command: str) -> None:
+    """Make a freshly installed Tesseract visible to child API/scheduler processes."""
+
+    directory = str(Path(command).parent)
+    current = os.environ.get("PATH", "")
+    if directory.lower() not in {part.lower() for part in current.split(os.pathsep) if part}:
+        os.environ["PATH"] = directory + os.pathsep + current
+
+
+def _install_tesseract_with_winget() -> bool:
+    """Best-effort Tesseract installation through winget."""
+
+    winget = shutil.which("winget")
+    if winget is None:
+        return False
+    print("Instalando o Tesseract via winget (pode solicitar confirmacao do Windows)...")
+    result = subprocess.run(
+        [
+            winget,
+            "install",
+            "--exact",
+            "--id",
+            TESSERACT_PACKAGE_ID,
+            "--source",
+            "winget",
+            "--accept-package-agreements",
+            "--accept-source-agreements",
+        ],
+        check=False,
+    )
+    if result.returncode == 0:
+        command = _tesseract_command()
+        if command is not None:
+            _register_tesseract_path(command)
+            return True
+    return False
+
+
+def _ensure_tesseract(*, interactive: bool) -> str | None:
+    """Find Tesseract or offer to install it when the launcher is interactive."""
+
+    command = _tesseract_command()
+    if command is not None:
+        _register_tesseract_path(command)
+        return command
+    if (
+        interactive
+        and shutil.which("winget") is not None
+        and _confirm("Tesseract nao encontrado. Instalar agora via winget?")
+    ):
+        if _install_tesseract_with_winget():
+            command = _tesseract_command()
+            if command is not None:
+                _register_tesseract_path(command)
+                return command
+    return _tesseract_command()
+
+
 def _ensure_python312() -> int | None:
     """Re-execute under Python 3.12, installing it when necessary.
 
@@ -658,15 +769,23 @@ def _environment_ok(venv_python: Path, *, verbose: bool = False) -> bool:
     return True
 
 
+def _ocr_extra_ok(venv_python: Path) -> bool:
+    """Check that the optional OCR Python dependencies import in the venv."""
+
+    return _run_snippet(venv_python, "import PIL, pytesseract").returncode == 0
+
+
 def _install_dependencies(
     venv_python: Path,
     *,
     include_dev: bool,
+    include_ocr: bool,
     upgrade_pip: bool,
 ) -> None:
     """Install/upgrade the project dependencies inside the virtual environment."""
 
-    target = ".[dev]" if include_dev else "."
+    extras = [name for name, enabled in (("dev", include_dev), ("ocr", include_ocr)) if enabled]
+    target = f".[{','.join(extras)}]" if extras else "."
     environment = os.environ.copy()
     environment["PIP_DISABLE_PIP_VERSION_CHECK"] = "1"
     if upgrade_pip:
@@ -712,13 +831,14 @@ def _install_dependencies(
         )
 
 
-def _save_state(venv_dir: Path, inputs_hash: str, *, include_dev: bool) -> None:
+def _save_state(venv_dir: Path, inputs_hash: str, *, include_dev: bool, include_ocr: bool) -> None:
     """Record the provisioning inputs for the next execution."""
 
     venv_dir.mkdir(parents=True, exist_ok=True)
     payload = {
         "inputs_sha256": inputs_hash,
         "include_dev": include_dev,
+        "include_ocr": include_ocr,
         "saved_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
     }
     _state_file(venv_dir).write_text(json.dumps(payload, indent=2), encoding="utf-8")
@@ -1005,10 +1125,13 @@ def _check_database_revision(venv_python: Path, *, env: Mapping[str, str] | None
         print(f"[--] {detail}")
 
 
-def _run_checks(venv_dir: Path) -> int:
+def _run_checks(venv_dir: Path, *, include_ocr: bool = False) -> int:
     """Diagnose the local environment without changing anything."""
 
     _print_banner()
+    # Imports performed by diagnostic subprocesses must not create repo
+    # bytecode, storage directories, or change SQLite journal settings.
+    os.environ["PYTHONDONTWRITEBYTECODE"] = "1"
     failures = 0
     print(f"Python: {sys.version.split()[0]} ({sys.executable})")
     print(f"Ambiente virtual: {venv_dir}")
@@ -1022,6 +1145,17 @@ def _run_checks(venv_dir: Path) -> int:
     else:
         print("[!!] dependencias ausentes ou desatualizadas: execute o iniciar.bat")
         failures += 1
+    if include_ocr:
+        if _ocr_extra_ok(venv_python):
+            print("[ok] extra OCR instalado")
+        else:
+            print("[!!] extra OCR ausente: execute o iniciar.bat para instalar")
+            failures += 1
+        tesseract = _tesseract_command()
+        if tesseract is None:
+            print("[--] Tesseract nao encontrado no PATH")
+        else:
+            print(f"[ok] Tesseract encontrado em {tesseract}")
     if (REPO_ROOT / ".env").exists():
         print("[ok] .env encontrado")
     else:
@@ -1075,8 +1209,29 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--dev",
+        dest="dev",
         action="store_true",
-        help="instala tambem as dependencias de desenvolvimento",
+        default=True,
+        help="instala as dependencias de desenvolvimento (padrao)",
+    )
+    parser.add_argument(
+        "--no-dev",
+        dest="dev",
+        action="store_false",
+        help="nao instala as dependencias de desenvolvimento",
+    )
+    parser.add_argument(
+        "--ocr",
+        dest="ocr",
+        action="store_true",
+        default=True,
+        help="instala o extra de OCR local (padrao; requer Tesseract)",
+    )
+    parser.add_argument(
+        "--no-ocr",
+        dest="ocr",
+        action="store_false",
+        help="nao instala o extra de OCR local",
     )
     parser.add_argument(
         "--upgrade-pip",
@@ -1110,12 +1265,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     if not venv_dir.is_absolute():
         venv_dir = REPO_ROOT / venv_dir
 
+    if args.check:
+        if sys.version_info[:2] != (3, 12):
+            print("Diagnostico requer Python 3.12; nenhuma instalacao foi iniciada.")
+            return 1
+        return _run_checks(venv_dir, include_ocr=args.ocr)
+
     python_exit = _ensure_python312()
     if python_exit is not None:
         return python_exit
-
-    if args.check:
-        return _run_checks(venv_dir)
 
     _print_banner()
     if not args.venv and venv_dir != REPO_ROOT / ".venv":
@@ -1130,7 +1288,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         needs_install = (
             args.repair
             or args.reinstall
-            or _needs_install(_state_file(venv_dir), inputs_hash, include_dev=args.dev)
+            or _needs_install(
+                _state_file(venv_dir),
+                inputs_hash,
+                include_dev=args.dev,
+                include_ocr=args.ocr,
+            )
+            or (args.ocr and not _ocr_extra_ok(venv_python))
             or not _environment_ok(venv_python)
         )
         if needs_install:
@@ -1138,13 +1302,41 @@ def main(argv: Sequence[str] | None = None) -> int:
             _install_dependencies(
                 venv_python,
                 include_dev=args.dev,
+                include_ocr=args.ocr,
                 upgrade_pip=args.upgrade_pip,
             )
             if not _environment_ok(venv_python, verbose=True):
                 raise LauncherError(
                     "as dependencias foram instaladas, mas a verificacao do ambiente falhou."
                 )
-            _save_state(venv_dir, inputs_hash, include_dev=args.dev)
+            if args.ocr and not _ocr_extra_ok(venv_python):
+                raise LauncherError(
+                    "o extra de OCR foi solicitado, mas PIL/pytesseract nao importam "
+                    "no ambiente virtual. Execute iniciar.bat --reinstall."
+                )
+            _save_state(venv_dir, inputs_hash, include_dev=args.dev, include_ocr=args.ocr)
+
+        if args.ocr:
+            tesseract = _ensure_tesseract(interactive=sys.stdin.isatty())
+            if tesseract is None:
+                print(
+                    "Aviso: o extra de OCR foi instalado, mas o executavel tesseract nao "
+                    "foi encontrado no PATH. Ative OCR_ENABLED somente apos instala-lo."
+                )
+            else:
+                print(f"[ok] Tesseract encontrado em {tesseract}")
+
+        if args.dev:
+            prepared = subprocess.run(
+                [str(venv_python), "-m", "app.cli", "prepare-test-browser"],
+                cwd=REPO_ROOT,
+                check=False,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+            if prepared.returncode:
+                print(
+                    "Aviso: jornadas de navegador pendentes; use prepare-test-browser para preparar o driver."
+                )
 
         env_created = _ensure_env_file()
         if env_created and sys.stdin.isatty():

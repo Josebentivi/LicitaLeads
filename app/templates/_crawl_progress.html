@@ -1,0 +1,89 @@
+<section id="crawl-monitor" class="crawl-monitor" aria-label="Acompanhamento das coletas"
+         hx-get="/crawls/progress" hx-trigger="every {{ 2 if monitor_has_active else 15 }}s" hx-swap="outerHTML">
+  <div class="section-heading">
+    <div><p class="eyebrow">Acompanhamento</p><h2>{{ 'Coletas em andamento' if monitor_has_active else 'Últimas atualizações' }}</h2></div>
+    <small class="hint">Atualização automática a cada {{ 2 if monitor_has_active else 15 }} segundos</small>
+  </div>
+  <p id="crawl-update-error" class="alert warning" role="alert" hidden>Não foi possível atualizar o painel. Os últimos dados foram mantidos; uma nova atualização será tentada automaticamente.</p>
+  <div class="crawl-monitor-grid">
+    {% if llm_status %}
+    <article class="panel crawl-monitor-card" aria-label="Fila independente de IA">
+      <h3>Análise de IA · fila independente</h3>
+      <p>Documentos são gravados sem esperar pela IA. Limite: {{ llm_status.limit_per_hour }} chamadas/hora · {{ 'ativada' if llm_status.enabled else 'desativada' }}.</p>
+      <p>{{ llm_status.pending }} pendentes · {{ llm_status.running }} em andamento · {{ llm_status.succeeded }} concluídas · {{ llm_status.reused }} reutilizadas · {{ llm_status.failed }} falhas · {{ llm_status.cancelled }} canceladas · {{ llm_status.obsolete }} obsoletas.</p>
+      {% if llm_status.blocked %}<p class="alert warning">{{ llm_status.blocked }} análise(s) bloqueada(s) pela configuração do provedor.</p>{% endif %}
+      {% if llm_status.configuration_changed %}<p class="alert warning">{{ llm_status.configuration_changed }} análise(s) precisam de nova tentativa com a configuração atual.</p>{% endif %}
+      {% for diagnostic in llm_status.diagnostics %}<p class="hint">HTTP {{ diagnostic.status_http or '—' }} · código {{ diagnostic.code or diagnostic.type or 'não informado' }} · parâmetro {{ diagnostic.param or '—' }} · requisição {{ diagnostic.request_id or '—' }}</p>{% endfor %}
+      <p>Subtotal conhecido: US$ {{ llm_status.known_cost_usd }}{% if llm_status.unknown_cost_attempts %} · {{ llm_status.unknown_cost_attempts }} tentativa(s) com custo desconhecido{% endif %}.</p>
+      {% if llm_status.pending %}<p class="hint">Próxima liberação pelo limite/tentativas: {{ llm_status.next_request_at }}. O processamento automático respeita a pausa do scheduler.</p>{% endif %}
+      {% for batch in llm_status.batches %}
+      <div><small>{{ batch.label }} · {{ batch.id|string|truncate(13, True, '…') }}{% if batch.cancelled %} · cancelado{% endif %}</small>
+        {% if batch.retry_available %}<form method="post" action="/crawls/llm/{{ batch.id }}/retry"><button type="submit" class="button compact">Tentar IA novamente</button></form>{% endif %}
+        {% if batch.pending and not batch.cancelled %}<form method="post" action="/crawls/llm/{{ batch.id }}/cancel"><button type="submit" class="button secondary compact">Cancelar análises pendentes</button></form>{% endif %}
+      </div>
+      {% endfor %}
+    </article>
+    {% endif %}
+    {% for run in monitored_crawls %}
+    <article class="panel crawl-monitor-card" data-crawl-id="{{ run.id }}" data-crawl-status="{{ run.status }}">
+      <header class="crawl-monitor-heading">
+        <div><h3>{{ run.connector_label }}</h3><span class="hint">{{ run.mode_label }} · {{ run.id|string|truncate(13, True, '…') }}</span></div>
+        <span class="badge status-{{ run.status }}">{{ run.status_label }}</span>
+      </header>
+      <div class="crawl-monitor-stage"><span class="crawl-activity-dot{% if run.active %} active{% endif %}" aria-hidden="true"></span><strong>{{ run.stage_label }}</strong><span class="hint">há {{ run.elapsed }}</span></div>
+      <p class="crawl-monitor-message" role="status" aria-live="polite">{{ run.message }}</p>
+      {% if run.collection %}<p class="hint">{{ run.collection_strategy }} · período {{ run.collection.start_date }} a {{ run.collection.end_date }}</p>{% endif %}
+      {% if run.records_reused is not none %}<p class="hint">{{ run.records_reused }} registro(s) com versão reaproveitada · {{ run.operations_reused }} operação(ões) dispensada(s).</p>{% endif %}
+      {% if run.subject %}<p class="hint crawl-monitor-subject">Em processamento: {{ run.subject }}</p>{% endif %}
+      {% if run.active %}
+        {% if run.percentage is not none %}
+        <progress value="{{ run.processed }}" max="{{ run.total }}" aria-label="Progresso da etapa atual"></progress>
+        <p class="hint">{{ run.processed }} de {{ run.total }} {{ 'documento(s) do lote' if run.stage == 'documents' else 'registro(s)' }} examinado(s) · {{ run.percentage }}% desta etapa</p>
+        {% else %}
+        <progress aria-label="Etapa em andamento, total ainda não confirmado"></progress>
+        <p class="hint">{% if run.stage == 'persisting' %}Aguardando confirmação da gravação.{% elif run.total == 0 %}Nenhum registro nesta etapa.{% else %}Aguardando resposta ou definição do total desta etapa.{% endif %}</p>
+        {% endif %}
+      {% endif %}
+      {% if run.page %}<p class="hint">{{ run.page_label }} {{ run.page }} recebido(a){% if run.total_pages %} · {{ run.total_pages }} no total informado pela fonte{% endif %}</p>{% endif %}
+      {% if run.retry_at and run.active %}<p class="alert warning">Tentativa {{ run.attempt }} de {{ run.max_attempts }}{% if run.retry_seconds %} · nova consulta em {{ run.retry_seconds }} s{% else %} · aguardando nova resposta{% endif %}.</p>{% endif %}
+      <dl class="crawl-monitor-counts">
+        <div><dt>Encontrados</dt><dd>{{ run.records_found }}</dd></div>
+        <div><dt>Examinados</dt><dd>{{ run.examined }}</dd></div>
+        <div><dt>Novos gravados</dt><dd>{{ run.created }}</dd></div>
+        <div><dt>Atualizados</dt><dd>{{ run.updated }}</dd></div>
+        <div><dt>Com falhas</dt><dd>{{ run.failed }}</dd></div>
+      </dl>
+      {% if run.documents_total is not none or run.documents_count %}<p class="hint">Neste lote: {{ run.documents_count }} documento(s) analisado(s) · {{ run.events_count }} evento(s) · {{ run.leads_count }} lead(s).</p>{% endif %}
+      <div class="crawl-monitor-sources">
+        {% for source in run.sources %}<span>{{ source.label }} <span class="badge status-{{ source.status }}">{{ source.status_label }}</span></span>{% endfor %}
+      </div>
+      {% for source in run.sources %}{% if source.headers_received is not none %}
+      <p class="hint"><strong>{{ source.label }}:</strong> {% if source.discovery_total is not none %}{{ source.discovery_total }} no total informado pela fonte · {% endif %}{{ source.headers_received }} cabeçalho(s) recebido(s) nesta execução · {{ source.records_found or 0 }} registro(s) selecionado(s).{% if source.stop_reason %} {{ source.stop_reason }}.{% endif %}</p>
+      {% endif %}{% endfor %}
+      {% for source in run.parallel %}
+      <p class="hint">
+        <strong>{{ source.label }}:</strong>
+        {% if source.http_limit %}{{ source.http_active }}/{{ source.http_limit }} requisições ativas · pico {{ source.http_peak }}{% if run.active %} · {{ source.ready }} resultado(s) aguardando gravação{% endif %}
+        {% if source.detailed_waiting %}
+        {% if run.active %} · {{ source.http_waiting }} aguardando envio ({{ source.http_waiting_rate }} fila/frequência · {{ source.http_waiting_capacity }} capacidade HTTP · {{ source.http_waiting_checkpoint }} validação no banco · {{ source.http_waiting_retry }} nova tentativa){% endif %}
+        · intervalo por operação: até {{ source.interval }} s{% if source.cooldown != '0' %} · pausa da fonte: {{ source.cooldown }} s{% endif %}
+        {% elif source.http_waiting %} · aguardando liberação pela fonte{% endif %}{% endif %}
+        {% if source.download_limit %}{{ source.download_active }}/{{ source.download_limit }} downloads · {{ source.process_active }}/{{ source.process_limit }} processos de extração/OCR{% if run.active %} · {{ source.ready }} resultado(s) aguardando gravação{% endif %}{% endif %}
+      </p>
+      {% endfor %}
+      <p class="hint">Última atividade: {{ run.last_activity }} · Último sinal do coletor: {{ run.last_heartbeat }}</p>
+      {% if run.stale %}<p class="alert warning">Sem sinal recente do coletor. Isso não confirma que a coleta parou; aguarde nova atualização ou consulte o diagnóstico.</p>{% endif %}
+      <details id="crawl-activity-{{ run.id }}" class="crawl-monitor-details">
+        <summary id="crawl-activity-toggle-{{ run.id }}">Atividades recentes{% if run.history %} ({{ run.history|length }}){% endif %}</summary>
+        <ol>{% for activity in run.history %}<li><time datetime="{{ activity.at }}">{{ activity.label }}</time> {{ activity.message }}</li>{% else %}<li>Detalhes de atividade ainda não registrados para esta coleta.</li>{% endfor %}</ol>
+      </details>
+      {% if run.has_document_batch %}<p><a href="/crawls/{{ run.id }}/documents">Arquivos, falhas e próximas tentativas</a></p>{% endif %}
+      {% if run.retry_documents %}<form method="post" action="/crawls/{{ run.id }}/retry-documents"><button type="submit" class="button compact">Reprocessar documentos com falha</button></form>{% endif %}
+      {% if run.llm %}<p class="hint">IA: {{ run.llm.pending }} pendentes · {{ run.llm.succeeded }} concluídas · {{ run.llm.failed }} falhas · US$ {{ run.llm.known_cost_usd }} conhecidos.</p>{% if run.llm.retry_available %}<form method="post" action="/crawls/{{ run.id }}/retry-llm"><button type="submit" class="button compact">Tentar IA novamente</button></form>{% endif %}{% endif %}
+      {% if run.active %}<form method="post" action="/crawls/{{ run.id }}/cancel" data-crawl-cancel><button id="crawl-cancel-{{ run.id }}" class="button secondary compact" type="submit"{% if run.status_label == 'Cancelando' %} disabled{% endif %}>{{ 'Cancelamento solicitado' if run.status_label == 'Cancelando' else 'Encerrar coleta' }}</button></form>{% endif %}
+    </article>
+    {% else %}
+    <div class="panel"><p class="hint">Nenhuma coleta em andamento. O painel detectará novas coletas automaticamente; os resultados anteriores estão no histórico abaixo.</p></div>
+    {% endfor %}
+  </div>
+</section>

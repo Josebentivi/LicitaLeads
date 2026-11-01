@@ -54,6 +54,7 @@ async def _full_graph(database: DatabaseContext):
             object_description="Equipamentos médicos",
             agency_name="Prefeitura de Exemplo",
             agency_cnpj="00000000000191",
+            uasg="980921",
             uf="MA",
             municipality="São Luís",
             estimated_value=Decimal("180000"),
@@ -244,7 +245,7 @@ async def test_procurement_evidence_and_web_pages(
     assert responses[1].json()[0]["item_number"] == "3"
     assert responses[5].json()["document_view_url"].endswith("/view")
     assert "inabilitada" in responses[6].text
-    assert len(responses[8].json()) == 2
+    assert len(responses[8].json()) == 4
 
     procurement_page = responses[11].text
     assert "Pregão eletrônico" in procurement_page
@@ -372,6 +373,82 @@ async def test_lead_filters_review_patch_and_idempotent_outreach(
 
 
 @pytest.mark.asyncio
+async def test_lead_draft_form_creates_and_displays_an_idempotent_draft(
+    api_client: httpx.AsyncClient,
+    database: DatabaseContext,
+) -> None:
+    from bs4 import BeautifulSoup
+
+    ids = await _full_graph(database)
+    before = (await api_client.get(f"/api/leads/{ids.lead}")).json()
+    page = await api_client.get(f"/leads/{ids.lead}")
+    button = BeautifulSoup(page.text, "html.parser").find("button", string="Gerar rascunho")
+    assert button is not None
+    form = button.find_parent("form")
+    assert form is not None and form["method"] == "post"
+    assert form["action"] == f"/leads/{ids.lead}/draft"
+
+    first = await api_client.post(form["action"], data={})
+    repeated = await api_client.post(form["action"], data={})
+    assert first.status_code == repeated.status_code == 303
+    assert first.headers["location"] == f"/leads/{ids.lead}#rascunho"
+    rendered = await api_client.get(first.headers["location"])
+    soup = BeautifulSoup(rendered.text, "html.parser")
+    assert "Certidão exigida não apresentada." in soup.select_one("#rascunho pre.draft").text
+    assert soup.find("button", string="Gerar rascunho") is None
+
+    after = (await api_client.get(f"/api/leads/{ids.lead}")).json()
+    assert len(after["outreach_drafts"]) == 1
+    assert after["outreach_drafts"][0]["sent"] is False
+    assert after["outreach_drafts"][0]["approved"] is False
+    for field in ("lead_status", "score", "reviews"):
+        assert after[field] == before[field]
+
+
+@pytest.mark.asyncio
+async def test_lead_draft_form_shows_missing_source_error_without_creating_draft(
+    api_client: httpx.AsyncClient,
+    database: DatabaseContext,
+) -> None:
+    from bs4 import BeautifulSoup
+
+    ids = await _full_graph(database)
+    async with database.sessions() as session, session.begin():
+        for model, identifier in (
+            (Procurement, ids.procurement),
+            (ProcurementEvent, ids.event),
+            (Evidence, ids.evidence),
+        ):
+            row = await session.get(model, identifier)
+            assert row is not None
+            row.source_url = None
+    response = await api_client.post(f"/leads/{ids.lead}/draft", data={})
+    assert response.status_code == 409
+    soup = BeautifulSoup(response.text, "html.parser")
+    assert "fonte pública rastreável" in soup.select_one("#rascunho [role=alert]").text
+    assert soup.find("button", string="Gerar rascunho") is not None
+    detail = (await api_client.get(f"/api/leads/{ids.lead}")).json()
+    assert detail["outreach_drafts"] == []
+    assert detail["lead_status"] == "new"
+
+
+@pytest.mark.asyncio
+async def test_lead_draft_form_rejects_external_origin_and_missing_lead(
+    api_client: httpx.AsyncClient,
+    database: DatabaseContext,
+) -> None:
+    ids = await _full_graph(database)
+    forbidden = await api_client.post(
+        f"/leads/{ids.lead}/draft", headers={"Origin": "https://external.example"}, data={}
+    )
+    missing = await api_client.post("/leads/00000000-0000-0000-0000-000000000000/draft", data={})
+    assert forbidden.status_code == 403
+    assert missing.status_code == 404
+    detail = (await api_client.get(f"/api/leads/{ids.lead}")).json()
+    assert detail["outreach_drafts"] == []
+
+
+@pytest.mark.asyncio
 async def test_local_file_view_and_rejected_paths(
     api_client: httpx.AsyncClient,
     database: DatabaseContext,
@@ -455,7 +532,9 @@ async def test_crawl_page_localizes_partial_result_and_retries_only_failed_sourc
                 "uf": "MA",
                 "days": 7,
                 "modalities": ["pregao_eletronico"],
+                "agency_cnpj": "12345678000199",
                 "process_documents": True,
+                "contract_details": False,
             },
         )
         session.add(run)
@@ -492,6 +571,8 @@ async def test_crawl_page_localizes_partial_result_and_retries_only_failed_sourc
     assert captured[0].connector == "pncp"
     assert captured[0].uf == "MA"
     assert captured[0].days == 7
+    assert captured[0].agency_cnpj == "12345678000199"
+    assert captured[0].contract_details is False
     assert len(captured) == 2
 
     rejected = await api_client.post(

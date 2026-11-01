@@ -4,3 +4,14 @@
   <span class="info-tip-bubble" role="tooltip">{{ text }}</span>
 </span>
 {%- endmacro -%}
+
+{%- macro pagination_nav(request, page, page_size, total) -%}
+{%- set total_pages = ((total + page_size - 1) // page_size) if page_size else 1 -%}
+{%- if total_pages > 1 -%}
+<nav class="pagination" aria-label="Paginacao">
+  {% if page > 1 %}<a href="{{ request.url.include_query_params(page=page - 1, page_size=page_size) }}">Anterior</a>{% else %}<span>Anterior</span>{% endif %}
+  <span>Pagina {{ page }} de {{ total_pages }} &middot; {{ total }} registro(s)</span>
+  {% if page < total_pages %}<a href="{{ request.url.include_query_params(page=page + 1, page_size=page_size) }}">Proxima</a>{% else %}<span>Proxima</span>{% endif %}
+</nav>
+{%- endif -%}
+{%- endmacro -%}

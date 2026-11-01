@@ -1,5 +1,6 @@
 {% extends "base.html" %}
-{% block title %}Ajuda · LicitaLead Monitor{% endblock %}
+{% block title %}Ajuda · LicitaLead Monitor<section class="panel"><h2>Participantes e valores documentais</h2><p>Os valores identificam empresa, lote/item, natureza da proposta e evidência. Referências a fornecedores de custo não comprovam participação. Custos, garantias e orçamento estimado permanecem separados das propostas e dos resultados finais.</p><p>Referências ambíguas ficam para revisão; atribuições invalidadas permanecem no histórico. Divergências não alimentam indicadores ou novas avaliações, e notas antigas dependem de recálculo explícito. O histórico fica disponível nas telas da contratação e da empresa.</p></section>
+{% endblock %}
 {% block content %}
 <div class="page-heading"><div><p class="eyebrow">Manual de uso</p><h1>Ajuda</h1></div></div>
 <p class="hint">Este manual explica, em linguagem simples, como usar a plataforma no dia a dia. Os ícones <strong>i</strong> espalhados pelas telas também trazem explicações curtas: passe o mouse ou clique neles.</p>
@@ -64,21 +65,30 @@
   <p class="hint">Se um evento aparecer sem empresa identificada, você pode vinculá-lo manualmente a uma empresa que já participa do processo, no detalhe da contratação.</p>
 
   <h3>Empresas</h3>
+  <p><strong>Visão completa da empresa:</strong> ao selecionar um CNPJ, expanda leads, licitações, atas, contratos, pagamentos, eventos, prazos, documentos e contatos. Listas e detalhes carregam na própria tela, com paginação. Informações gerais da contratação aparecem como contexto.</p>
+  <p>Você pode revisar os leads e gerar ou consultar rascunhos nessa página. Novos leads usam a nota 2.0; os antigos conservam a versão até usar <strong>Recalcular pontuação</strong> ou <strong>Recalcular selecionados</strong>. O histórico registra notas e fontes, preservando decisões humanas. Os prazos continuam atualizados.</p>
   <p><strong>Para que serve:</strong> mostra as empresas identificadas e o histórico delas.</p>
   <p><strong>O que fazer aqui:</strong> filtre pelo <strong>período de publicação da contratação</strong> (empresas do período da coleta), por "somente com lead" e por "em processo ativo". Ao abrir uma empresa, você vê as participações comprovadas, os eventos (inabilitação, desclassificação, recursos) e os contatos corporativos, com a origem de cada informação.</p>
 
   <h3>Atas (ARP)</h3>
   <p><strong>Para que serve:</strong> lista as atas de registro de preços publicadas oficialmente.</p>
-  <p><strong>O que fazer aqui:</strong> filtre por órgão, número da ata, CNPJ do fornecedor e vigência. Abra uma ata para ver itens, valores e fornecedores registrados.</p>
+  <p><strong>O que fazer aqui:</strong> em <strong>"Coletar atas agora"</strong>, escolha UF, órgão/unidade e fonte, ou todas as unidades conhecidas e fontes disponíveis. A lista vem das contratações já identificadas e pode não cobrir toda a UF. Escolha os dias e acompanhe em <a href="/crawls">Coletas</a>. Abra uma ata para ver itens, valores, fornecedores e histórico.</p>
+
+  <h3>Contratos e pagamentos</h3>
+  <p>Em <a href="/contratos">Contratos</a>, colete por fonte, CNPJ do órgão e período e confira itens, termos e pagamentos conciliados. Em <a href="/pagamentos">Pagamentos</a>, consulte as fontes municipais ou importe CSV/JSON do portal; confira os erros e a origem. Um contrato não é um pagamento, e um pagamento não conciliado não prova inadimplência.</p>
 
   <h3>Leads</h3>
   <p><strong>Para que serve:</strong> lista as oportunidades geradas para o escritório.</p>
   <p><strong>O que fazer aqui:</strong> filtre por score mínimo, tipo de evento, data e "revisão pendente". Abra um lead para ver o motivo, a evidência (com link para o documento) e os contatos da empresa. Depois, registre sua decisão na revisão e, se quiser, gere um rascunho de mensagem.</p>
   <p class="hint">O lead pode vir de um <strong>evento comprovado</strong> (ex.: inabilitação) ou de uma <strong>participação em processo ativo</strong> comprovada por documento.</p>
+  <p class="hint">A participação, por si só, não indica irregularidade. A data de adição do lead não é necessariamente a data do ato. Confira a empresa, a fonte e o prazo antes de registrar sua revisão.</p>
 
   <h3>Coletas</h3>
   <p><strong>Para que serve:</strong> acompanha as execuções de coleta por fonte.</p>
-  <p><strong>O que fazer aqui:</strong> veja o andamento, encerre uma coleta em andamento ou repita apenas a fonte que falhou. Detalhes na seção <a href="#operacao">Para quem opera as coletas</a>.</p>
+  <p><strong>O que fazer aqui:</strong> veja o andamento e o diagnóstico, encerre uma execução, continue o lote pendente ou repita a coleta ou uma fonte. A fila de IA e o reprocessamento de documentos aparecem separadamente. Detalhes em <a href="#operacao">Para quem opera as coletas</a>.</p>
+
+  <h3>Testes</h3>
+  <p>Em <a href="/testes">Testes</a>, o diagnóstico rápido e a suíte completa têm relatórios separados. A suíte usa banco e arquivos temporários, testa também navegador e OCR quando disponíveis e apresenta verificações pendentes ou falhas. Relatórios antigos ou de outro código não comprovam a versão atual; fontes externas e serviços pagos não são verificados pela suíte offline.</p>
 
   <h3>Fontes e Configurações</h3>
   <p><strong>Fontes:</strong> mostra, de forma auditada, o que cada fonte oficial publica e o que depende de documento.</p>
@@ -87,16 +97,16 @@
 
 <section id="score" class="panel">
   <h2>Como ler o score de um lead</h2>
-  <p>O score vai de 0 a 100 e serve para <strong>priorizar</strong>. Ele soma cinco pontos e desconta o que reduz a confiança:</p>
+  <p>O score vai de 0 a 100 e serve para <strong>priorizar</strong>. Na versão 2.0, soma cinco componentes e desconta as penalidades:</p>
   <div class="table-wrap">
   <table>
     <thead><tr><th>O que entra na conta</th><th>Peso</th><th>Em palavras simples</th></tr></thead>
     <tbody>
       <tr><td>Urgência do prazo</td><td>até 30</td><td>Quanto mais perto o prazo, maior a nota.</td></tr>
-      <tr><td>Força da prova</td><td>até 25</td><td>Confiança da detecção e existência de evidência direta.</td></tr>
-      <tr><td>Relevância jurídica do evento</td><td>até 20</td><td>Inabilitação e recursos pesam mais; homologação pesa menos.</td></tr>
-      <tr><td>Contato corporativo</td><td>até 15</td><td>Ter e-mail ou telefone corporativo aumenta a nota.</td></tr>
-      <tr><td>Valor estimado</td><td>até 10</td><td>Contratações de maior valor ganham pontos.</td></tr>
+      <tr><td>Força da prova</td><td>até 30</td><td>Confiança da detecção e existência de evidência direta.</td></tr>
+      <tr><td>Relevância do evento</td><td>até 25</td><td>Inabilitação e recursos pesam mais; homologação pesa menos.</td></tr>
+      <tr><td>Contato corporativo verificado</td><td>até 5</td><td>Ter e-mail ou telefone corporativo aumenta a nota.</td></tr>
+      <tr><td>Valor individual comprovado da empresa no caso</td><td>até 10</td><td>Valores sem conflito, vinculados ao mesmo processo e, quando exigido, ao item do evento.</td></tr>
     </tbody>
   </table>
   </div>
@@ -111,6 +121,7 @@
     <li><strong>Resultado homologado é o vencedor</strong>, não a lista de participantes. Empresas perdedoras só aparecem quando um documento comprova a participação.</li>
     <li><strong>Sem documento, alguns fatos podem não aparecer</strong> (inabilitação, desclassificação, recursos). A cobertura é parcial e vem sempre com o selo de origem.</li>
     <li><strong>Prazo estimado não substitui a conferência</strong> do edital, da ata, da plataforma oficial e da legislação aplicável.</li>
+    <li><strong>Contato profissional:</strong> a geração de rascunho não autoriza uma abordagem. Confira as regras éticas aplicáveis, inclusive o <a href="https://www.oab.org.br/leisnormas/legislacao/provimentos/205-2021" target="_blank" rel="noopener noreferrer">Provimento 205/2021 da OAB</a> e orientações da seccional.</li>
     <li><strong>PDF escaneado</strong> pode ficar como "OCR necessário" e não gerar fatos até ser processado.</li>
     <li><strong>Valores publicados com erro pela fonte</strong> (por exemplo, negativos) são tratados como "não informado"; o dado original continua guardado para auditoria.</li>
     <li><strong>"Em processo ativo"</strong> considera apenas processos que ainda podem receber propostas e empresas com participação comprovada neles.</li>
@@ -120,13 +131,13 @@
 <section id="faq" class="panel">
   <h2>Perguntas frequentes</h2>
   <h3>Por que a empresa X não aparece?</h3>
-  <p>Porque a plataforma só mostra empresas com <strong>participação comprovada</strong>: resultado oficial ou documento com trecho que comprova. Sem essa prova, a empresa não é exibida — para não inventar informação.</p>
+  <p>A plataforma consolida empresas por CNPJ validado a partir de participações, fornecedores de atas, contratos e pagamentos coletados. A participação comprovada exige resultado oficial ou evidência documental. Empresas identificadas apenas como fornecedoras também podem aparecer, com esse contexto; a ausência de uma empresa pode decorrer da cobertura das fontes ou da falta de identificação estável.</p>
 
   <h3>Por que este lead está como "revisão pendente"?</h3>
   <p>Porque a prova é ambígua ou a empresa não foi confirmada com segurança. Abra a evidência, confira o trecho no documento e registre sua decisão.</p>
 
   <h3>Por que uma coleta ficou "parcial"?</h3>
-  <p>Porque uma fonte falhou e a outra concluiu. Os dados válidos foram preservados. Na tela <a href="/crawls">Coletas</a>, use "Tentar novamente" para repetir só a fonte que falhou.</p>
+  <p>Pode haver limite de registros ou páginas, resposta incompleta ou falha de fonte ou registro. Os dados confirmados são preservados. Confira o diagnóstico em <a href="/crawls">Coletas</a>: "Continuar coleta" retoma pendências do lote; repetir cria outra execução.</p>
 
   <h3>O que significa "falha(s)" em uma coleta?</h3>
   <p>Um registro com problema foi anotado (por exemplo, um dado inválido publicado pela fonte) e a coleta continuou. Os demais registros foram salvos normalmente; os detalhes técnicos ficam disponíveis na tela.</p>
@@ -142,13 +153,14 @@
   <h2>Para quem opera as coletas</h2>
   <p>Esta seção é curta e voltada a quem inicia e acompanha as coletas. O advogado não precisa dela no dia a dia.</p>
   <ul>
-    <li><strong>Iniciar uma coleta:</strong> pelo terminal (<code>python -m app.cli run-pipeline --uf MA --days 7</code> ou <code>python -m app.cli crawl-atas all --days 365</code>) ou pela API (<code>POST /api/crawls/run</code>). A tela <a href="/crawls">Coletas</a> apenas acompanha.</li>
-    <li><strong>Coletas automáticas:</strong> por padrão, o sistema também coleta sozinho (atualização a cada 60 minutos, descoberta a cada 6 horas, documentos a cada 2 horas). Para parar sem desligar o programa, use <strong>"Pausar coletas automáticas"</strong> em Configurações; o botão "Retomar" volta a ativar. Apagar todos os dados pausa as coletas automaticamente para o banco não ser repovoado na hora.</li>
+    <li><strong>Iniciar uma coleta:</strong> no Dashboard, em Atas ou Contratos, pela API (<code>POST /api/crawls/run</code>) ou pela CLI. O formulário de atas começa com até 7 dias, limitado pela janela automática se ela for menor; o comando <code>crawl-atas</code> usa 365 se <code>--days</code> for omitido. A tela <a href="/crawls">Coletas</a> acompanha e oferece ações sobre as execuções.</li>
+    <li><strong>Coletas automáticas:</strong> por padrão, o sistema também coleta sozinho (atualização a cada 60 minutos, descoberta a cada 6 horas, documentos a cada 2 horas). As atas de registro de preços são coletadas ao iniciar o agendador e a cada 24 horas, para órgãos/unidades conhecidos da UF, com janela inicial e de revisão de 30 dias por padrão (segue <code>DEFAULT_LOOKBACK_DAYS</code>, salvo configuração específica de atas); a página <a href="/atas">Atas</a> também permite <strong>"Coletar atas agora"</strong>. Para parar sem desligar o programa, use <strong>"Pausar coletas automáticas"</strong> em Configurações; o botão "Retomar" volta a ativar. Apagar todos os dados pausa as coletas automaticamente para o banco não ser repovoado na hora.</li>
     <li><strong>Encerrar:</strong> uma coleta em andamento pode ser encerrada na própria tela.</li>
-    <li><strong>Repetir:</strong> se uma fonte falhar, o botão "Tentar novamente" refaz somente aquela fonte, com os mesmos filtros. Se a coleta inteira falhou ou foi interrompida (por exemplo, o programa foi fechado), use <strong>"Repetir coleta"</strong> para refazer tudo com os mesmos filtros.</li>
-    <li><strong>Interrompida:</strong> quando o processo é encerrado no meio, a coleta é marcada como falha automaticamente e a trava é liberada; nada válido é perdido.</li>
-    <li><strong>Parcial:</strong> uma fonte falhou e a outra concluiu; nada válido é perdido.</li>
-    <li><strong>Documentos:</strong> são baixados e processados automaticamente após a coleta; também podem ser processados pelo comando <code>python -m app.cli process-documents</code>.</li>
+    <li><strong>Continuar:</strong> retoma o lote e o período congelados, inclusive registros já recebidos. Lotes agendados limitados podem continuar no ciclo automático; falhas e cancelamentos exigem continuação explícita.</li>
+    <li><strong>Repetir:</strong> cria outra execução com os filtros anteriores. Por padrão, reaproveita versões comprovadamente inalteradas; marque <strong>"Reconsultar detalhes já verificados"</strong> para forçar nova consulta. A continuação preserva a opção do lote original.</li>
+    <li><strong>Interrompida ou parcial:</strong> consulte o diagnóstico e as pendências. Limites, falhas ou respostas incompletas podem produzir resultado parcial; registros já confirmados são preservados.</li>
+    <li><strong>Documentos:</strong> são processados após as APIs quando a opção de documentos está ativa, ou pelo comando <code>python -m app.cli process-documents</code>. Arquivos com falha elegíveis podem ser reprocessados no lote, respeitando prazo e limite de tentativas.</li>
+    <li><strong>IA:</strong> quando ativada, analisa trechos em uma fila separada; confira em Coletas pendências, bloqueios e custos conhecidos. Ela não substitui a revisão humana.</li>
     <li><strong>Atualizar campos antigos:</strong> <code>python -m app.cli backfill-fields</code> recupera SRP, amparo legal e rota de contratação de coletas anteriores, sem novo download.</li>
     <li><strong>Cuidado com o reset:</strong> em Configurações, "Apagar todos os dados" remove tudo e não pode ser desfeito.</li>
     <li><strong>Bloqueio por trava antiga:</strong> se o apagamento indicar um job em andamento sem haver trabalho real, use "Liberar travas antigas" na própria tela; travas expiradas ou de coleta inativa são removidas automaticamente antes do apagamento.</li>

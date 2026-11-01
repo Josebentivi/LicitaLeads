@@ -1,0 +1,65 @@
+{% extends "base.html" %}
+{% block title %}Contrato {{ contract.number }}/{{ contract.year }} - LicitaLead Monitor{% endblock %}
+{% block content %}
+<p><a href="/contratos">&larr; Contratos</a></p>
+<header class="procurement-header">
+  <div>
+    <p class="eyebrow">Contrato</p>
+    <h1>Contrato {{ contract.number }}/{{ contract.year }}</h1>
+    <p class="object-description">{{ contract.object_description }}</p>
+  </div>
+  <div class="header-actions">
+    {% if contract.source_url %}<a class="button secondary" href="{{ contract.source_url }}" target="_blank" rel="noopener">Abrir fonte oficial</a>{% endif %}
+  </div>
+</header>
+<section class="procurement-summary" aria-label="Resumo do contrato">
+  <dl class="facts">
+    <div><dt>Orgao</dt><dd>{{ contract.agency }}</dd></div>
+    <div><dt>CNPJ do orgao</dt><dd>{{ contract.agency_cnpj }}</dd></div>
+    <div><dt>Fornecedor</dt><dd>{% if contract.supplier_cnpj %}<a href="/empresas/{{ contract.supplier_cnpj }}">{{ contract.supplier }}</a><small><a href="/empresas/{{ contract.supplier_cnpj }}">Visão completa da empresa</a></small>{% else %}{{ contract.supplier }}{% endif %}</dd></div>
+    <div><dt>CNPJ do fornecedor</dt><dd>{{ contract.supplier_cnpj_label }}</dd></div>
+    <div><dt>Processo</dt><dd>{{ contract.process_number }}</dd></div>
+    <div><dt>Assinatura</dt><dd>{{ contract.signed_at }}</dd></div>
+    <div><dt>Vigencia</dt><dd>{{ contract.valid_from }} a {{ contract.valid_until }}</dd></div>
+    <div><dt>Valor inicial</dt><dd>{{ contract.initial_value }}</dd></div>
+    <div><dt>Valor global</dt><dd>{{ contract.global_value }}</dd></div>
+    <div><dt>Valor acumulado</dt><dd>{{ contract.accumulated_value }}</dd></div>
+    <div><dt>Fruto de adesao</dt><dd>{{ contract.is_adhesion }}</dd></div>
+    <div><dt>Fonte</dt><dd>{{ contract.source }}</dd></div>
+  </dl>
+</section>
+<section class="panel procurement-section">
+  <div class="section-heading"><div><h2>Itens do contrato</h2><p class="hint">Itens publicados pela fonte. Ausencia de itens indica limitacao da API, nao contrato sem objeto.</p></div></div>
+  <div class="table-wrap">
+  <table><thead><tr><th>Item</th><th>Descricao</th><th>Unidade</th><th>Quantidade</th><th>Valor unitario</th><th>Valor total</th><th>Fornecedor</th></tr></thead>
+  <tbody>{% for item in items %}<tr>
+    <td>{{ item.item_number }}</td><td><small>{{ item.description }}</small></td><td>{{ item.unit }}</td>
+    <td>{{ item.quantity }}</td><td>{{ item.unit_value }}</td><td>{{ item.total_value }}</td>
+    <td>{% if item.supplier_cnpj %}<a href="/empresas/{{ item.supplier_cnpj }}">{{ item.supplier_name }}</a>{% else %}{{ item.supplier_name }}{% endif %}</td>
+  </tr>{% else %}<tr><td colspan="7" class="empty">Nenhum item publicado para este contrato.</td></tr>{% endfor %}</tbody></table>
+  </div>
+</section>
+<section class="panel procurement-section">
+  <div class="section-heading"><div><h2>Termos e aditivos</h2><p class="hint">Valores de aditivo/apostilamento nao se somam automaticamente ao valor pago.</p></div></div>
+  <div class="table-wrap">
+  <table><thead><tr><th>Termo</th><th>Tipo</th><th>Assinatura</th><th>Publicacao</th><th>Valor</th><th>Nova vigencia</th><th>Objeto</th><th>Fonte</th></tr></thead>
+  <tbody>{% for term in terms %}<tr>
+    <td>{{ term.term_number }}</td><td>{{ term.term_type }}</td><td>{{ term.signed_at }}</td><td>{{ term.published_at }}</td>
+    <td>{{ term.value_delta }}</td><td>{{ term.new_valid_until }}</td><td><small>{{ term.object_description }}</small></td>
+    <td>{% if term.source_url %}<a href="{{ term.source_url }}" target="_blank" rel="noopener">Abrir</a>{% else %}-{% endif %}</td>
+  </tr>{% else %}<tr><td colspan="8" class="empty">Nenhum termo/aditivo publicado para este contrato.</td></tr>{% endfor %}</tbody></table>
+  </div>
+</section>
+<section class="panel procurement-section">
+  <div class="section-heading"><div><h2>Pagamentos localizados</h2><p class="hint">{{ payment_status }}. Um pagamento nao localizado na fonte consultada nao equivale a inadimplencia.</p></div></div>
+  <dl class="facts"><div><dt>Total pago localizado</dt><dd>{{ paid_value }}</dd></div><div><dt>Saldo nao localizado</dt><dd>{{ balance }}</dd></div></dl>
+  <div class="table-wrap">
+  <table><thead><tr><th>Data</th><th>Valor</th><th>Fase</th><th>Documento</th><th>Orgao</th><th>Conciliacao</th><th>Fonte</th></tr></thead>
+  <tbody>{% for payment in payments %}<tr>
+    <td>{{ payment.date }}</td><td>{{ payment.amount }}</td><td>{{ payment.phase }}</td><td>{{ payment.document_number }}</td>
+    <td>{{ payment.agency }}</td><td>{{ payment.match_status }}</td><td>{{ payment.source }}</td>
+  </tr>{% else %}<tr><td colspan="7" class="empty">Nenhum pagamento localizado para este contrato.</td></tr>{% endfor %}</tbody></table>
+  </div>
+</section>
+<div hx-get="/history/contract/{{ contract.id }}" hx-trigger="load" hx-swap="outerHTML"><p class="hint">Carregando histórico de alterações…</p></div>
+{% endblock %}

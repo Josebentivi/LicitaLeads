@@ -266,3 +266,45 @@ async def test_base_crawl_and_lease_repositories(database: DatabaseContext) -> N
 
         await base.delete(procurement)
         assert await base.get(procurement.id) is None
+
+
+@pytest.mark.asyncio
+async def test_strong_identity_requires_uasg(database: DatabaseContext) -> None:
+    async with database.sessions() as session, session.begin():
+        session.add(
+            Procurement(
+                source="pncp",
+                external_id="strong-1",
+                fingerprint="a" * 64,
+                agency_cnpj="00000000000191",
+                uasg="980921",
+                purchase_number="10",
+                purchase_year=2026,
+                modality="pregao_eletronico",
+                modality_key="pregao_eletronico",
+            )
+        )
+    async with database.sessions() as session:
+        repository = ProcurementRepository(session)
+        assert (
+            await repository.find_by_strong_identity(
+                agency_cnpj="00000000000191",
+                uasg="980921",
+                purchase_number="10",
+                purchase_year=2026,
+                modality="pregao_eletronico",
+            )
+            is not None
+        )
+        assert (
+            await repository.resolve_canonical(
+                source="other",
+                external_id="other-2",
+                agency_cnpj="00000000000191",
+                uasg=None,
+                purchase_number="10",
+                purchase_year=2026,
+                modality="pregao_eletronico",
+            )
+            is None
+        )

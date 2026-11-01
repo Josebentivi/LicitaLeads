@@ -29,6 +29,8 @@ async def list_price_registries(
     registry_status: str | None = Query(None, alias="status"),
     supplier_cnpj: str | None = None,
     valid_on: date | None = None,
+    expiring_within_days: int | None = Query(None, ge=1, le=365),
+    allows_adhesion: bool | None = None,
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, object]:
     """List price registries with their official vigência and provenance."""
@@ -43,6 +45,8 @@ async def list_price_registries(
         status=registry_status,
         supplier_cnpj=normalize_cnpj(supplier_cnpj) if supplier_cnpj else None,
         valid_on=valid_on,
+        expiring_within_days=expiring_within_days,
+        allows_adhesion=allows_adhesion,
     )
     return {
         "items": [model_dict(row) for row in result.items],
@@ -70,6 +74,9 @@ async def get_price_registry(
             }
             for item in registry.items
         ],
+        "units": [model_dict(unit) for unit in registry.units],
+        "commitments": [model_dict(commitment) for commitment in registry.commitments],
+        "adhesions": [model_dict(adhesion) for adhesion in registry.adhesions],
         "procurement": (
             model_dict(registry.procurement) if registry.procurement is not None else None
         ),

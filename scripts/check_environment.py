@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import importlib.util
+import os
 import platform
+import shutil
 import sys
 from pathlib import Path
 
@@ -24,6 +26,13 @@ def main() -> int:
     if Path("Dockerfile").exists() or Path("docker-compose.yml").exists():
         print("ERROR: container files are outside this project's requirements.")
         return 1
+    if os.environ.get("OCR_ENABLED", "").strip().lower() in {"1", "true", "yes", "sim"}:
+        if importlib.util.find_spec("pytesseract") is None:
+            print(
+                "WARNING: OCR_ENABLED=true but pytesseract is not installed (pip install -e '.[ocr]')."
+            )
+        if shutil.which("tesseract") is None:
+            print("WARNING: OCR_ENABLED=true but the tesseract executable was not found in PATH.")
     print("Environment is ready.")
     return 0
 

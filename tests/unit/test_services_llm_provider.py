@@ -41,9 +41,10 @@ async def test_provider_sends_bearer_and_parses_analyses() -> None:
             json={
                 "choices": [
                     {
+                        "finish_reason": "stop",
                         "message": {
                             "content": json.dumps({"analyses": [{"event_type": "INELIGIBLE"}]})
-                        }
+                        },
                     }
                 ]
             },
@@ -60,6 +61,9 @@ async def test_provider_sends_bearer_and_parses_analyses() -> None:
     request = route.calls[0].request
     assert request.headers["authorization"] == "Bearer sk-test"
     assert json.loads(request.content)["model"] == "gpt-5.6-luna"
+    body = json.loads(request.content)
+    assert body["max_completion_tokens"] == 1200
+    assert "max_tokens" not in body and "temperature" not in body
 
 
 @respx.mock

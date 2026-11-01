@@ -9,8 +9,10 @@ from app.schemas.api import (
     EventCompanyLink,
     LeadPatch,
     LeadReviewRequest,
+    MunicipalPaymentRunRequest,
     OutreachRequest,
     Page,
+    PaymentCrawlRequest,
 )
 
 __all__ = [
@@ -22,6 +24,8 @@ __all__ = [
     "EventCompanyLink",
     "LeadPatch",
     "LeadReviewRequest",
+    "MunicipalPaymentRunRequest",
     "OutreachRequest",
     "Page",
+    "PaymentCrawlRequest",
 ]

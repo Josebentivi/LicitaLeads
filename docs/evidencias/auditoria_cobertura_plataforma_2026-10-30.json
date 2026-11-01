@@ -1,0 +1,147 @@
+{
+  "audited_at": "2026-10-30T13:13:10.573332-05:00",
+  "inventory": {
+    "test_files": 107,
+    "offline_cases": 956,
+    "live_cases": 2,
+    "unit_files": 48,
+    "integration_files": 57,
+    "contract_files": 2
+  },
+  "coverage": {
+    "covered_lines": 14979,
+    "num_statements": 16780,
+    "percent_covered": 86.15192680898254,
+    "percent_covered_display": "86",
+    "missing_lines": 1801,
+    "excluded_lines": 107,
+    "percent_statements_covered": 89.26698450536352,
+    "percent_statements_covered_display": "89",
+    "num_branches": 4862,
+    "num_partial_branches": 832,
+    "covered_branches": 3666,
+    "missing_branches": 1196,
+    "percent_branches_covered": 75.40106951871658,
+    "percent_branches_covered_display": "75"
+  },
+  "quick_diagnostics": {
+    "web_gets": 17,
+    "api_gets": 12,
+    "domain_checks": "canonical examples",
+    "optional_live": "procurement discovery, selected municipal/federal payment sources; no ARP/contract flow"
+  },
+  "last_ui_report": {
+    "mode": "full",
+    "finished_at_local": "2026-10-27T16:05:02.151021-05:00",
+    "counts": {
+      "total": 654,
+      "passed": 654,
+      "failed": 0,
+      "skipped": 0
+    },
+    "report_has_code_fingerprint": false
+  },
+  "recent_unexecuted_handlers": [
+    {
+      "file": "G:\\Meu Drive\\Ubuntu\\programas\\LicitaLeads\\app\\api\\routes\\payments.py",
+      "line": 66,
+      "function": "import_payments",
+      "routes": [
+        [
+          "post",
+          "/import"
+        ]
+      ]
+    },
+    {
+      "file": "G:\\Meu Drive\\Ubuntu\\programas\\LicitaLeads\\app\\api\\routes\\payments.py",
+      "line": 101,
+      "function": "crawl_payments",
+      "routes": [
+        [
+          "post",
+          "/crawl"
+        ]
+      ]
+    },
+    {
+      "file": "G:\\Meu Drive\\Ubuntu\\programas\\LicitaLeads\\app\\web.py",
+      "line": 1239,
+      "function": "link_event_company",
+      "routes": [
+        [
+          "post",
+          "/procurements/{procurement_id}/events/{event_id}/link-company"
+        ]
+      ]
+    },
+    {
+      "file": "G:\\Meu Drive\\Ubuntu\\programas\\LicitaLeads\\app\\web.py",
+      "line": 2463,
+      "function": "retry_llm_from_web",
+      "routes": [
+        [
+          "post",
+          "/crawls/{run_id}/retry-llm"
+        ]
+      ]
+    },
+    {
+      "file": "G:\\Meu Drive\\Ubuntu\\programas\\LicitaLeads\\app\\web.py",
+      "line": 2471,
+      "function": "cancel_llm_batch_from_web",
+      "routes": [
+        [
+          "post",
+          "/crawls/llm/{batch_id}/cancel"
+        ]
+      ]
+    },
+    {
+      "file": "G:\\Meu Drive\\Ubuntu\\programas\\LicitaLeads\\app\\web.py",
+      "line": 2486,
+      "function": "retry_llm_batch_from_web",
+      "routes": [
+        [
+          "post",
+          "/crawls/llm/{batch_id}/retry"
+        ]
+      ]
+    },
+    {
+      "file": "G:\\Meu Drive\\Ubuntu\\programas\\LicitaLeads\\app\\web.py",
+      "line": 2549,
+      "function": "retry_documents_from_web",
+      "routes": [
+        [
+          "post",
+          "/crawls/{run_id}/retry-documents"
+        ]
+      ]
+    },
+    {
+      "file": "G:\\Meu Drive\\Ubuntu\\programas\\LicitaLeads\\app\\web.py",
+      "line": 2904,
+      "function": "continue_crawl_from_web",
+      "routes": [
+        [
+          "post",
+          "/crawls/{run_id}/continue"
+        ]
+      ]
+    }
+  ],
+  "limits": [
+    "No browser/JavaScript test harness in repository",
+    "SQLite integration fixtures; no live PostgreSQL execution",
+    "OCR provider test replaces pytesseract; real engine not exercised by that test",
+    "LLM/contact services simulated in offline suite",
+    "Scheduler excluded from coverage; function tests exist",
+    "Full UI runner has fixed 600 second timeout; completion for current full suite was not rerun in this audit"
+  ],
+  "audit_artifacts": "C:\\Users\\jjben\\AppData\\Local\\Temp\\LicitaLeads-platform-test-audit-atzd6oy5",
+  "recent_validation_reference": "docs/evidencias/correcao_atas_automaticas_2026-10-30.json",
+  "code_changed": false,
+  "new_collection_started": false,
+  "paid_provider_called_by_audit": false
+}

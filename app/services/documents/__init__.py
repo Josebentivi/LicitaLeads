@@ -1,6 +1,13 @@
 """Safe document extraction primitives."""
 
 from .extractor import DocumentExtractor
+from .ocr import (
+    DisabledOCRProvider,
+    OCRPage,
+    OCRProvider,
+    TesseractOCRProvider,
+    build_ocr_provider,
+)
 from .types import (
     DocumentChunk,
     DocumentExtraction,
@@ -13,5 +20,10 @@ __all__ = [
     "DocumentExtraction",
     "DocumentExtractionStatus",
     "DocumentExtractor",
+    "DisabledOCRProvider",
+    "OCRPage",
+    "OCRProvider",
+    "TesseractOCRProvider",
+    "build_ocr_provider",
     "ExtractedArchiveMember",
 ]

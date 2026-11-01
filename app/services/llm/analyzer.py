@@ -16,6 +16,11 @@ from app.services.identifiers import (
     normalize_company_name,
 )
 
+_CNPJ_TOKEN = re.compile(
+    r"(?<![A-Z0-9])[A-Z0-9]{2}\.?[A-Z0-9]{3}\.?[A-Z0-9]{3}/?[A-Z0-9]{4}-?[0-9]{2}(?![A-Z0-9])",
+    re.IGNORECASE | re.ASCII,
+)
+
 
 class LLMEvidenceError(ValueError):
     pass
@@ -98,6 +103,12 @@ class EvidenceBoundLLMEventAnalyzer:
         self, text: str, *, pages: dict[int, str] | None = None
     ) -> list[LLMEventAnalysis]:
         raw_items = await self.provider(text, pages)
+        return self.validate(raw_items, text, pages=pages)
+
+    @staticmethod
+    def validate(
+        raw_items: list[dict[str, Any]], text: str, *, pages: dict[int, str] | None = None
+    ) -> list[LLMEventAnalysis]:
         analyses = [LLMEventAnalysis.model_validate(item) for item in raw_items]
         # The programmatic open-process trigger owns this event type; a model
         # must never fabricate it (it has no active-process guard).
@@ -107,10 +118,21 @@ class EvidenceBoundLLMEventAnalyzer:
             if analysis.event_type is not EventType.PARTICIPATION_DETECTED
         ]
         full_text = _quote_key(text)
+        source_names = normalize_company_name(text, strip_legal_suffix=False) or ""
+        # Normalize complete tokens only, never join unrelated text fragments.
+        source_cnpjs = {
+            candidate
+            for match in _CNPJ_TOKEN.finditer(text)
+            if (candidate := normalize_cnpj(match.group())) and is_valid_cnpj(candidate)
+        }
         page_text = {page: _quote_key(value) for page, value in (pages or {}).items()}
+        checked: list[LLMEventAnalysis] = []
         for analysis in analyses:
+            quotes: list[str] = []
             for quote in analysis.evidence_quotes:
                 needle = _quote_key(quote.text)
+                if quote.page is not None and pages is not None and quote.page not in pages:
+                    raise LLMEvidenceError("LLM evidence page is absent from source")
                 haystack = (
                     page_text.get(quote.page, "") if quote.page is not None and pages else full_text
                 )
@@ -119,12 +141,27 @@ class EvidenceBoundLLMEventAnalyzer:
                         "LLM evidence quote is absent from source"
                         + (f" page {quote.page}" if quote.page else "")
                     )
-            canonical_source = re.sub(r"[^A-Z0-9]", "", text.upper())
-            if analysis.company_cnpj and analysis.company_cnpj not in canonical_source:
+                quotes.append(quote.text)
+            quote_text = " ".join(quotes)
+            if analysis.company_cnpj and analysis.company_cnpj not in source_cnpjs:
                 raise LLMEvidenceError("LLM company CNPJ is absent from source")
             if analysis.company_name:
                 normalized_name = normalize_company_name(analysis.company_name)
-                normalized_source = normalize_company_name(text, strip_legal_suffix=False)
-                if normalized_name and normalized_name not in (normalized_source or ""):
+                if normalized_name and normalized_name not in source_names:
                     raise LLMEvidenceError("LLM company name is absent from source")
-        return analyses
+            update: dict[str, Any] = {}
+            if analysis.reason_summary:
+                normalized_reason = _quote_key(analysis.reason_summary)
+                if normalized_reason and normalized_reason not in _quote_key(quote_text):
+                    update["reason_summary"] = None
+            if analysis.item_number and analysis.item_number not in quote_text:
+                update["item_number"] = None
+            if analysis.event_date is not None:
+                candidates = {
+                    analysis.event_date.strftime("%d/%m/%Y"),
+                    analysis.event_date.strftime("%Y-%m-%d"),
+                }
+                if not any(value in quote_text for value in candidates):
+                    update["event_date"] = None
+            checked.append(analysis.model_copy(update=update) if update else analysis)
+        return checked

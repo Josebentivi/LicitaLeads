@@ -1,0 +1,9 @@
+{% macro record_values(record) %}
+<dl class="facts company-facts">
+{% for key,value in record.items() %}{% if value is not none and key | company_visible %}
+<div><dt>{{ key | company_label }}</dt><dd>{% if value is mapping %}{% for name,part in value.items() %}<p>{{ name | company_label }}: {{ part }}</p>{% endfor %}{% elif key == 'source_url' and value | company_safe_url %}<a href="{{ value }}" target="_blank" rel="noopener noreferrer">Abrir fonte oficial</a>{% elif value is boolean %}{{ 'Sim' if value else 'Não' }}{% else %}<span class="company-value">{{ value | company_value(key) }}</span>{% endif %}</dd></div>
+{% endif %}{% endfor %}
+</dl>
+{% if record.source_record_id or record.evidence_id %}<details><summary>Referências de origem</summary><p>Registro de fonte: {{ record.source_record_id or 'Não informado' }} · Evidência: {{ record.evidence_id or 'Não informada' }}</p></details>{% endif %}
+{% if record.kind == 'lead_score_revisions' %}<details><summary>Entradas e fontes da pontuação</summary><pre class="company-excerpt">{{ record.inputs|tojson(indent=2) }}</pre>{% for ref in record.references %}<p>{{ ref.entity_type }} · {{ ref.entity_id }}{% if ref.source_record_id %} · SourceRecord: {{ ref.source_record_id }}{% endif %}{% if ref.evidence_id %} · <a href="/api/evidence/{{ ref.evidence_id }}" target="_blank" rel="noopener">Abrir evidência</a>{% endif %}</p>{% endfor %}</details>{% endif %}
+{% endmacro %}

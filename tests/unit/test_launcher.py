@@ -6,6 +6,8 @@ import importlib.util
 import json
 import os
 import sqlite3
+import sys
+from contextlib import closing
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -40,18 +42,19 @@ def test_hash_inputs_tracks_pyproject_and_python_version(tmp_path: Path) -> None
     assert first != launcher._hash_inputs(pyproject, (3, 12, 0))
 
 
-def test_needs_install_compares_hash_and_dev_extras(tmp_path: Path) -> None:
+def test_needs_install_compares_hash_and_optional_extras(tmp_path: Path) -> None:
     state = tmp_path / ".bootstrap-state.json"
     assert launcher._needs_install(state, "abc")
     state.write_text(json.dumps({"inputs_sha256": "abc"}), encoding="utf-8")
     assert not launcher._needs_install(state, "abc")
     assert launcher._needs_install(state, "other")
     assert launcher._needs_install(state, "abc", include_dev=True)
+    assert launcher._needs_install(state, "abc", include_ocr=True)
     state.write_text(
-        json.dumps({"inputs_sha256": "abc", "include_dev": True}),
+        json.dumps({"inputs_sha256": "abc", "include_dev": True, "include_ocr": True}),
         encoding="utf-8",
     )
-    assert not launcher._needs_install(state, "abc", include_dev=True)
+    assert not launcher._needs_install(state, "abc", include_dev=True, include_ocr=True)
     state.write_text("not-json", encoding="utf-8")
     assert launcher._needs_install(state, "abc")
 
@@ -224,12 +227,19 @@ def test_parse_args_defaults_and_flags() -> None:
     assert not defaults.check
     assert not defaults.no_browser
     assert not defaults.no_scheduler
+    assert defaults.dev
+    assert defaults.ocr
     assert defaults.venv is None
-    flags = launcher._parse_args(["--check", "--no-scheduler", "--dev", "--venv", "C:/tmp/venv"])
+    flags = launcher._parse_args(
+        ["--check", "--no-scheduler", "--no-dev", "--no-ocr", "--venv", "C:/tmp/venv"]
+    )
     assert flags.check
     assert flags.no_scheduler
-    assert flags.dev
+    assert not flags.dev
+    assert not flags.ocr
     assert flags.venv == Path("C:/tmp/venv")
+    explicit = launcher._parse_args(["--dev", "--ocr"])
+    assert explicit.dev and explicit.ocr
 
 
 def test_stop_orphan_scheduler_removes_dead_pidfile(tmp_path: Path, monkeypatch) -> None:
@@ -272,3 +282,102 @@ def test_scheduler_stop_removes_its_own_pidfile(tmp_path: Path, monkeypatch) -> 
     scheduler.stop()
 
     assert not pidfile.exists()
+
+
+def test_ocr_extra_check_runs_import_in_venv(monkeypatch, tmp_path: Path) -> None:
+    commands: list[str] = []
+
+    def fake_snippet(venv_python: Path, snippet: str, **_kwargs: object) -> SimpleNamespace:
+        commands.append(snippet)
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(launcher, "_run_snippet", fake_snippet)
+
+    assert launcher._ocr_extra_ok(tmp_path / "python")
+    assert commands == ["import PIL, pytesseract"]
+
+
+def test_tesseract_lookup_accepts_common_windows_path(monkeypatch, tmp_path: Path) -> None:
+    executable = tmp_path / "Tesseract-OCR" / "tesseract.exe"
+    executable.parent.mkdir()
+    executable.write_text("", encoding="utf-8")
+    monkeypatch.setattr(launcher.shutil, "which", lambda _name: None)
+    monkeypatch.setattr(launcher, "TESSERACT_FALLBACK_PATHS", ())
+    monkeypatch.setenv("ProgramFiles", str(tmp_path))
+
+    assert launcher._tesseract_command() == str(executable)
+
+
+def test_check_does_not_provision_python(monkeypatch, tmp_path, capsys):
+    monkeypatch.setattr(launcher, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(launcher.sys, "version_info", (3, 13, 0))
+    monkeypatch.setattr(launcher, "_default_venv_dir", lambda: tmp_path / "missing-venv")
+    monkeypatch.setattr(
+        launcher,
+        "_ensure_python312",
+        lambda: (_ for _ in ()).throw(AssertionError("installer must not run")),
+    )
+    monkeypatch.chdir(tmp_path)
+    assert launcher.main(["--check"]) == 1
+    assert not list(tmp_path.iterdir())
+    assert "nenhuma instalacao" in capsys.readouterr().out
+
+
+def test_database_diagnostic_does_not_create_wal_sidecars(tmp_path):
+    from alembic.config import Config
+    from alembic.script import ScriptDirectory
+
+    database = tmp_path / "diagnostic.sqlite3"
+    head = ScriptDirectory.from_config(Config("alembic.ini")).get_current_head()
+    with closing(sqlite3.connect(database)) as connection, connection:
+        connection.execute("PRAGMA journal_mode=WAL")
+        connection.execute("CREATE TABLE alembic_version (version_num TEXT)")
+        connection.execute("INSERT INTO alembic_version VALUES (?)", (head,))
+    before = {path.name: path.read_bytes() for path in tmp_path.iterdir()}
+    result = launcher._run_snippet(
+        Path(sys.executable),
+        launcher.DATABASE_SNIPPET,
+        env={
+            "APP_ENV": "test",
+            "DATABASE_URL": f"sqlite:///{database.as_posix()}",
+            "PYTHONDONTWRITEBYTECODE": "1",
+        },
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert {path.name: path.read_bytes() for path in tmp_path.iterdir()} == before
+
+
+def test_database_diagnostic_does_not_open_missing_database(tmp_path):
+    database = tmp_path / "missing-parent" / "missing.sqlite3"
+    result = launcher._run_snippet(
+        Path(sys.executable),
+        launcher.DATABASE_SNIPPET,
+        env={
+            "APP_ENV": "test",
+            "DATABASE_URL": f"sqlite:///{database.as_posix()}",
+            "PYTHONDONTWRITEBYTECODE": "1",
+        },
+    )
+    assert result.returncode == 1
+    assert not database.parent.exists()
+
+
+def test_database_diagnostic_reports_active_wal_without_opening_it(tmp_path):
+    database = tmp_path / "active.sqlite3"
+    with closing(sqlite3.connect(database)) as connection, connection:
+        connection.execute("PRAGMA journal_mode=WAL")
+        connection.execute("CREATE TABLE sentinel (value TEXT)")
+        connection.commit()
+        before = {path.name: path.read_bytes() for path in tmp_path.iterdir()}
+        result = launcher._run_snippet(
+            Path(sys.executable),
+            launcher.DATABASE_SNIPPET,
+            env={
+                "APP_ENV": "test",
+                "DATABASE_URL": f"sqlite:///{database.as_posix()}",
+                "PYTHONDONTWRITEBYTECODE": "1",
+            },
+        )
+        assert result.returncode == 1
+        assert "WAL ativo" in result.stdout
+        assert {path.name: path.read_bytes() for path in tmp_path.iterdir()} == before

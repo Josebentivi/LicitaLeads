@@ -32,7 +32,7 @@ _CNPJ_TOKEN = re.compile(
     r"(?<![A-Z0-9])(?:[A-Z0-9]{2}\.?[A-Z0-9]{3}\.?[A-Z0-9]{3}/?[A-Z0-9]{4}-?\d{2})(?![A-Z0-9])",
     re.I,
 )
-_ITEM = re.compile(r"\b(?:item|lote)\s*(?:n[ºo°.]?\s*)?([A-Z0-9.-]+)", re.I)
+_ITEM = re.compile(r"\bitem\s*(?:n[ºo°.]?\s*)?([A-Z0-9.-]+)", re.I)
 _NAME_BEFORE_CNPJ = re.compile(
     r"(?P<name>[A-ZÀ-Ý][A-ZÀ-Ý0-9 &'().,/\-]{2,120}?)\s*(?:[,;|\-]\s*)?(?:CNPJ(?:/MF)?\s*(?:n[ºo°.]?\s*)?(?:sob\s+o\s+n[ºo°.]?\s*)?[:\-]?)\s*$",
     re.I,
@@ -94,6 +94,51 @@ _EVENT_PATTERNS: tuple[tuple[EventType, re.Pattern[str]], ...] = (
     (EventType.HOMOLOGATED, re.compile(r"\bhomologad[ao]\b", re.I)),
     (EventType.SESSION_SUSPENDED, re.compile(r"\bsess[aã]o\s+(?:foi\s+)?suspensa\b", re.I)),
     (EventType.SESSION_REOPENED, re.compile(r"\bsess[aã]o\s+(?:foi\s+)?reaberta\b", re.I)),
+    (
+        EventType.SESSION_OPENED,
+        re.compile(
+            r"\bsess[a\u00e3]o\s+p[u\u00fa]blica\b[^.\n]{0,80}\b(?:aberta|iniciada)\b"
+            r"|\babertura\s+da\s+sess[a\u00e3]o\b",
+            re.I,
+        ),
+    ),
+    (
+        EventType.BEST_OFFER_DECLARED,
+        re.compile(
+            r"\bdetentor(?:a)?\s+da\s+melhor\s+oferta\b"
+            r"|\bmelhor\s+oferta\s+(?:[e\u00e9]|foi|pertence)\b"
+            r"|\bclassificad[ao]\s+em\s+(?:primeiro|1[\u00ba\u00b0o])\s+lugar\b",
+            re.I,
+        ),
+    ),
+    (
+        EventType.NEGOTIATION_REQUESTED,
+        re.compile(
+            r"\bnegocia[c\u00e7][a\u00e3]o\b[^.\n]{0,120}\b(?:prazo|convoc|solicit|abert)\b"
+            r"|\b(?:convocad[ao]|solicitad[ao])[^.\n]{0,100}\bnegocia",
+            re.I,
+        ),
+    ),
+    (
+        EventType.DILIGENCE_REQUESTED,
+        re.compile(
+            r"\b(?:convocad[ao]|solicitad[ao]|abert[ao]|prazo)\b[^.\n]{0,140}"
+            r"\bdilig[e\u00ea]ncia\b"
+            r"|\bdilig[e\u00ea]ncia\b[^.\n]{0,140}"
+            r"\b(?:convocad[ao]|solicitad[ao]|prazo|comprova)\b",
+            re.I,
+        ),
+    ),
+    (
+        EventType.DOCUMENTATION_REQUESTED,
+        re.compile(
+            r"\b(?:convocad[ao]|solicitad[ao]|prazo)\b[^.\n]{0,140}"
+            r"\b(?:apresenta[c\u00e7][a\u00e3]o|apresentar|envio)\b[^.\n]{0,80}"
+            r"\bdocumentos?\b"
+            r"|\bprazo\s+para\s+apresenta[c\u00e7][a\u00e3]o\s+de\s+documentos?\b",
+            re.I,
+        ),
+    ),
 )
 
 _REASON_PATTERNS: tuple[tuple[ReasonCategory, re.Pattern[str]], ...] = (
@@ -179,12 +224,21 @@ _NEGATED_EVENT = re.compile(
     r"\bsem\s+(?:inabilita[cç][aã]o|desclassifica[cç][aã]o)\b",
     re.I,
 )
+_NEGATED_PARTICIPANT_ROLE = re.compile(
+    r"\bnao\s+(?:(?:foi|sera|restou|e)\s+)?(?:declarad[ao]\s+)?"
+    r"(?:vencedor[a]?|adjudicad[ao]?|inabilitad[ao]?|desclassificad[ao]?)\b"
+)
 _DOCUMENT_PRIORITIES = {
     "ata": 0.94,
     "ata_sessao": 0.96,
+    "ata_de_sessao": 0.96,
+    "relatorio_de_sessao": 0.95,
     "termo_julgamento": 0.95,
+    "termo_de_julgamento": 0.95,
     "julgamento": 0.94,
     "decisao": 0.94,
+    "decisao_recurso": 0.92,
+    "decisao_de_recurso": 0.92,
     "recurso": 0.90,
     "resultado": 0.88,
     "habilitacao": 0.88,
@@ -202,7 +256,7 @@ def _context(text: str, start: int, end: int, radius: int = 280) -> tuple[str, i
 
 
 def _document_base_confidence(document_type: str | None) -> float:
-    value = (document_type or "outro").lower().replace(" ", "_")
+    value = re.sub(r"[^a-z0-9]+", "_", _fold(document_type or "outro")).strip("_")
     if value in {"edital", "termo_de_referencia", "aviso"}:
         return 0.0
     return _DOCUMENT_PRIORITIES.get(value, _DOCUMENT_PRIORITIES["outro"])
@@ -278,19 +332,29 @@ class ParticipantDetector:
         *,
         known_companies: Iterable[CompanyReference] = (),
     ) -> list[DetectedParticipant]:
+        from app.services.event_detection.participation_values import reference_status
+
         base = _document_base_confidence(evidence.document_type)
         if base == 0:
             return []
         companies = list(known_companies)
         candidates: list[DetectedParticipant] = []
         seen: set[tuple[str | None, str, str | None]] = set()
+        reference_cache: dict[str, str] = {}
         for match in _CNPJ_TOKEN.finditer(evidence.text):
             cnpj = normalize_cnpj(match.group())
             if not cnpj or not is_valid_cnpj(cnpj):
                 continue
+            if cnpj not in reference_cache:
+                reference_cache[cnpj] = reference_status(
+                    evidence.text, cnpj, evidence.document_type
+                )
+            reference = reference_cache[cnpj]
+            if reference == "invalidated":
+                continue
             context, context_start = _context(evidence.text, match.start(), match.end(), 180)
             folded = _fold(context)
-            if not re.search(
+            if reference != "confirmed" and not re.search(
                 r"\b(licitante|participante|empresa|fornecedor|vencedor|adjudicad|inabilitad|desclassificad)\b",
                 folded,
             ):
@@ -310,16 +374,23 @@ class ParticipantDetector:
                     else "Empresa não identificada"
                 )
                 external_id = None
+            ambiguous = bool(
+                reference != "confirmed"
+                or _RULE_LANGUAGE.search(folded)
+                or _NEGATED_PARTICIPANT_ROLE.search(folded)
+                or len(_CNPJ_TOKEN.findall(context)) > 1
+            )
             role = ParticipationRole.PARTICIPANT
-            if "vencedor" in folded:
-                role = ParticipationRole.WINNER
-            elif "adjudicad" in folded:
-                role = ParticipationRole.AWARDED
             status = None
-            if "inabilitad" in folded:
-                status = "ineligible"
-            elif "desclassificad" in folded:
-                status = "disqualified"
+            if not ambiguous:
+                if "vencedor" in folded:
+                    role = ParticipationRole.WINNER
+                elif "adjudicad" in folded:
+                    role = ParticipationRole.AWARDED
+                if "inabilitad" in folded:
+                    status = "ineligible"
+                elif "desclassificad" in folded:
+                    status = "disqualified"
             item = _extract_item(context)
             key = (cnpj, role.value, item)
             if key in seen:
@@ -340,7 +411,7 @@ class ParticipantDetector:
                     item_number=item,
                     evidence=local_evidence,
                     confidence=min(1.0, base + 0.04),
-                    requires_manual_review=False,
+                    requires_manual_review=ambiguous,
                     company_external_id=external_id,
                 )
             )

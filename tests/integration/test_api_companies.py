@@ -149,6 +149,10 @@ async def test_company_endpoints_report_auditable_counters(
     assert detail.status_code == 200
     assert detail.json()["company"]["cnpj"] == CNPJ
     assert detail.json()["stats"]["ineligible"] == 0
+    assert detail.json()["stats"]["documented_losses"] == 1
+    assert detail.json()["failure_breakdown"]["documented_losses"] == 1
+    assert detail.json()["failure_breakdown"]["by_event"]["DISQUALIFIED"] == 1
+    assert detail.json()["failure_breakdown"]["by_reason"]["FAILURE_TO_RESPOND"] == 1
 
     assert disqualified.status_code == 200
     assert disqualified.json()["total"] == 1
@@ -183,9 +187,21 @@ async def test_company_pages_render_with_provenance(
     assert listing.status_code == 200
     assert "Empresa Histórica Ltda." in listing.text
     assert detail.status_code == 200
-    assert "Desclassificada" in detail.text
-    assert "Recurso apresentado" in detail.text
-    assert "Ausência de resposta" in detail.text
+    assert "Visão completa da empresa" in detail.text
+    # The new dossier loads lists and details on demand, preserving the same facts.
+    procurements = (await api_client.get(f"/api/companies/{CNPJ}/sections/procurements")).json()
+    events = (await api_client.get(f"/api/companies/{CNPJ}/sections/events")).json()
+    fragments = []
+    for section, items in (("procurements", procurements["items"]), ("events", events["items"])):
+        for item in items:
+            response = await api_client.get(
+                f"/empresas/{CNPJ}/sections/{section}/{item['id']}", headers={"HX-Request": "true"}
+            )
+            assert response.status_code == 200
+            fragments.append(response.text)
+    assert "Desclassificada" in "".join(fragments)
+    assert "Recurso apresentado" in "".join(fragments)
+    assert "Ausência de resposta" in "".join(fragments)
     assert missing.status_code == 404
 
 
@@ -297,6 +313,8 @@ async def test_company_empty_stats_and_invalid_identifiers(
         "awarded": 0,
         "disqualified": 0,
         "ineligible": 0,
+        "documented_losses": 0,
+        "failure_rate": None,
         "last_participation_at": None,
     }
     assert detail.status_code == 200
@@ -531,3 +549,57 @@ async def test_company_period_lead_and_active_filters(
     assert lead_detail.status_code == 200
     assert "+55 98 90000-0000" in lead_detail.text
     assert "/empresas/11222333000181" in lead_detail.text
+
+
+@pytest.mark.asyncio
+async def test_failure_rate_counts_distinct_processes(
+    api_client: httpx.AsyncClient,
+    database: DatabaseContext,
+) -> None:
+    async with database.sessions() as session, session.begin():
+        company = Company(
+            cnpj=CNPJ,
+            legal_name="Empresa Duplicada Ltda.",
+            normalized_name="EMPRESA DUPLICADA",
+            fingerprint="s" * 64,
+        )
+        session.add(company)
+        await session.flush()
+        procurements = []
+        for index in (1, 2):
+            procurement = Procurement(
+                source="pncp",
+                external_id=f"duplicate-{index}",
+                fingerprint=str(index) * 64,
+            )
+            session.add(procurement)
+            procurements.append(procurement)
+        await session.flush()
+        for index, (procurement, status) in enumerate(
+            (
+                (procurements[0], ParticipantStatus.DISQUALIFIED),
+                (procurements[0], ParticipantStatus.INELIGIBLE),
+                (procurements[1], ParticipantStatus.AWARDED),
+            ),
+            start=1,
+        ):
+            session.add(
+                Participant(
+                    procurement_id=procurement.id,
+                    company_id=company.id,
+                    participation_role="participant",
+                    status_code=status,
+                    source="pncp",
+                    fingerprint=chr(96 + index) * 64,
+                )
+            )
+
+    detail = await api_client.get(f"/api/companies/{CNPJ}")
+
+    assert detail.status_code == 200
+    stats = detail.json()["stats"]
+    assert stats["participations"] == 2
+    assert stats["documented_losses"] == 1
+    assert stats["failure_rate"] == 0.5
+    assert stats["disqualified"] == 1
+    assert stats["ineligible"] == 1

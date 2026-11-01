@@ -1,0 +1,16 @@
+<div id="company-summary" hx-get="/empresas/{{ company.cnpj }}/summary" hx-trigger="company-updated from:body" hx-swap="outerHTML">
+<section class="panel" aria-label="Resumo da empresa"><h2>Panorama do acervo</h2><dl class="facts">
+{% for key,label in section_labels.items() %}<div><dt>{{ label }}</dt><dd>{{ overview.counts[key] }}</dd></div>{% endfor %}
+<div><dt>Pendências de revisão</dt><dd>{{ overview.counts.pending_review }}</dd></div>
+<div><dt>Participações comprovadas</dt><dd>{{ overview.participation_stats.participations }}</dd></div>
+<div><dt>Adjudicações/vencedora</dt><dd>{{ overview.participation_stats.awarded }}</dd></div>
+<div><dt>Desclassificações</dt><dd>{{ overview.participation_stats.disqualified }}</dd></div>
+<div><dt>Inabilitações</dt><dd>{{ overview.participation_stats.ineligible }}</dd></div>
+<div><dt>Última participação (publicação)</dt><dd>{{ overview.participation_stats.last_participation_at | company_value('publication_at') if overview.participation_stats.last_participation_at else 'Não informada' }}</dd></div>
+</dl><div class="company-highlights">
+<div><h3>Leads prioritários</h3>{% for lead in overview.priority_leads %}<p>{{ lead.title }} · {{ lead.score }}/100 · versão {{ lead.scoring_version }}</p>{% else %}<p>Nenhum lead disponível no acervo.</p>{% endfor %}</div>
+<div><h3>Prazos próximos</h3>{% for deadline in overview.upcoming_deadlines %}<p>{{ deadline.deadline_type }} · {{ deadline.explicit_deadline_at or deadline.estimated_deadline_at }}{% if not deadline.explicit_deadline_at %} · estimado, confirmar{% endif %}</p>{% else %}<p>Nenhum prazo futuro localizado.</p>{% endfor %}</div>
+<div><h3>Contatos corporativos</h3>{% for contact in overview.contacts %}<p>{{ contact.contact_value }} · {{ contact.status | company_label }}</p>{% else %}<p>Nenhum contato corporativo registrado.</p>{% endfor %}</div>
+</div></section>
+<details class="panel"><summary>Derrotas documentadas · {{ overview.failure_breakdown.documented_losses }}</summary><p class="hint">Processos distintos com evidência; o resultado homologado não publica todos os participantes.</p><dl class="facts">{% for key,amount in overview.failure_breakdown.by_event.items() %}<div><dt>{{ key|company_label }}</dt><dd>{{ amount }}</dd></div>{% endfor %}{% for key,amount in overview.failure_breakdown.by_reason.items() %}<div><dt>{{ key|company_label }}</dt><dd>{{ amount }}</dd></div>{% endfor %}</dl><p>Taxa sobre participações: {% if overview.participation_stats.failure_rate is not none %}{{ (overview.participation_stats.failure_rate*100)|round(1) }}%{% else %}Sem base{% endif %}</p></details>
+</div>

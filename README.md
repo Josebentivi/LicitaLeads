@@ -10,6 +10,9 @@ origem de cada conclusão e nunca inventa participantes, eventos ou prazos.
 
 ## Documentação
 
+- [Coletas incrementais, continuação e histórico de alterações](docs/coletas_incrementais.md)
+- [Fila de IA](docs/fila_ia.md) e [testes locais](docs/testes_locais.md)
+
 A documentação completa está em [`docs/`](docs/README.md):
 
 - [Visão geral](docs/visao_geral.md) — escopo, princípios e limitações.
@@ -23,6 +26,9 @@ A documentação completa está em [`docs/`](docs/README.md):
 - [Operação](docs/operacao.md) — banco, migrations, testes e troubleshooting.
 - [Matriz de fontes](docs/matriz_de_fontes.md) e
   [plano de implementação](docs/plano_de_implementacao.md).
+
+Relatórios datados em `docs/evidencias/` e auditorias são registros históricos;
+consulte os guias operacionais para o comportamento atual.
 
 ## Requisitos
 
@@ -40,12 +46,14 @@ A documentação completa está em [`docs/`](docs/README.md):
    ele ainda não existir.
 3. Dê duplo clique em `iniciar.bat`.
 
-Na primeira execução o launcher cria a `.venv`, instala as dependências, aplica
-as migrations, sobe a API/UI e o scheduler em segundo plano e abre o navegador
-em <http://localhost:8000>. Nas execuções seguintes ele apenas verifica o
-ambiente e sobe a plataforma. Feche a janela do console (ou pressione `Ctrl+C`)
-para encerrar tudo; o scheduler é encerrado junto. Se a aplicação já estiver em
-execução, o launcher apenas abre o navegador.
+Na primeira execução o launcher cria a `.venv`, instala as dependências de
+runtime, desenvolvimento e OCR, aplica as migrations, sobe a API/UI e o
+scheduler em segundo plano e abre o navegador em <http://localhost:8000>. Nas
+execuções seguintes ele apenas verifica o ambiente e sobe a plataforma. Se o
+Tesseract não estiver instalado no Windows, o launcher oferece a instalação via
+`winget`. Feche a janela do console (ou pressione `Ctrl+C`) para encerrar tudo;
+o scheduler é encerrado junto. Se a aplicação já estiver em execução, o launcher
+apenas abre o navegador.
 
 Se o Python 3.12 não estiver disponível, o launcher oferece a instalação via
 `winget`. Se o repositório estiver em uma pasta sincronizada (Google Drive,
@@ -63,8 +71,9 @@ python scripts\launcher.py --check
 ```
 
 `scripts\launcher.py` também aceita `--venv CAMINHO`, `--repair` (recria a
-`.venv`), `--reinstall`, `--dev`, `--upgrade-pip`, `--no-browser` e
-`--no-scheduler`.
+`.venv`), `--reinstall`, `--upgrade-pip`, `--no-browser` e `--no-scheduler`.
+As dependências de desenvolvimento e OCR são instaladas por padrão; use
+`--no-dev` e/ou `--no-ocr` para uma instalação mínima.
 
 ### Instalação manual
 
@@ -72,7 +81,8 @@ python scripts\launcher.py --check
 py -3.12 -m venv .venv
 .venv\Scripts\activate
 python -m pip install --upgrade pip
-pip install -e ".[dev]"
+pip install -e ".[dev,ocr]"
+# O OCR também exige o binário Tesseract no PATH.
 copy .env.example .env
 python scripts/setup.py
 python run.py
@@ -84,7 +94,7 @@ python run.py
 python3.12 -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
-pip install -e '.[dev]'
+pip install -e '.[dev,ocr]'
 cp .env.example .env
 python scripts/setup.py
 python run.py
@@ -110,7 +120,11 @@ Consulte a [matriz de fontes](docs/matriz_de_fontes.md) e o
 python -m app.cli audit-sources
 python -m app.cli crawl pncp --uf MA --days 7
 python -m app.cli crawl compras-gov --uf MA --days 7
-python -m app.cli crawl-atas all --days 365
+python -m app.cli crawl-atas all --days 30
+python -m app.cli crawl-contracts pncp --days 30 --agency-cnpj 00000000000191
+python -m app.cli import-payments --cnpj 00000000000191 --year 2026
+python -m app.cli import-payments-csv pagamentos.csv --fonte "Portal Municipal"
+python -m app.cli crawl-payments-municipal --source all --year 2026
 python -m app.cli backfill-fields
 python -m app.cli process-documents
 python -m app.cli detect-events
@@ -118,8 +132,15 @@ python -m app.cli calculate-deadlines
 python -m app.cli enrich-contacts
 python -m app.cli create-leads
 python -m app.cli run-pipeline --uf MA --days 7
+python -m app.cli continue-crawl ID
+python -m app.cli prepare-test-browser
 python -m app.cli export-leads leads.csv
 ```
+
+O exemplo de atas escolhe 30 dias explicitamente. Sem `--days`, a CLI usa 365;
+o formulário manual começa com até 7 dias (ou a janela automática, se menor),
+e a coleta automática usa a janela geral de 30 dias no exemplo, salvo configuração específica. As unidades da interface
+são as já conhecidas e podem não cobrir toda a UF.
 
 O scheduler é deliberadamente separado da API:
 
@@ -128,7 +149,12 @@ python -m app.jobs.scheduler
 ```
 
 Ele coleta automaticamente por padrão (descoberta a cada 6 h, atualização a
-cada 60 min, documentos a cada 2 h). As coletas automáticas podem ser
+cada 60 min, documentos a cada 2 h). Acompanhe as execuções em `/crawls`.
+As atas de registro de preços são coletadas por
+padrão ao iniciar o scheduler e a cada 24 h, para órgãos/unidades conhecidos da UF.
+A janela inicial e de revisão segue `DEFAULT_LOOKBACK_DAYS` (30 dias), salvo override
+explícito de `PRICE_REGISTRY_LOOKBACK_DAYS`; o intervalo usa `SCHEDULER_PRICE_REGISTRY_HOURS`. A página
+`/atas` também oferece **Coletar atas agora**. As coletas automáticas podem ser
 pausadas/retomadas em Configurações (as rotinas continuam rodando, mas são
 puladas) e o reset de dados as pausa para não repovoar o banco. Use
 `iniciar.bat --no-scheduler` para subir sem scheduler.
@@ -202,6 +228,38 @@ Testes com APIs reais são opt-in:
 RUN_LIVE_CONTRACT_TESTS=true pytest tests/contract -m live
 ```
 
+A interface também oferece **Sistema > Testes** (`/testes`). O diagnóstico
+rápido valida ambiente, banco/migrações, páginas, API, segurança, domínio,
+fontes, conectividade e scheduler sem alterar os dados coletados. A suíte
+completa executa o pytest em subprocesso, com banco/diretórios temporários,
+contratos live desabilitados, cobertura mínima e encerramento garantido em
+timeout/cancelamento; o launcher instala `.[dev,ocr]` por padrão.
+O botão também executa Ruff, formatação, mypy, jornadas em Edge/Chrome,
+OCR português e cenários de API/scheduler em processos separados. Relatórios
+identificam o código testado e distinguem falhas de verificações pendentes.
+Veja [preparação, isolamento e matriz de alcance](docs/testes_locais.md).
+
+Antes de reparar dados legados, faça backup do banco efetivo e use
+`python -m app.cli reconcile-data` (sem `--apply` é somente relatório).
+Fontes municipais publicadas apenas em HTTP exigem
+`ALLOW_INSECURE_HTTP_SOURCES=true`; HTTPS verificado é sempre preferido.
+
+A [revisão de 27/10/2026](docs/auditoria_correcoes_2026-10-27.md) registra as
+correções, regressões e limitações das consultas oficiais. A revisão Alembic
+`0021_integrity_guards` faz parte desta atualização; o banco de uso não é
+migrado automaticamente por testes ou pela reconciliação em simulação.
+
+O painel de `/crawls` mostra etapa atual, contadores confirmados, duração,
+heartbeat e atividades recentes, com atualização automática. Veja o
+[acompanhamento de coletas](docs/acompanhamento_coletas_2026-10-27.md) para os
+significados dos indicadores e as evidências da validação.
+
+Em **Arquivos, falhas e próximas tentativas**, é possível reprocessar somente
+os documentos com falha elegíveis do lote. A ação respeita o prazo e o limite
+de tentativas, preserva arquivos já analisados e não repete a coleta de processos.
+Falhas específicas de carregamento do PNCP recebem até três tentativas curtas;
+erros HTTP 422 de outra natureza não são repetidos indiscriminadamente.
+
 ## Criação de conectores
 
 Um conector implementa `ProcurementSourceConnector` e retorna
@@ -227,3 +285,16 @@ MVP não deve ser exposto publicamente sem uma camada de autenticação.
   sistema não cria participantes perdedores a partir do vencedor.
 - **Sem prazo:** confirme se há marco inicial ou prazo explícito; casos ambíguos
   ficam `requires_manual_review`.
+
+- Contratos e pagamentos s?o fatos separados: um contrato n?o ? um pagamento e
+  `unlinked` n?o prova inadimpl?ncia.
+- `crawl-payments-municipal` tenta S?o Lu?s, Imperatriz, Timon, Caxias e Bacabal;
+  S?o Lu?s pode retornar `access_restricted` (Cloudflare) e Timon respondeu HTTP 500
+  no endpoint identificado. Falhas ficam registradas como `CrawlRun` com diagn?stico.
+- Na p?gina `/pagamentos`, as coletas municipais rodam em background e mostram
+  est?gio, tempo decorrido e progresso dos pagamentos; o painel ? atualizado por
+  HTMX enquanto houver uma coleta ativa.
+
+## Navegacao
+
+A interface usa uma sidebar em grupos: Compras publicas, Execucao financeira, Empresas e oportunidades, Operacao de dados e Sistema. Cada grupo abre uma pagina-painel com indicadores reais, alertas e acoes rapidas. O menu pode ser recolhido no desktop e vira um drawer no celular.

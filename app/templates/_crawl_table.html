@@ -1,5 +1,5 @@
 <div id="crawl-table"
-     {% if has_active %}hx-get="/crawls/table" hx-trigger="every 5s" hx-swap="outerHTML"{% endif %}>
+     hx-get="/crawls/table" hx-trigger="crawls:changed from:body{% if has_active %}, every 5s{% endif %}" hx-swap="outerHTML">
   <section class="panel table-wrap">
     <table class="crawl-table">
       <thead>
@@ -35,6 +35,8 @@
                 {% if source.records_found is not none %}
                 <small>{{ source.records_found }} registro(s)</small>
                 {% endif %}
+                {% if source.headers_received is not none %}<small>{% if source.discovery_total is not none %}{{ source.discovery_total }} informado(s) pela fonte · {% endif %}{{ source.headers_received }} cabeçalho(s) recebido(s)</small>{% endif %}
+                {% if source.stop_reason %}<small>{{ source.stop_reason }}</small>{% endif %}
                 {% if source.records_failed %}
                 <small>{{ source.records_failed }} falha(s)</small>
                 {% endif %}
@@ -42,19 +44,27 @@
               {% endfor %}
             </div>
           </td>
-          <td><strong class="record-count">{{ run.records_found }}</strong>{% if run.progress %}<small>{{ run.progress }}</small>{% endif %}</td>
+          <td><strong class="record-count">{{ run.records_found }}</strong>{% if run.counting_version == 2 %}<small>{{ run.records_created }} novos · {{ run.records_changed }} alterados · {{ run.records_unchanged }} sem alteração</small>{% if run.records_conflicted %}<small class="badge status-pending">{{ run.records_conflicted }} com divergência para revisão</small>{% endif %}{% if run.records_stale_ignored %}<small>{{ run.records_stale_ignored }} com versão antiga ignorada</small>{% endif %}{% else %}<small>Contadores detalhados indisponíveis nesta execução antiga.</small>{% endif %}{% if run.progress %}<small>{{ run.progress }}</small>{% endif %}</td>
           <td>
             {{ run.duration }}
             {% if run.documents_progress %}<small>{{ run.documents_progress }}</small>{% endif %}
           </td>
           <td class="crawl-actions">
+            {% if run.can_continue %}<form method="post" action="/crawls/{{ run.id }}/continue" class="retry-form"><button type="submit" class="button compact">Continuar coleta</button></form>{% endif %}
+            {% if run.has_document_batch %}<a href="/crawls/{{ run.id }}/documents">Arquivos, falhas e próximas tentativas</a>{% endif %}
+            {% if run.retry_documents %}
+            <form method="post" action="/crawls/{{ run.id }}/retry-documents" class="retry-form">
+              <button type="submit" class="button compact">Reprocessar documentos com falha</button>
+            </form>
+            {% endif %}
             {% if run.active %}
             <form method="post" action="/crawls/{{ run.id }}/cancel" class="retry-form" onsubmit="return confirm('Encerrar esta coleta em andamento?');">
               <button type="submit" class="button secondary compact">Encerrar coleta</button>
             </form>
             {% endif %}
             {% if run.retry_all %}
-            <form method="post" action="/crawls/{{ run.id }}/retry-all" class="retry-form" onsubmit="return confirm('Repetir esta coleta com os mesmos filtros?');">
+            <form id="crawl-repeat-{{ run.id }}" hx-preserve method="post" action="/crawls/{{ run.id }}/retry-all" class="retry-form" onsubmit="return confirm('Repetir esta coleta com os mesmos filtros?');">
+              {% include "_force_refresh_option.html" %}
               <button type="submit" class="button secondary compact">Repetir coleta</button>
             </form>
             {% endif %}
@@ -66,8 +76,9 @@
                   <p>{{ source.friendly_error }}</p>
                   <small>Limite configurado: até {{ source.max_attempts }} tentativa(s) por requisição{% if source.duration != '—' %}; duração da fonte: {{ source.duration }}{% endif %}.</small>
                   {% if source.retryable %}
-                  <form method="post" action="/crawls/{{ run.id }}/retry" class="retry-form">
+                  <form id="crawl-retry-{{ run.id }}-{{ source.id }}" hx-preserve method="post" action="/crawls/{{ run.id }}/retry" class="retry-form">
                     <input type="hidden" name="connector" value="{{ source.id }}">
+                    {% include "_force_refresh_option.html" %}
                     <button type="submit" class="button compact">Tentar {{ source.label }} novamente</button>
                   </form>
                   {% endif %}

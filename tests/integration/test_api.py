@@ -16,6 +16,7 @@ from app.models import (
     CompanyContact,
     CrawlRun,
     CrawlRunStatus,
+    JobLease,
     Participant,
     ParticipantStatus,
     PriceRegistry,
@@ -399,7 +400,7 @@ async def test_cancel_endpoint_requests_cancellation_and_rejects_terminal_runs(
     api_client: httpx.AsyncClient,
     database: DatabaseContext,
 ) -> None:
-    """Cancelling an active run persists the flag; terminal runs return 409."""
+    """Cancelling an orphan active run finalizes it; terminal runs return 409."""
 
     async with database.sessions() as session, session.begin():
         active = CrawlRun(
@@ -430,6 +431,44 @@ async def test_cancel_endpoint_requests_cancellation_and_rejects_terminal_runs(
     async with database.sessions() as session:
         stored = await session.get(CrawlRun, active_id)
     assert stored is not None and stored.cancel_requested is True
+    assert stored.status is CrawlRunStatus.CANCELLED
+    assert stored.finished_at is not None
+
+
+@pytest.mark.asyncio
+async def test_cancel_does_not_finalize_a_run_with_a_live_lease(
+    api_client: httpx.AsyncClient,
+    database: DatabaseContext,
+) -> None:
+    now = datetime.now(UTC)
+    async with database.sessions() as session, session.begin():
+        active = CrawlRun(
+            connector="pncp",
+            status=CrawlRunStatus.RUNNING,
+            started_at=now,
+            filters={"connector": "pncp", "uf": "MA"},
+        )
+        session.add(active)
+        await session.flush()
+        session.add(
+            JobLease(
+                name="crawl:pncp:MA",
+                owner_id=f"pipeline:{active.id}",
+                acquired_at=now,
+                heartbeat_at=now,
+                expires_at=now + timedelta(hours=1),
+            )
+        )
+        active_id = active.id
+
+    response = await api_client.post(f"/api/crawls/{active_id}/cancel")
+
+    assert response.status_code == 202
+    async with database.sessions() as session:
+        stored = await session.get(CrawlRun, active_id)
+    assert stored is not None
+    assert stored.cancel_requested is True
+    assert stored.status is CrawlRunStatus.RUNNING
 
 
 @pytest.mark.asyncio
@@ -458,8 +497,8 @@ async def test_web_filter_forms_accept_blank_fields(
         assert response.status_code == 200, name
 
     empresas = responses["empresas"].text
-    assert '</a><span class="info-tip">' in empresas
-    assert '<a href="/leads">Leads<button' not in empresas
+    assert 'id="app-sidebar"' in empresas
+    assert 'class="sidebar-item active"' in empresas
 
 
 @pytest.mark.asyncio
@@ -544,4 +583,31 @@ async def test_help_page_documents_the_lawyer_workflow(
         "Participação comprovada",
     ):
         assert text in response.text
-    assert '<a href="/ajuda">Ajuda</a>' in response.text
+    assert 'href="/ajuda"' in response.text
+    assert "sidebar-item active" in response.text
+
+
+@pytest.mark.asyncio
+async def test_security_headers_and_cross_site_form_guard(api_client: httpx.AsyncClient) -> None:
+    health = await api_client.get("/health")
+    assert health.status_code == 200
+    assert health.headers["x-content-type-options"] == "nosniff"
+    assert health.headers["x-frame-options"] == "DENY"
+    assert "frame-ancestors" in health.headers["content-security-policy"]
+
+    blocked = await api_client.post(
+        "/settings/pause-scheduler",
+        headers={"origin": "https://evil.test"},
+        follow_redirects=False,
+    )
+    assert blocked.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_invalid_enum_query_values_return_422(api_client: httpx.AsyncClient) -> None:
+    responses = [
+        await api_client.get("/api/leads", params={"status": "bogus"}),
+        await api_client.get("/api/crawls", params={"status": "bogus"}),
+        await api_client.get("/api/procurements", params={"phase": "bogus"}),
+    ]
+    assert all(response.status_code == 422 for response in responses)

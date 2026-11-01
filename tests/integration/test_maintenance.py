@@ -428,6 +428,7 @@ async def test_settings_page_controls_scheduler_pause(
             )
         )
 
+    scheduler_control.write_scheduler_heartbeat(settings)
     page = await api_client.get("/settings")
     assert page.status_code == 200
     assert "Coletas automáticas (scheduler)" in page.text

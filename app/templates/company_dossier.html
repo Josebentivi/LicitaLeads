@@ -1,0 +1,22 @@
+{% extends "base.html" %}
+{% block title %}{{ company.legal_name or company.normalized_name }} · Empresa{% endblock %}
+{% block content %}
+<p><a href="/empresas">← Empresas</a></p>
+<header class="procurement-header">
+  <div><p class="eyebrow">Visão completa da empresa</p><h1>{{ company.legal_name or company.normalized_name }}</h1>
+  <p>CNPJ {{ company.cnpj | company_value('cnpj') }}{% if company.trade_name %} · {{ company.trade_name }}{% endif %} · {{ company.municipality or 'Município não informado' }} / {{ company.uf or 'UF não informada' }}</p>
+  {% if company.domain or company.website %}<p>{% if company.domain %}Domínio corporativo: {{ company.domain }}{% endif %}{% if company.website and company.website|company_safe_url %} · <a href="{{ company.website }}" target="_blank" rel="noopener noreferrer">Site corporativo</a>{% endif %}</p>{% endif %}</div>
+</header>
+<p class="hint">{{ overview.notice }} Os vínculos usam CNPJ e identificadores oficiais. Prazos e indícios exigem conferência; a pontuação é uma ferramenta de priorização.</p>
+<nav class="company-section-nav" aria-label="Seções da empresa">{% for key,label in section_labels.items() %}<a href="#company-{{ key }}">{{ label }} ({{ overview.counts[key] }})</a>{% endfor %}</nav>
+{% include "_company_summary.html" %}
+{% for key,label in section_labels.items() %}
+<details class="panel company-section" id="company-{{ key }}" data-company-section="{{ key }}"{% if key == 'leads' %} open{% endif %}>
+ <summary><strong>{{ label }}</strong> · {{ overview.counts[key] }}</summary>
+ <div id="company-content-{{ key }}" data-company-content>
+ {% if key == 'leads' %}{% with data=initial %}{% include '_company_section.html' %}{% endwith %}
+ {% else %}<a class="company-load" href="/empresas/{{ company.cnpj }}/sections/{{ key }}{% if key == 'procurements' %}?status={{ status or '' }}&amp;active_only={{ 'true' if active_only else 'false' }}{% endif %}" hx-get="/empresas/{{ company.cnpj }}/sections/{{ key }}{% if key == 'procurements' %}?status={{ status or '' }}&amp;active_only={{ 'true' if active_only else 'false' }}{% endif %}" hx-target="#company-content-{{ key }}" hx-swap="innerHTML" data-company-load>Carregar {{ label | lower }}</a>{% endif %}
+ </div>
+</details>
+{% endfor %}
+{% endblock %}

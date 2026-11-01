@@ -45,6 +45,19 @@ def _status_tokens_condition(tokens: tuple[str, ...]):
     return or_(*[status_text.like(f"%{token}%") for token in tokens])
 
 
+def participant_evidence_is_current():
+    """Keep historical participation out of current views after document withdrawal."""
+    from app.services.participation_integrity import participant_current
+
+    return participant_current()
+
+
+def _evidence_is_current(evidence_id):
+    from app.repositories.current_evidence import evidence_current
+
+    return evidence_current(evidence_id)
+
+
 def company_cnpj_condition(company_cnpj: str):
     """Match procurements linked to a company by participation or ARP supply.
 
@@ -59,6 +72,7 @@ def company_cnpj_condition(company_cnpj: str):
         .where(
             Participant.procurement_id == Procurement.id,
             Company.cnpj == company_cnpj,
+            participant_evidence_is_current(),
         )
     )
     price_registry_link = exists(
@@ -138,7 +152,7 @@ class ProcurementRepository(BaseRepository[Procurement]):
                 selectinload(Procurement.sources),
                 selectinload(Procurement.items),
                 selectinload(Procurement.documents),
-                selectinload(Procurement.participants),
+                selectinload(Procurement.participants.and_(participant_evidence_is_current())),
                 selectinload(Procurement.events),
                 selectinload(Procurement.deadlines),
             )
@@ -213,7 +227,7 @@ class ProcurementRepository(BaseRepository[Procurement]):
         matched = await self.find_by_source(source, external_id)
         if matched is not None:
             return matched
-        if all((agency_cnpj, purchase_number, purchase_year, modality)):
+        if all((agency_cnpj, uasg, purchase_number, purchase_year, modality)):
             return await self.find_by_strong_identity(
                 agency_cnpj=agency_cnpj or "",
                 uasg=uasg,
@@ -239,6 +253,7 @@ class ProcurementRepository(BaseRepository[Procurement]):
         published_to: datetime | None = None,
         status: str | None = None,
         status_category: str | None = None,
+        phase: str | None = None,
         procurement_type: str | None = None,
         is_srp: bool | None = None,
         value_min: Decimal | None = None,
@@ -275,8 +290,10 @@ class ProcurementRepository(BaseRepository[Procurement]):
         if status:
             statement = statement.where(Procurement.status == status)
         if status_category:
-            reference = now or datetime.now(UTC)
-            statement = statement.where(*_status_category_condition(status_category, now=reference))
+            moment = now or datetime.now(UTC)
+            statement = statement.where(*_status_category_condition(status_category, now=moment))
+        if phase:
+            statement = statement.where(Procurement.current_phase == phase)
         if procurement_type:
             statement = statement.where(Procurement.procurement_type == procurement_type)
         if is_srp is not None:
@@ -356,27 +373,62 @@ class CompanyRepository(BaseRepository[Company]):
         statement = (
             select(
                 Participant.company_id.label("company_id"),
-                func.count(Participant.id).label("participations"),
-                func.sum(
-                    case(
-                        (
-                            Participant.status_code.in_(
-                                (ParticipantStatus.WINNER, ParticipantStatus.AWARDED)
+                func.count(func.distinct(Participant.procurement_id)).label("participations"),
+                func.count(
+                    func.distinct(
+                        case(
+                            (
+                                Participant.status_code.in_(
+                                    (ParticipantStatus.WINNER, ParticipantStatus.AWARDED)
+                                ),
+                                Participant.procurement_id,
                             ),
-                            1,
-                        ),
-                        else_=0,
+                            else_=None,
+                        )
                     )
                 ).label("awarded"),
-                func.sum(
-                    case((Participant.status_code == ParticipantStatus.DISQUALIFIED, 1), else_=0)
+                func.count(
+                    func.distinct(
+                        case(
+                            (
+                                Participant.status_code == ParticipantStatus.DISQUALIFIED,
+                                Participant.procurement_id,
+                            ),
+                            else_=None,
+                        )
+                    )
                 ).label("disqualified"),
-                func.sum(
-                    case((Participant.status_code == ParticipantStatus.INELIGIBLE, 1), else_=0)
+                func.count(
+                    func.distinct(
+                        case(
+                            (
+                                Participant.status_code == ParticipantStatus.INELIGIBLE,
+                                Participant.procurement_id,
+                            ),
+                            else_=None,
+                        )
+                    )
                 ).label("ineligible"),
+                func.count(
+                    func.distinct(
+                        case(
+                            (
+                                Participant.status_code.in_(
+                                    (
+                                        ParticipantStatus.DISQUALIFIED,
+                                        ParticipantStatus.INELIGIBLE,
+                                    )
+                                ),
+                                Participant.procurement_id,
+                            ),
+                            else_=None,
+                        )
+                    )
+                ).label("documented_losses"),
                 func.max(Procurement.publication_at).label("last_participation_at"),
             )
             .join(Procurement, Participant.procurement_id == Procurement.id)
+            .where(participant_evidence_is_current())
             .group_by(Participant.company_id)
         )
         if published_from is not None:
@@ -455,6 +507,59 @@ class CompanyRepository(BaseRepository[Company]):
         ).one_or_none()
         return _stats_dict(row)
 
+    async def failure_breakdown(self, company_id: UUID | str) -> dict[str, object]:
+        """Count documented losing events by event type and reason.
+
+        A company can be disqualified and ineligible in the same procurement, so
+        the headline count is distinct by procurement, never a raw event count.
+        """
+
+        failure_types = (
+            ProcurementEventType.DISQUALIFIED,
+            ProcurementEventType.INELIGIBLE,
+        )
+        rows = (
+            await self.session.execute(
+                select(
+                    ProcurementEvent.event_type,
+                    ProcurementEvent.reason_category,
+                    func.count(func.distinct(ProcurementEvent.procurement_id)),
+                )
+                .where(
+                    ProcurementEvent.company_id == company_id,
+                    ProcurementEvent.event_type.in_(failure_types),
+                    _evidence_is_current(ProcurementEvent.evidence_id),
+                )
+                .group_by(ProcurementEvent.event_type, ProcurementEvent.reason_category)
+            )
+        ).all()
+        by_event: dict[str, int] = {}
+        by_reason: dict[str, int] = {}
+        for event_type, reason, count in rows:
+            event_key = (
+                event_type.value
+                if isinstance(event_type, ProcurementEventType)
+                else str(event_type)
+            )
+            reason_key = getattr(reason, "value", str(reason))
+            by_event[event_key] = by_event.get(event_key, 0) + int(count or 0)
+            by_reason[reason_key] = by_reason.get(reason_key, 0) + int(count or 0)
+        documented = int(
+            await self.session.scalar(
+                select(func.count(func.distinct(ProcurementEvent.procurement_id))).where(
+                    ProcurementEvent.company_id == company_id,
+                    ProcurementEvent.event_type.in_(failure_types),
+                    _evidence_is_current(ProcurementEvent.evidence_id),
+                )
+            )
+            or 0
+        )
+        return {
+            "documented_losses": documented,
+            "by_event": by_event,
+            "by_reason": by_reason,
+        }
+
 
 def _stats_dict(row) -> dict[str, object]:
     if row is None:
@@ -463,13 +568,21 @@ def _stats_dict(row) -> dict[str, object]:
             "awarded": 0,
             "disqualified": 0,
             "ineligible": 0,
+            "documented_losses": 0,
+            "failure_rate": None,
             "last_participation_at": None,
         }
+    participations = int(row.participations or 0)
+    disqualified = int(row.disqualified or 0)
+    ineligible = int(row.ineligible or 0)
+    documented = int(row.documented_losses or 0)
     return {
-        "participations": int(row.participations or 0),
+        "participations": participations,
         "awarded": int(row.awarded or 0),
-        "disqualified": int(row.disqualified or 0),
-        "ineligible": int(row.ineligible or 0),
+        "disqualified": disqualified,
+        "ineligible": ineligible,
+        "documented_losses": documented,
+        "failure_rate": (round(documented / participations, 4) if participations else None),
         "last_participation_at": row.last_participation_at,
     }
 
@@ -497,10 +610,10 @@ class ParticipantRepository(BaseRepository[Participant]):
         active_only: bool = False,
         now: datetime | None = None,
     ) -> Page[Participant]:
-        statement: Select[tuple[Participant]] = (
+        statement = (
             select(Participant)
             .join(Procurement, Participant.procurement_id == Procurement.id)
-            .where(Participant.company_id == company_id)
+            .where(Participant.company_id == company_id, participant_evidence_is_current())
             .options(selectinload(Participant.procurement), selectinload(Participant.item))
         )
         if statuses:
@@ -585,7 +698,7 @@ class ProcurementEventRepository(BaseRepository[ProcurementEvent]):
         date_from: datetime | None = None,
         date_to: datetime | None = None,
     ) -> Page[ProcurementEvent]:
-        statement: Select[tuple[ProcurementEvent]] = (
+        statement = (
             select(ProcurementEvent)
             .where(ProcurementEvent.company_id == company_id)
             .options(

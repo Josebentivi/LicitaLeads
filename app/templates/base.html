@@ -1,34 +1,42 @@
 <!doctype html>
-{% from "_macros.html" import info_tip %}
 <html lang="pt-BR">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{% block title %}LicitaLead Monitor{% endblock %}</title>
   <link rel="stylesheet" href="{{ url_for('static', path='app.css') }}">
-  <script src="https://unpkg.com/htmx.org@2.0.4" defer></script>
+  <script src="{{ url_for('static', path='htmx.min.js') }}" defer></script>
+  <script src="{{ url_for('static', path='app.js') }}" defer></script>
 </head>
 <body>
-  <header class="topbar">
-    <a class="brand" href="/dashboard">LicitaLead Monitor</a>
-    <nav aria-label="Navegação principal">
-      <span class="nav-item"><a href="/dashboard">Dashboard</a></span>
-      <span class="nav-item"><a href="/procurements">Contratações</a>{{ info_tip('Processos monitorados nas fontes oficiais (PNCP e Compras.gov.br), com filtros por modalidade, rota da Lei 14.133/2021, valor, SRP e CNPJ.') }}</span>
-      <span class="nav-item"><a href="/empresas">Empresas</a>{{ info_tip('Empresas identificadas em resultados homologados e em documentos oficiais, com histórico de participações, desclassificações, inabilitações e contatos corporativos.') }}</span>
-      <span class="nav-item"><a href="/atas">Atas (ARP)</a>{{ info_tip('Atas de registro de preços publicadas pelo PNCP e pelo módulo ARP do Compras.gov.br, com itens, fornecedores e vigência.') }}</span>
-      <span class="nav-item"><a href="/leads">Leads</a>{{ info_tip('Oportunidades geradas a partir de eventos comprovados em documentos oficiais (desclassificação, inabilitação, recursos) e de participação detectada em processo ativo. Sempre em modo rascunho, com revisão humana.') }}</span>
-      <span class="nav-item"><a href="/crawls">Coletas</a>{{ info_tip('Execuções de coleta por fonte, com progresso, diagnósticos e opção de cancelar ou repetir uma fonte que falhou.') }}</span>
-      <span class="nav-item"><a href="/source-capabilities">Fontes</a>{{ info_tip('Matriz auditada de capacidades de cada fonte oficial: o que cada API publica e o que depende de documento.') }}</span>
-      <span class="nav-item"><a href="/settings">Configurações</a>{{ info_tip('Configuração pública da aplicação e zona de risco para apagar os dados coletados.') }}</span>
-      <span class="nav-item"><a href="/ajuda">Ajuda</a></span>
-    </nav>
-  </header>
-  <main class="container">
-    {% block content %}{% endblock %}
-  </main>
-  <footer>
-    Dados públicos com rastreabilidade. Confirme prazos e fatos na fonte oficial.
-  </footer>
+  <a class="skip-link" href="#conteudo">Pular para o conteúdo</a>
+  <div class="app-shell">
+    {% include "_sidebar.html" %}
+    <div class="app-main">
+      <header class="content-topbar">
+        <button type="button" class="icon-button mobile-menu" data-sidebar-open aria-label="Abrir menu" aria-controls="app-sidebar" aria-expanded="false">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
+        </button>
+        <a class="mobile-brand" href="/dashboard">LicitaLead</a>
+        <nav class="breadcrumbs" aria-label="Trilha de navegação">
+          {% for crumb in nav_breadcrumbs(request.url.path) %}
+            {% if not loop.last %}
+              <a href="{{ crumb.href }}">{{ crumb.label }}</a><span aria-hidden="true">/</span>
+            {% else %}
+              <span aria-current="page">{{ crumb.label }}</span>
+            {% endif %}
+          {% endfor %}
+        </nav>
+        <div class="topbar-meta"><span class="badge">Dados oficiais · revisão humana</span></div>
+      </header>
+      <main class="container" id="conteudo">
+        {% block content %}{% endblock %}
+      </main>
+      <footer>
+        Dados públicos com rastreabilidade. Confirme prazos e fatos na fonte oficial.
+      </footer>
+    </div>
+    <button type="button" class="sidebar-overlay" data-sidebar-close aria-label="Fechar menu"></button>
+  </div>
 </body>
 </html>
-

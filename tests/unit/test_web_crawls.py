@@ -49,6 +49,39 @@ def test_crawl_view_explains_general_lease_failure() -> None:
     assert all(source.retryable is False for source in view.sources)
 
 
+def test_database_lock_in_job_leases_is_not_reported_as_another_crawl():
+    diagnostic = "OperationalError: database is locked [SQL: UPDATE job_leases SET version=version]"
+    run = CrawlRun(
+        connector="all",
+        status=CrawlRunStatus.FAILED,
+        errors=[{"message": diagnostic}],
+        filters={},
+    )
+    view = _crawl_view(run)
+    assert "banco local" in view.general_error
+    assert "equivalente" not in view.general_error
+    assert "banco local" in _friendly_source_error("pncp", [diagnostic])
+    assert "repetidos" in _friendly_source_error(
+        "compras_gov", ["IntegrityError: UNIQUE constraint failed: procurement_items.fingerprint"]
+    )
+
+
+def test_per_record_failures_are_attached_to_their_source():
+    duplicate = "compras_gov/16010305000542026: IntegrityError: UNIQUE constraint failed: procurement_items.fingerprint"
+    run = CrawlRun(
+        connector="all",
+        status=CrawlRunStatus.FAILED,
+        errors=[{"message": duplicate}],
+        filters={},
+        cursor={"sources": {"compras_gov": {"status": "running", "records_failed": 2}}},
+    )
+    view = _crawl_view(run)
+    source = next(item for item in view.sources if item.id == "compras_gov")
+    assert "registros repetidos" in source.friendly_error
+    assert source.technical_detail == duplicate
+    assert view.general_error is None
+
+
 def test_crawl_view_marks_cancelled_runs_terminal() -> None:
     run = CrawlRun(
         connector="pncp",

@@ -1,0 +1,133 @@
+{
+  "validation": {
+    "directory": "C:\\Users\\jjben\\AppData\\Local\\Temp\\LicitaLeads-throughput-validation-5wr6erzr",
+    "shards": [
+      {
+        "shard": 0,
+        "exit_code": 0,
+        "tests": 231,
+        "failures": 0
+      },
+      {
+        "shard": 1,
+        "exit_code": 0,
+        "tests": 207,
+        "failures": 0
+      },
+      {
+        "shard": 2,
+        "exit_code": 0,
+        "tests": 227,
+        "failures": 0
+      },
+      {
+        "shard": 3,
+        "exit_code": 0,
+        "tests": 274,
+        "failures": 0
+      }
+    ],
+    "tests": 939,
+    "failures": 0,
+    "coverage_exit": 0,
+    "combine_exit": 0,
+    "coverage": 86.01222414034433,
+    "final_regressions": 29
+  },
+  "backup": {
+    "path": "C:\\Users\\jjben\\AppData\\Local\\LicitaLeads\\data\\backups\\20261030T035146Z-deb84af810cc459d9850a822ca3b9339.sqlite3",
+    "backend": "sqlite",
+    "database_id": "ad0256f47591869e9a2ebca73a9b4541e4e3a6c17d0be8a2069352f87f19c6ee",
+    "revision": "0024_llm_queue",
+    "sha256": "a2ec18148740ee4fe19a4a272bb808054ca6f023fa9b6db24ebbb5abe0917633",
+    "maintenance_owner": null
+  },
+  "state": {
+    "at": "2026-10-30T04:03:37.518099+00:00",
+    "crawl_count": 72,
+    "history_unchanged": true,
+    "active_runs": 0,
+    "cancelled_batches_preserved": true,
+    "archive_failure_preserved": true,
+    "log_level": "INFO",
+    "scheduler_heartbeat_age_seconds": 17.854323,
+    "scheduler_paused": false
+  },
+  "metrics": {
+    "http_checks": [
+      {
+        "path": "/health",
+        "status": 200,
+        "seconds": 0.015
+      },
+      {
+        "path": "/crawls",
+        "status": 200,
+        "seconds": 2.485
+      },
+      {
+        "path": "/crawls/table",
+        "status": 200,
+        "seconds": 0.375
+      },
+      {
+        "path": "/static/app.css",
+        "status": 200,
+        "seconds": 0.703
+      },
+      {
+        "path": "/settings",
+        "status": 200,
+        "seconds": 0.687
+      }
+    ],
+    "repeat_forms_checked": 52,
+    "benchmarks": {
+      "/crawls/progress": [
+        1.078,
+        1.219,
+        0.875,
+        1.141,
+        1.047
+      ],
+      "/api/crawls?page_size=20": [
+        0.421,
+        0.36,
+        0.39,
+        0.391,
+        0.313
+      ]
+    },
+    "logs": {
+      "requests": 5,
+      "seconds": [
+        0.7959999999729916,
+        0.9380000000237487,
+        0.9369999999762513,
+        0.8290000000270084,
+        0.9529999999795109
+      ],
+      "log_bytes_added": 340
+    },
+    "comparison": {
+      "panel_before_p50": 1.2660000000032596,
+      "panel_after_p50": 0.9369999999762513,
+      "logs_before_bytes": 322545,
+      "logs_after_bytes": 340
+    }
+  },
+  "equivalence": {
+    "before_seconds": 0.7649999999557622,
+    "after_seconds": 0.40700000000651926,
+    "differences": {},
+    "total": 13636,
+    "cost": "0.247024900000000"
+  },
+  "interruption": {
+    "at": "2026-10-30T03:39:44.393284+00:00",
+    "lease": "documents:processing",
+    "owner": "documents:8678483d-ccd5-4833-8630-100b3953e1d6",
+    "generation": 1,
+    "reason": "Authorized interruption to apply throughput improvements; preserve pending documents"
+  }
+}

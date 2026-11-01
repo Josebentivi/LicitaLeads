@@ -18,6 +18,7 @@ from app.models import (
     CrawlRunStatus,
     Deadline,
     Document,
+    Evidence,
     ExtractionStatus,
     JobLease,
     Lead,
@@ -384,12 +385,20 @@ async def test_manual_link_endpoint_links_participant_and_rejects_stranger(
         database, suffix="2", with_document=False
     )
     async with database.sessions() as session, session.begin():
+        evidence = Evidence(
+            procurement_id=procurement_id,
+            source_url="https://official.test/ata",
+            text_excerpt="Licitante inabilitada por ausência de certidão.",
+        )
+        session.add(evidence)
+        await session.flush()
         event = ProcurementEvent(
             procurement_id=procurement_id,
             company_id=None,
             event_type=ProcurementEventType.INELIGIBLE,
             raw_description="Licitante inabilitada por ausência de certidão.",
             source="document",
+            evidence_id=evidence.id,
             confidence=Decimal("0.9"),
             requires_manual_review=True,
             fingerprint="e" * 64,

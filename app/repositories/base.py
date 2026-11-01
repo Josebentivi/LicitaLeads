@@ -82,14 +82,14 @@ class BaseRepository[ModelT: Base]:
         if flush:
             await self.session.flush()
 
-    async def count(self, statement: Select[tuple[ModelT]] | None = None) -> int:
+    async def count(self, statement: Select[Any] | None = None) -> int:
         filtered = statement if statement is not None else select(self.model)
         count_statement = select(func.count()).select_from(filtered.order_by(None).subquery())
         return int(await self.session.scalar(count_statement) or 0)
 
     async def page(
         self,
-        statement: Select[tuple[ModelT]] | None = None,
+        statement: Select[Any] | None = None,
         *,
         page: int = 1,
         page_size: int = 50,

@@ -3,7 +3,9 @@
 LicitaLead Monitor é uma aplicação **local e auditável** para monitorar
 contratações públicas brasileiras, processar documentos oficiais e produzir
 oportunidades de atendimento jurídico em modo **rascunho**. As fontes usadas são
-o PNCP e os Dados Abertos do Compras.gov.br.
+o PNCP e os Dados Abertos do Compras.gov.br. A execução financeira também pode
+usar o Portal da Transparência, fontes municipais configuradas e importações
+CSV/JSON de portais de origem.
 
 > MVP para apoio à análise. Uma estimativa de prazo não substitui a conferência
 > do edital, da ata, da plataforma oficial e da legislação aplicável.
@@ -34,6 +36,11 @@ contato. O sistema **não envia mensagens**.
 
 - Coleta contratações, itens, documentos e resultados homologados no PNCP e no
   Compras.gov.br, guardando o payload bruto de cada resposta.
+- Coleta atas e contratos, registra fatos financeiros e mantém empenhos,
+  pagamentos e termos separados. Fontes indisponíveis ou não configuradas
+  são diagnosticadas; ausência de pagamento conciliado não prova inadimplência.
+- Continua lotes com filtros e período fixos, reaproveita versões verificadas
+  quando elegíveis e mantém histórico prospectivo de alterações e divergências.
 - Baixa documentos públicos com validações de segurança e extrai texto de PDF,
   HTML, DOCX, XLSX, CSV, TXT e ZIP.
 - Detecta eventos (inabilitação, desclassificação, recursos, homologação etc.)
@@ -43,6 +50,8 @@ contato. O sistema **não envia mensagens**.
 - Enriquece contatos corporativos a partir de domínio já evidenciado, com
   respeito a `robots.txt`.
 - Pontua leads (0–100) com breakdown explicável e gera rascunhos de outreach.
+- Quando habilitada, a análise de IA usa uma fila persistente separada da
+  extração e mantém evidência, revisão humana, limite e custos conhecidos.
 - Expõe API REST, interface web em português, CLI e scheduler em processo
   separado.
 
@@ -64,6 +73,10 @@ contato. O sistema **não envia mensagens**.
 - Inabilitação, desclassificação e recursos normalmente dependem de documentos.
 - PDF escaneado é marcado `ocr_required` quando não há OCR configurado.
 - LLM e busca de contatos ficam desligados por padrão.
+- As unidades de atas selecionáveis na interface são as já conhecidas do banco;
+  elas podem não representar todos os órgãos da UF.
+- As fontes municipais podem exigir configuração adicional, falhar ou estar
+  restritas; importações manuais dependem do conteúdo do arquivo recebido.
 - CNPJ numérico e alfanumérico são aceitos; CPF não é usado.
 
 Consulte a [matriz de fontes](matriz_de_fontes.md) para o detalhamento por

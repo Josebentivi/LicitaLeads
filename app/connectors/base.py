@@ -13,6 +13,7 @@ from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from enum import StrEnum
 from typing import Any, Protocol, runtime_checkable
+from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -45,6 +46,7 @@ class PaginationInfo(BaseModel):
     pages_remaining: int | None = None
     fetched_pages: int = 0
     truncated: bool = False
+    continuation: dict[str, Any] | None = None
 
 
 class RawSourceRecord(BaseModel):
@@ -59,6 +61,24 @@ class RawSourceRecord(BaseModel):
     raw_payload: Any
     http_status: int
     collected_at: datetime
+    response_headers: dict[str, str] = Field(default_factory=dict)
+
+    @property
+    def record_key(self) -> str:
+        """Stable per-request reference including endpoint and query parameters."""
+
+        encoded = json.dumps(
+            {
+                "endpoint": self.endpoint,
+                "parameters": self.request_parameters,
+                "response_hash": self.response_hash,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        ).encode("utf-8")
+        return hashlib.sha256(encoded).hexdigest()
 
     @classmethod
     def build(
@@ -70,6 +90,7 @@ class RawSourceRecord(BaseModel):
         raw_payload: Any,
         http_status: int,
         collected_at: datetime,
+        response_headers: dict[str, str] | None = None,
     ) -> RawSourceRecord:
         """Create a source record with a stable SHA-256 response fingerprint."""
 
@@ -88,6 +109,7 @@ class RawSourceRecord(BaseModel):
             raw_payload=raw_payload,
             http_status=http_status,
             collected_at=collected_at,
+            response_headers=response_headers or {},
         )
 
 
@@ -103,12 +125,29 @@ class ConnectorResult[T](BaseModel):
     collected_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     pagination: PaginationInfo | None = None
     diagnostic: str | None = None
+    partial: bool = False
 
     @property
     def is_available(self) -> bool:
         """Return whether the result contains usable source data."""
 
         return self.availability is DataAvailability.AVAILABLE
+
+    @property
+    def is_complete(self) -> bool:
+        """Only a successful, fully collected operation can retract facts."""
+
+        if self.availability not in {DataAvailability.AVAILABLE, DataAvailability.EMPTY}:
+            return False
+        pagination = self.pagination
+        return not self.partial and not (
+            pagination
+            and (
+                pagination.truncated
+                or (pagination.pages_remaining or 0) > 0
+                or (pagination.total_pages or 0) > pagination.fetched_pages
+            )
+        )
 
 
 class ProcurementFilters(BaseModel):
@@ -130,6 +169,7 @@ class ProcurementFilters(BaseModel):
     page_size: int | None = Field(default=None, ge=1, le=500)
     max_pages: int | None = Field(default=None, ge=1)
     discovery_kind: str = "publication"
+    continuation: dict[str, Any] | None = None
 
     @field_validator("uf")
     @classmethod
@@ -169,7 +209,12 @@ class TraceableModel(BaseModel):
 
     source: str
     source_url: str | None = None
+    source_record_ref: str | None = None
     raw_payload: dict[str, Any] = Field(default_factory=dict)
+    source_updated_at: datetime | None = None
+    source_update_field: str | None = None
+    observed_at: datetime | None = None
+    cleared_fields: list[str] = Field(default_factory=list)
 
 
 class RawProcurement(TraceableModel):
@@ -302,12 +347,145 @@ class RawPriceRegistryItem(TraceableModel):
     external_id: str
     price_registry_external_id: str
     item_number: str | None = None
+    catalog_code: str | None = None
+    item_type: str | None = None
     description: str | None = None
     unit: str | None = None
     quantity: Decimal | None = None
     unit_value: Decimal | None = None
     total_value: Decimal | None = None
     max_adhesion_quantity: Decimal | None = None
+    supplier_cnpj: str | None = None
+    supplier_name: str | None = None
+
+
+class RawPriceRegistryUnit(TraceableModel):
+    """One unit/balance row published for an ARP item."""
+
+    external_id: str
+    price_registry_external_id: str
+    item_number: str | None = None
+    catalog_code: str | None = None
+    description: str | None = None
+    supplier_name: str | None = None
+    quantity_registered: Decimal | None = None
+    adhesion_balance: Decimal | None = None
+    remanejamento_balance: Decimal | None = None
+    adhesion_limit: Decimal | None = None
+    purchase_limit: Decimal | None = None
+    accepts_adhesion: bool | None = None
+    unit_code: str | None = None
+    unit_name: str | None = None
+    unit_type: str | None = None
+    included_at: datetime | None = None
+    updated_at: datetime | None = None
+    excluded_at: datetime | None = None
+
+
+class RawPriceRegistryCommitment(TraceableModel):
+    """One commitment/empenho balance row published for an ARP item."""
+
+    external_id: str
+    price_registry_external_id: str
+    item_number: str | None = None
+    unit: str | None = None
+    commitment_type: str | None = None
+    quantity_registered: Decimal | None = None
+    quantity_committed: Decimal | None = None
+    balance: Decimal | None = None
+    included_at: datetime | None = None
+    updated_at: datetime | None = None
+
+
+class RawPriceRegistryAdhesion(TraceableModel):
+    """One external agency adhesion (carona) published for an ARP item."""
+
+    external_id: str
+    price_registry_external_id: str
+    item_number: str | None = None
+    requesting_unit: str | None = None
+    approved_at: datetime | None = None
+    approved_quantity: Decimal | None = None
+
+
+class RawContract(TraceableModel):
+    """One contract/commitment published by an official source."""
+
+    external_id: str
+    pncp_control_number: str | None = None
+    procurement_control_number: str | None = None
+    price_registry_control_number: str | None = None
+    contract_number: str | None = None
+    year: int | None = None
+    sequence: int | None = None
+    process_number: str | None = None
+    agency_name: str | None = None
+    agency_cnpj: str | None = None
+    uasg: str | None = None
+    object_description: str | None = None
+    status: str | None = None
+    signed_at: datetime | None = None
+    published_at: datetime | None = None
+    valid_from: datetime | None = None
+    valid_until: datetime | None = None
+    initial_value: Decimal | None = None
+    global_value: Decimal | None = None
+    accumulated_value: Decimal | None = None
+    is_adhesion: bool | None = None
+    supplier_cnpj: str | None = None
+    supplier_name: str | None = None
+
+
+class RawContractItem(TraceableModel):
+    """One item published for a contract."""
+
+    external_id: str
+    contract_external_id: str
+    item_number: str | None = None
+    description: str | None = None
+    unit: str | None = None
+    quantity: Decimal | None = None
+    unit_value: Decimal | None = None
+    total_value: Decimal | None = None
+    supplier_cnpj: str | None = None
+    supplier_name: str | None = None
+
+
+class RawContractTerm(TraceableModel):
+    """One additive term or apostilamento published for a contract."""
+
+    external_id: str
+    contract_external_id: str
+    term_number: str | None = None
+    term_type: str | None = None
+    signed_at: datetime | None = None
+    published_at: datetime | None = None
+    value_delta: Decimal | None = None
+    new_valid_until: datetime | None = None
+    object_description: str | None = None
+    status: str | None = None
+
+
+class RawPayment(TraceableModel):
+    """One payment/execution fact published by an official source."""
+
+    source_record_id: UUID | None = None
+    external_id: str
+    contract_control_number: str | None = None
+    contract_number: str | None = None
+    procurement_control_number: str | None = None
+    agency_name: str | None = None
+    agency_cnpj: str | None = None
+    uasg: str | None = None
+    process_number: str | None = None
+    payment_date: datetime | None = None
+    amount: Decimal | None = None
+    phase: str | None = None
+    document_number: str | None = None
+    commitment_number: str | None = None
+    commitment_external_id: str | None = None
+    commitment_details_complete: bool = False
+    status: str | None = None
     supplier_cnpj: str | None = None
     supplier_name: str | None = None
 
@@ -354,5 +532,51 @@ class PriceRegistryConnector(Protocol):
     async def fetch_price_registry_items(
         self, external_id: str
     ) -> ConnectorResult[list[RawPriceRegistryItem]]: ...
+
+    async def fetch_price_registry_units(
+        self, registry: RawPriceRegistry
+    ) -> ConnectorResult[list[RawPriceRegistryUnit]]: ...
+
+    async def fetch_price_registry_commitments(
+        self, registry: RawPriceRegistry
+    ) -> ConnectorResult[list[RawPriceRegistryCommitment]]: ...
+
+    async def fetch_price_registry_adhesions(
+        self, registry: RawPriceRegistry
+    ) -> ConnectorResult[list[RawPriceRegistryAdhesion]]: ...
+
+    async def aclose(self) -> None: ...
+
+
+@runtime_checkable
+class ContractConnector(Protocol):
+    """Interface for sources that publish contracts/commitments."""
+
+    name: str
+
+    async def discover_contracts(
+        self, filters: ProcurementFilters
+    ) -> ConnectorResult[list[RawContract]]: ...
+
+    async def fetch_contract_items(
+        self, contract: RawContract
+    ) -> ConnectorResult[list[RawContractItem]]: ...
+
+    async def fetch_contract_terms(
+        self, contract: RawContract
+    ) -> ConnectorResult[list[RawContractTerm]]: ...
+
+    async def aclose(self) -> None: ...
+
+
+@runtime_checkable
+class PaymentConnector(Protocol):
+    """Interface for sources that publish payment/execution facts."""
+
+    name: str
+
+    async def discover_payments(
+        self, *, company_cnpj: str, year: int, phase: str | None = None
+    ) -> ConnectorResult[list[RawPayment]]: ...
 
     async def aclose(self) -> None: ...

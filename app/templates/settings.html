@@ -14,10 +14,10 @@
 <section class="panel">
   <h2>Coletas automáticas (scheduler)</h2>
   <p>
-    O scheduler é um processo separado que atualiza contratações, processa documentos e recalcula prazos em intervalos fixos. Pausar aqui não encerra o processo: os jobs são simplesmente pulados até você retomar.
+    O scheduler é um processo separado que atualiza contratações e atas de registro de preços, processa documentos e recalcula prazos em intervalos fixos. Pausar aqui não encerra o processo: os jobs são simplesmente pulados até você retomar.
   </p>
   <p>
-    <span class="badge{% if scheduler.paused %} status-pending{% endif %}">{% if scheduler.paused %}Pausado{% else %}Ativo{% endif %}</span>
+    <span class="badge{% if scheduler.paused or not scheduler.alive %} status-pending{% endif %}">{% if not scheduler.enabled %}Desabilitado{% elif scheduler.paused %}Pausado{% elif scheduler.alive %}Ativo{% else %}Sem heartbeat{% endif %}</span>
     {% if scheduler.last_activity_at %}<small>Última atividade: {{ scheduler.last_activity_at }}</small>{% else %}<small>Sem atividade registrada.</small>{% endif %}
   </p>
   {% if scheduler_feedback == 'pausado' %}

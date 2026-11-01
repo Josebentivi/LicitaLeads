@@ -28,7 +28,7 @@ class CrawlRunRequest(ApiModel):
     """Parameters for a manually-triggered crawl."""
 
     connector: Literal["pncp", "compras_gov", "all"] = "all"
-    mode: Literal["procurements", "price_registries"] = "procurements"
+    mode: Literal["procurements", "price_registries", "contracts"] = "procurements"
     uf: str = Field(default="MA", min_length=2, max_length=2)
     days: int | None = Field(default=7, ge=1, le=365)
     start_date: date | None = None
@@ -36,8 +36,12 @@ class CrawlRunRequest(ApiModel):
     modalities: list[str] = Field(default_factory=lambda: ["pregao_eletronico"])
     municipality: str | None = None
     agency: str | None = None
+    agency_cnpj: str | None = None
+    unit_code: str | None = Field(default=None, min_length=1, max_length=30)
     keyword: str | None = None
     document_batch_size: int | None = Field(default=None, ge=1, le=500)
+    discovery_kind: Literal["publication", "update", "open_proposals"] = "publication"
+    force_refresh: bool = False
 
     @model_validator(mode="after")
     def validate_dates(self) -> CrawlRunRequest:
@@ -57,6 +61,28 @@ class CrawlRunResponse(ApiModel):
     status: str
     connector: str
     started_at: datetime
+
+
+class PaymentCrawlRequest(ApiModel):
+    """One federal payment query by supplier and year."""
+
+    company_cnpj: str
+    year: int = Field(ge=2000, le=2100)
+    phase: str | None = None
+
+
+class MunicipalPaymentRunRequest(ApiModel):
+    """One municipal payment source query by year."""
+
+    source: str = Field(min_length=2, max_length=50, pattern=r"^[a-z0-9_-]+$")
+    year: int = Field(ge=2000, le=2100)
+    include_details: bool = False
+    company_cnpj: str | None = Field(default=None, max_length=20)
+
+    @model_validator(mode="after")
+    def normalize_source(self) -> MunicipalPaymentRunRequest:
+        self.source = self.source.strip().lower().replace("-", "_")
+        return self
 
 
 class LeadReviewRequest(ApiModel):

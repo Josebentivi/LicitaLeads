@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% from "_macros.html" import info_tip %}
+{% from "_macros.html" import info_tip, pagination_nav %}
 {% block title %}Contratações · LicitaLead Monitor{% endblock %}
 {% block content %}
 <div class="page-heading"><div><p class="eyebrow">Monitoramento</p><h1>Contratações</h1></div></div>
@@ -26,6 +26,12 @@
       {% for key, label in status_category_options %}<option value="{{ key }}"{% if key == filters.status_category %} selected{% endif %}>{{ label }}</option>{% endfor %}
     </select>
   </label>
+  <label>Fase{{ info_tip('Fase operacional inferida de status, datas e eventos documentados. Nao substitui a situacao oficial nem o edital.') }}
+    <select name="phase">
+      <option value="">Todas</option>
+      {% for key, label in phase_options %}<option value="{{ key }}"{% if key == filters.phase %} selected{% endif %}>{{ label }}</option>{% endfor %}
+    </select>
+  </label>
   <label>Registro de preços{{ info_tip('SRP: contratação por Sistema de Registro de Preços, que gera ata com preços registrados para contratações futuras. Não é modalidade nem contrato imediato.') }}
     <select name="is_srp">
       <option value="">Todos</option>
@@ -40,7 +46,7 @@
 {% if filters.invalid_cnpj %}<p class="hint">CNPJ inválido informado — o filtro de CNPJ correspondente foi ignorado.</p>{% endif %}
 {% if filters.company_cnpj_valid %}<p class="hint">Contratações vinculadas à empresa (participações comprovadas e fornecedores registrados em atas) — <a href="/empresas/{{ filters.company_cnpj_valid }}">ver empresa</a>.</p>{% endif %}
 <section class="panel table-wrap">
-<table><thead><tr><th>Processo</th><th>Órgão</th><th>Local</th><th>Modalidade</th><th>Contratação</th><th>Valor estimado</th><th>Situação</th><th>SRP</th></tr></thead>
+<table><thead><tr><th>Processo</th><th>Órgão</th><th>Local</th><th>Modalidade</th><th>Contratação</th><th>Valor estimado</th><th>Situação</th><th>Fase</th><th>SRP</th></tr></thead>
 <tbody>{% for item in procurements %}<tr>
   <td><a href="/procurements/{{ item.id }}">{{ item.purchase_number or item.external_id or item.id }}</a><small>{{ item.object_description or item.title or '' }}</small></td>
   <td>{{ item.agency_name or 'not_available' }}</td><td>{{ item.municipality or '' }}/{{ item.uf or '' }}</td>
@@ -48,7 +54,9 @@
   <td>{{ item.procurement_type|procurement_type_label }}</td>
   <td>{{ item.estimated_value|brl }}</td>
   <td>{{ item.status or 'unknown' }}</td>
+  <td>{{ item.current_phase|procurement_phase_label }}</td>
   <td>{% if item.is_srp %}Sim{% elif item.is_srp is not none %}Não{% else %}—{% endif %}</td>
-</tr>{% else %}<tr><td colspan="8" class="empty">Nenhuma contratação encontrada.</td></tr>{% endfor %}</tbody></table>
+</tr>{% else %}<tr><td colspan="9" class="empty">Nenhuma contratação encontrada.</td></tr>{% endfor %}</tbody></table>
 </section>
+{{ pagination_nav(request, pagination.page, pagination.page_size, pagination.total) }}
 {% endblock %}

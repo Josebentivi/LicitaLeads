@@ -35,6 +35,7 @@ EMAIL = "contato@" + DOMAIN
 def _settings(tmp_path: Path) -> Settings:
     return Settings(
         app_env="test",
+        contact_domain_discovery_enabled=True,
         document_storage_path=tmp_path / "documents",
         raw_data_storage_path=tmp_path / "raw",
         holiday_calendar_path=tmp_path / "holidays.csv",

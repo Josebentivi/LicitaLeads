@@ -1,0 +1,22 @@
+{% from '_company_values.html' import record_values with context %}
+{% from '_participant_values.html' import monetary_values %}
+<div class="company-detail-data" id="company-detail-data-{{ item.section }}-{{ item.id }}">
+<h3>{{ item.title }}</h3>
+<p class="hint">{{ item.historical_notice }}</p>
+{{ record_values(item) }}
+{% if item.text_excerpt %}<h4>Trecho extraído</h4><pre class="company-excerpt">{{ item.text_excerpt }}</pre>{% endif %}
+{% if item.section == 'documents' %}<p><a href="/api/documents/{{ item.id }}/view" download>Baixar documento armazenado</a></p>{% endif %}
+{% if item.origins %}<details><summary>Origem técnica</summary>{% for origin in item.origins %}<p>Registro de origem: {{ origin.id }}</p>{{ record_values(origin) }}{% endfor %}</details>{% endif %}
+{% for group in item.groups %}<section class="company-child-group"><h4>{{ group.label }} · {{ group.total }}</h4>
+{% for child in group['items'] %}<article>{{ record_values(child) }}{% if child.monetary_values %}{{ monetary_values(child.monetary_values) }}{% endif %}
+{% if child.kind == 'evidence' %}<p><a href="/api/evidence/{{ child.id }}" target="_blank" rel="noopener">Metadados da evidência</a>{% if child.document_id %} · <a href="/api/documents/{{ child.document_id }}/view" download>Baixar documento</a>{% endif %}</p>{% endif %}
+</article>{% else %}<p class="hint">Nenhum registro disponível neste grupo.</p>{% endfor %}</section>{% endfor %}
+{% if item.groups %}<nav aria-label="Paginação dos detalhes">{% if item.detail_page > 1 %}<a href="?page={{ item.detail_page-1 }}" hx-get="/empresas/{{ company.cnpj }}/sections/{{ item.section }}/{{ item.id }}?page={{ item.detail_page-1 }}" hx-target="#company-detail-data-{{ item.section }}-{{ item.id }}" hx-swap="outerHTML">Detalhes anteriores</a>{% endif %}{% if item.groups|selectattr('total','gt',item.detail_page*20)|list %}<a href="?page={{ item.detail_page+1 }}" hx-get="/empresas/{{ company.cnpj }}/sections/{{ item.section }}/{{ item.id }}?page={{ item.detail_page+1 }}" hx-target="#company-detail-data-{{ item.section }}-{{ item.id }}" hx-swap="outerHTML">Mais detalhes</a>{% endif %}</nav>{% endif %}
+{% if item.section == 'leads' %}
+<section><h4>Revisão humana</h4><form method="post" action="/empresas/{{ company.cnpj }}/leads/{{ item.id }}/review" hx-post="/empresas/{{ company.cnpj }}/leads/{{ item.id }}/review" hx-target="#company-detail-data-leads-{{ item.id }}" hx-swap="outerHTML" class="filters">
+<label>Decisão <select name="decision" required><option value="">Selecione</option><option value="approved">Aprovar</option><option value="rejected">Rejeitar</option><option value="needs_changes">Solicitar ajustes</option></select></label><label>Revisor <input name="reviewer" required maxlength="255"></label><label>Observações <textarea name="notes" maxlength="4000"></textarea></label><button type="submit">Registrar revisão</button></form></section>
+{% if item.is_evidence_current %}<form method="post" action="/empresas/{{ company.cnpj }}/leads/{{ item.id }}/draft" hx-post="/empresas/{{ company.cnpj }}/leads/{{ item.id }}/draft" hx-target="#company-detail-data-leads-{{ item.id }}" hx-swap="outerHTML"><button type="submit">Gerar ou recuperar rascunho</button><p class="hint">O rascunho será exibido nesta seção. Nenhuma mensagem é enviada.</p></form>{% else %}<p class="notice">Registro histórico: novas operações bloqueadas. Rascunhos anteriores permanecem disponíveis.</p>{% endif %}
+<form method="post" action="/empresas/{{ company.cnpj }}/rescore" hx-post="/empresas/{{ company.cnpj }}/rescore" hx-target="#company-detail-data-leads-{{ item.id }}" hx-swap="outerHTML"><input type="hidden" name="request_id" value="{{ request_id }}"><input type="hidden" name="lead_ids" value="{{ item.id }}"><input type="hidden" name="detail_lead" value="{{ item.id }}"><button type="submit">Recalcular pontuação</button></form>
+{% endif %}
+{% if item.section in ['procurements','price_registries','contracts','payments'] %}{% set history_type={'procurements':'procurement','price_registries':'price_registry','contracts':'contract','payments':'payment'}[item.section] %}<details><summary>Histórico de alterações</summary><div id="company-history-{{ item.id }}"><a href="/history/{{ history_type }}/{{ item.id }}" hx-get="/history/{{ history_type }}/{{ item.id }}" hx-target="#company-history-{{ item.id }}" data-company-load>Carregar histórico nesta página</a></div></details>{% endif %}
+</div>

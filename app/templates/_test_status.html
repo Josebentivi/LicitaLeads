@@ -1,0 +1,85 @@
+{% if test_status_fragment and not running %}{% set test_actions_oob = true %}{% include "_test_actions.html" %}{% endif %}
+{% set stage_labels = {'running':'em andamento', 'passed':'aprovada', 'failed':'falhou', 'pending':'pendente', 'cancelled':'cancelada'} %}
+<div id="test-status"{% if running %} hx-get="/testes/status" hx-trigger="every 2s" hx-swap="outerHTML"{% endif %}>
+  {% if running %}
+  <div class="test-running">
+    <span class="badge status-running">Executando</span>
+    <strong>Testes em andamento.</strong>
+    <p class="hint">Iniciado em {{ state.started_at.strftime("%d/%m/%Y %H:%M:%S %z") }}. Esta página atualiza automaticamente.</p>
+    {% if state.progress %}<p data-test-progress>{{ state.progress.total|default(0) }} testes com resultado: {{ state.progress.passed|default(0) }} aprovados, {{ state.progress.failed|default(0) }} falhos, {{ state.progress.skipped|default(0) }} ignorados.</p>{% endif %}
+    {% if state.stages %}<ol aria-label="Etapas">{% for stage in state.stages %}<li>{{ stage.title }}: {{ stage_labels.get(stage.status, stage.status) }}</li>{% endfor %}</ol>{% endif %}
+  </div>
+  {% elif report %}
+    {% set summary = report.summary %}
+    {% set status_labels = {"passed": "aprovado", "failed": "falhou", "warning": "aviso", "skipped": "ignorado"} %}
+    {% set mode_label = "diagnóstico rápido" if report.mode == "quick" else "suíte completa" %}
+    {% if report.freshness|default('unknown') == 'unknown' %}<div class="alert warning">Relatório histórico sem identificação verificável; não comprova o código atual.</div>
+    {% elif report.freshness != 'current' %}<div class="alert warning">O código ou o ambiente mudou. Este relatório não comprova a versão atual.</div>
+    {% else %}<p class="hint" data-report-current>Relatório identificado para o código e ambiente atuais.</p>{% endif %}
+    {% if report.status == 'completed_with_pending' %}<div class="alert warning">Concluída com verificações pendentes.</div>{% elif report.status == 'failed' %}<div class="alert error">Validação reprovada.</div>{% elif report.status == 'completed' %}<p>Verificações selecionadas aprovadas.</p>{% endif %}
+    <p class="hint">Escopo: {{ report.scope|default('histórico não identificado') }}.</p>
+    {% if report.identity %}<details><summary>Identificação e ambiente</summary><code>{{ report.identity.sha256 }}</code><pre>{{ report.identity.environment|tojson(indent=2) }}</pre></details>{% endif %}
+    <div class="metrics" aria-label="Resumo dos testes">
+      {% if report.mode == 'full' and report.test_counts %}
+      <article class="metric"><span>Testes aprovados</span><strong>{{ report.test_counts.passed }}</strong></article>
+      <article class="metric"><span>Testes falhos</span><strong>{{ report.test_counts.failed }}</strong></article>
+      <article class="metric"><span>Testes ignorados</span><strong>{{ report.test_counts.skipped }}</strong></article>
+      <article class="metric"><span>Não executados</span><strong>{{ report.test_counts.not_executed|default('indisponível') }}</strong></article>
+      {% else %}
+      <article class="metric"><span>Aprovados</span><strong>{{ summary.passed }}</strong><small>verificações</small></article>
+      <article class="metric"><span>Falhas</span><strong>{{ summary.failed }}</strong><small>verificações</small></article>
+      <article class="metric"><span>Avisos</span><strong>{{ summary.warning }}</strong><small>verificações</small></article>
+      <article class="metric"><span>Ignorados</span><strong>{{ summary.skipped }}</strong><small>verificações</small></article>
+      {% endif %}
+    </div>
+    {% if report.mode == 'full' %}<p class="hint">Qualidade de código: {% for result in report.results if result.group == 'Qualidade' %}{{ result.title }}: {{ status_labels.get(result.status, result.status) }}. {% endfor %}</p>{% endif %}
+    <p class="hint">
+      Execução <strong>{{ mode_label }}</strong> concluída em
+      {{ report.finished_at.strftime("%d/%m/%Y %H:%M:%S %z") }}.
+      {% if report.test_counts %}
+      Suíte: <strong>{{ report.test_counts.total }}</strong> testes,
+      {{ report.test_counts.passed }} passaram,
+      {{ report.test_counts.failed }} falharam,
+      {{ report.test_counts.skipped }} ignorados.
+      {% if report.test_counts.discovered is defined %}Descobertos: {{ report.test_counts.discovered }}; executados: {{ report.test_counts.executed }}; não executados: {{ report.test_counts.not_executed }}.{% endif %}
+      {% endif %}
+    </p>
+    {% if report.status == "cancelled" %}<div class="alert warning">Execução cancelada; os resultados parciais foram preservados.</div>{% endif %}
+    {% if report.error %}<div class="alert error">{{ report.error }}</div>{% endif %}
+    {% if report.stages %}<details open><summary>Etapas da execução</summary><ol>{% for stage in report.stages %}<li>{{ stage.title }}: {{ stage_labels.get(stage.status, stage.status) }}</li>{% endfor %}</ol></details>{% endif %}
+    {% if report.coverage and report.coverage.areas %}<details><summary>Cobertura por área</summary><table><thead><tr><th>Área</th><th>Linhas</th><th>Decisões</th></tr></thead><tbody>{% for name, area in report.coverage.areas|dictsort %}<tr><td>{{ name }}</td><td>{{ area.covered_lines }}/{{ area.num_statements }}</td><td>{{ area.covered_branches }}/{{ area.num_branches }}</td></tr>{% endfor %}</tbody></table></details>{% endif %}
+    {% if report.coverage %}<details><summary>Cobertura por arquivo: linhas e decisões</summary><p>Total: {{ '%.2f'|format(report.coverage.totals.percent_covered) }}%</p><table><thead><tr><th>Arquivo</th><th>Linhas</th><th>Decisões</th></tr></thead><tbody>{% for name, area in report.coverage.files|dictsort %}<tr><td>{{ name }}</td><td>{{ area.covered_lines }}/{{ area.num_statements }}</td><td>{{ area.covered_branches|default(0) }}/{{ area.num_branches|default(0) }}</td></tr>{% endfor %}</tbody></table></details>{% endif %}
+    <div class="table-wrap">
+      <table class="test-results">
+        <thead><tr><th>Status</th><th>Área</th><th>Verificação</th><th>Detalhe</th><th>Duração</th></tr></thead>
+        <tbody>
+        {% for group, results in report.results|groupby("group") %}
+          {% for result in results %}
+          <tr>
+            <td><span class="badge status-{{ result.status }}">{{ status_labels.get(result.status, result.status) }}</span></td>
+            <td>{{ result.group }}</td>
+            <td>
+              <strong>{{ result.title }}</strong>
+              {% if result.output %}
+              <details class="test-output-details">
+                <summary>Ver detalhes</summary>
+                <pre class="test-output">{{ result.output }}</pre>
+              </details>
+              {% endif %}
+            </td>
+            <td>{{ result.detail }}</td>
+            <td>{{ result.duration_ms }} ms</td>
+          </tr>
+          {% endfor %}
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  {% else %}
+  <div class="empty-state">
+    <strong>Nenhuma execução registrada.</strong>
+    <p class="hint">Use os botões acima para executar o diagnóstico rápido ou a suíte completa.</p>
+    {% if report_load_error %}<p class="hint error-text">{{ report_load_error }}</p>{% endif %}
+  </div>
+  {% endif %}
+</div>

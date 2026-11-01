@@ -9,9 +9,19 @@ import pytest
 from sqlalchemy import func, select
 
 from app.config import Settings
-from app.models import Document, ExtractionStatus, Lead, Procurement, ProcurementEvent
+from app.models import (
+    Document,
+    ExtractionStatus,
+    Lead,
+    LeadStatus,
+    LLMWorkItem,
+    Procurement,
+    ProcurementEvent,
+)
 from app.services.ingestion.processor import DocumentProcessingService
 from app.services.llm import EvidenceBoundLLMEventAnalyzer
+from app.services.llm.providers import LLMReply
+from app.services.llm.queue import LLMQueueService
 
 from .conftest import DatabaseContext
 from .test_document_processing import FakeDownloader
@@ -46,7 +56,7 @@ async def _pending_document(database: DatabaseContext):
             external_id="llm-process-1",
             title="Pregão Eletrônico 21/2026",
             agency_name="Prefeitura Municipal de Exemplo",
-            agency_cnpj="00000000000191",
+            agency_cnpj="01612325000198",
             uf="MA",
             municipality="São Luís",
             estimated_value=180000,
@@ -77,6 +87,19 @@ def _service(database: DatabaseContext, tmp_path: Path, provider) -> DocumentPro
     )
 
 
+class QueuedProvider:
+    def __init__(self, provider):
+        self.provider = provider
+        self.calls = 0
+
+    async def request(self, text, pages):
+        self.calls += 1
+        return LLMReply(analyses=await self.provider(text, pages))
+
+    async def aclose(self):
+        pass
+
+
 @pytest.mark.asyncio
 async def test_llm_finding_is_persisted_and_idempotent(
     database: DatabaseContext,
@@ -104,20 +127,32 @@ async def test_llm_finding_is_persisted_and_idempotent(
 
     summary = await service.process_pending()
 
-    assert summary.events_created == 1
-    assert summary.leads_created == 1
+    assert summary.events_created == 0 and summary.leads_created == 0
+    queued = QueuedProvider(provider)
+    await LLMQueueService(
+        _settings(tmp_path), session_factory=database.sessions, provider=queued
+    ).drain(wait=False)
     async with database.sessions() as session:
         event = await session.scalar(select(ProcurementEvent))
         lead = await session.scalar(select(Lead))
     assert event is not None and event.source == "llm"
     assert event.company_id is not None
     assert lead is not None and lead.company_id == event.company_id
+    assert event.requires_manual_review
+    async with database.sessions() as session, session.begin():
+        stored = await session.get_one(Lead, lead.id)
+        stored.lead_status = LeadStatus.REJECTED
 
     repeated = await service.detect_existing()
     assert repeated.events_created == 0
+    await LLMQueueService(
+        _settings(tmp_path), session_factory=database.sessions, provider=queued
+    ).drain(wait=False)
+    assert queued.calls == 1
     async with database.sessions() as session:
         assert await session.scalar(select(func.count()).select_from(ProcurementEvent)) == 1
         assert await session.scalar(select(func.count()).select_from(Lead)) == 1
+        assert (await session.get_one(Lead, lead.id)).lead_status is LeadStatus.REJECTED
 
 
 @pytest.mark.asyncio
@@ -143,5 +178,9 @@ async def test_llm_hallucinated_quote_is_skipped(
     summary = await service.process_pending()
 
     assert summary.events_created == 0
+    await LLMQueueService(
+        _settings(tmp_path), session_factory=database.sessions, provider=QueuedProvider(provider)
+    ).drain(wait=False)
     async with database.sessions() as session:
         assert await session.scalar(select(func.count()).select_from(ProcurementEvent)) == 0
+        assert (await session.scalar(select(LLMWorkItem))).status == "failed"

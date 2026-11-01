@@ -6,7 +6,7 @@ from decimal import Decimal
 
 import pytest
 
-from app.services.lead_scoring import LeadScoreInput, LeadScorer
+from app.services.lead_scoring.scorer import LeadScoreInput, LeadScorer
 from app.services.llm import EvidenceBoundLLMEventAnalyzer, LLMEvidenceError
 from app.services.outreach import OutreachContext, OutreachDraftService
 
@@ -118,3 +118,70 @@ async def test_llm_hallucinated_quote_is_rejected() -> None:
 
     with pytest.raises(LLMEvidenceError):
         await EvidenceBoundLLMEventAnalyzer(provider).analyze("texto oficial")
+
+
+@pytest.mark.parametrize(
+    ("company_cnpj", "source_cnpj"),
+    [
+        ("04252011000110", "04252011000110"),
+        ("04252011000110", "04.252.011/0001-10"),
+        ("12ABC34501DE35", "12ABC34501DE35"),
+        ("12ABC34501DE35", "12.ABC.345/01DE-35"),
+        ("12ABC34501DE35", "12.abc.345/01de-35"),
+    ],
+)
+async def test_llm_accepts_complete_numeric_and_alphanumeric_cnpj_tokens(
+    company_cnpj: str, source_cnpj: str
+) -> None:
+    quote = "A proposta foi desclassificada."
+    source = f"CNPJ {source_cnpj}; {quote}"
+
+    async def provider(text: str, pages: dict[int, str] | None) -> list[dict]:
+        del text, pages
+        return [
+            {
+                "event_type": "DISQUALIFIED",
+                "company_cnpj": company_cnpj,
+                "evidence_quotes": [{"text": quote}],
+                "confidence": 0.9,
+                "requires_manual_review": True,
+            }
+        ]
+
+    analyses = await EvidenceBoundLLMEventAnalyzer(provider).analyze(source)
+
+    assert len(analyses) == 1
+    assert analyses[0].company_cnpj == company_cnpj
+
+
+@pytest.mark.parametrize(
+    ("company_cnpj", "source"),
+    [
+        ("ABCDEFGHIJKL80", "A proposta foi desclassificada no item 80."),
+        ("ABCDEFGHIJKL80", "A proposta foi desclassificada: AB CD EFGH IJKL 80."),
+        (
+            "04252011000110",
+            "A proposta foi desclassificada: 04 dias, 252 itens, 011 documentos, 0001 lote, 10 horas.",
+        ),
+        ("04252011000110", "A proposta foi desclassificada: A04252011000110."),
+        ("04252011000110", "A proposta foi desclassificada: 04252011000110X."),
+        ("04252011000110", "A proposta foi desclassificada: 0042520110001100."),
+    ],
+)
+async def test_llm_rejects_cnpj_fragments_and_embedded_identifiers(
+    company_cnpj: str, source: str
+) -> None:
+    async def provider(text: str, pages: dict[int, str] | None) -> list[dict]:
+        del text, pages
+        return [
+            {
+                "event_type": "DISQUALIFIED",
+                "company_cnpj": company_cnpj,
+                "evidence_quotes": [{"text": source}],
+                "confidence": 0.9,
+                "requires_manual_review": True,
+            }
+        ]
+
+    with pytest.raises(LLMEvidenceError, match="CNPJ is absent"):
+        await EvidenceBoundLLMEventAnalyzer(provider).analyze(source)

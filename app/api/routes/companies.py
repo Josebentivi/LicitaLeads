@@ -10,7 +10,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.serialization import model_dict
 from app.dependencies import get_db
-from app.models.enums import ContractingType, ParticipantStatus, ProcurementEventType
+from app.models.enums import (
+    ContractingType,
+    ParticipantStatus,
+    ProcurementEventType,
+    ReasonCategory,
+)
 from app.repositories.procurements import (
     CompanyRepository,
     ParticipantRepository,
@@ -95,8 +100,13 @@ async def get_company(cnpj: str, db: AsyncSession = Depends(get_db)) -> dict[str
     """Return one company and its participation counters."""
 
     company = await _get_company(cnpj, db)
-    stats = await CompanyRepository(db).stats_for_company(company.id)
-    return {"company": model_dict(company), "stats": stats}
+    repository = CompanyRepository(db)
+    stats = await repository.stats_for_company(company.id)
+    return {
+        "company": model_dict(company),
+        "stats": stats,
+        "failure_breakdown": await repository.failure_breakdown(company.id),
+    }
 
 
 @router.get("/{cnpj}/participations")
@@ -159,7 +169,7 @@ async def list_company_events(
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=200),
     event_type: ProcurementEventType | None = None,
-    reason_category: str | None = None,
+    reason_category: ReasonCategory | None = None,
     requires_manual_review: bool | None = None,
     date_from: datetime | None = None,
     date_to: datetime | None = None,

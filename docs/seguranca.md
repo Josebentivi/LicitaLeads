@@ -28,6 +28,16 @@ arquivos fora de `DOCUMENT_STORAGE_PATH` com `403`.
 - profundidade de arquivos aninhados limitada;
 - tamanho declarado conferido após a leitura.
 
+O exemplo permite dois níveis de ZIP, com orçamento cumulativo de membros e
+bytes em toda a árvore. Auxiliares AppleDouble são ignorados somente após as
+verificações de segurança; documentos reais continuam sujeitos à extração.
+Respostas incompletas ou bloqueadas não autorizam retratação de fatos anteriores.
+
+O resolvedor específico do PNCP pode reconstruir uma URL pública a partir da
+identidade oficial armazenada. Ele não altera a URL original e a resolução,
+cada redirecionamento e o download passam pelas mesmas validações de endereço,
+DNS, conteúdo e limites. O endereço resolvido é registrado após sucesso.
+
 ## Interface web
 
 - A UI não renderiza HTML bruto de fontes externas.
@@ -35,10 +45,12 @@ arquivos fora de `DOCUMENT_STORAGE_PATH` com `403`.
 - Erros de página retornam HTML amigável; erros de `/api` retornam JSON.
 - O servidor vincula-se a `127.0.0.1` por padrão e o MVP não deve ser exposto
   publicamente sem autenticação.
+- `ALLOWED_HOSTS` restringe hosts; formulários de alteração verificam a origem.
+  Esses controles não substituem autenticação para exposição pública.
 
 ## Segredos e logs
 
-- `LLM_API_KEY` e `CONTACT_SEARCH_API_KEY` são aceitos do ambiente e nunca
+- `LLM_API_KEY`, `CONTACT_SEARCH_API_KEY` e `TRANSPARENCIA_API_KEY` são aceitos do ambiente e nunca
   entram em logs estruturados ou na página de configurações.
 - Nenhuma chave deve ser commitada; use `.env` (ignorado) e documente em
   `.env.example`.
@@ -49,6 +61,9 @@ arquivos fora de `DOCUMENT_STORAGE_PATH` com `403`.
 - O sistema **não envia mensagens**; rascunhos nascem `approved=false` e
   `sent=false`, e o banco impede `sent=true` sem `approved=true`
   (`sent_requires_approval`).
+- A existência de um contato ou rascunho não autoriza uma abordagem. Avalie o
+  [Provimento 205/2021 da OAB](https://www.oab.org.br/leisnormas/legislacao/provimentos/205-2021)
+  e as orientações da seccional antes de qualquer comunicação profissional.
 
 ## Contatos e privacidade
 
