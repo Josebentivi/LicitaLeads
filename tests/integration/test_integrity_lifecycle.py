@@ -213,10 +213,15 @@ async def test_cancelled_award_immediately_suspends_inferred_company_lead(databa
         assert (await service.recalculate_deadlines_and_leads()).leads_created == 1
         from app.models import LeadScoreRevision
 
-        async with database.sessions() as session:
+        async with database.sessions() as session, session.begin():
             initial_score = await session.scalar(select(LeadScoreRevision))
             assert initial_score.previous_score is None
             assert initial_score.previous_version is None
+            historical = await session.scalar(select(Lead))
+            historical.score = historical.fit_score = 61
+            historical.scoring_version = "1.0"
+            historical.score_breakdown = {"legacy": 61}
+            action = historical.recommended_action
         await pipeline._persist_procurement_bundle(
             uuid4(),
             raw,
@@ -227,11 +232,15 @@ async def test_cancelled_award_immediately_suspends_inferred_company_lead(databa
         )
         async with database.sessions() as session:
             lead = await session.scalar(select(Lead))
-            assert lead.lead_status is LeadStatus.PENDING_REVIEW and lead.score == 0
-            assert "cancelado" in lead.recommended_action
+            assert lead.lead_status is LeadStatus.PENDING_REVIEW and lead.score == 61
+            assert lead.score_breakdown == {"legacy": 61}
+            assert lead.recommended_action == action
+            from app.services.participation_integrity import lead_current
+
+            assert await session.scalar(select(Lead.id).where(lead_current())) is None
         await service.recalculate_deadlines_and_leads()
         async with database.sessions() as session:
-            assert (await session.scalar(select(Lead))).score == 0
+            assert (await session.scalar(select(Lead))).score == 61
     finally:
         await service.aclose()
 
@@ -278,13 +287,18 @@ async def test_withdrawn_document_suspends_lead_deadline_and_phase_without_delet
     try:
         assert (await service.recalculate_deadlines_and_leads()).leads_created == 1
         async with database.sessions() as session, session.begin():
+            historical = await session.scalar(select(Lead))
+            historical.score = historical.fit_score = 61
+            historical.scoring_version = "1.0"
+            historical.score_breakdown = {"legacy": 61}
             await suspend_document_derivatives(session, document_id)
         assert (await service.recalculate_deadlines_and_leads()).leads_created == 0
         async with database.sessions() as session:
             lead = await session.scalar(select(Lead))
             deadline = await session.scalar(select(Deadline))
             procurement = await session.scalar(select(Procurement))
-            assert lead.lead_status is LeadStatus.PENDING_REVIEW and lead.score == 0
+            assert lead.lead_status is LeadStatus.PENDING_REVIEW and lead.score == 61
+            assert lead.score_breakdown == {"legacy": 61}
             assert deadline.status is DeadlineStatus.REQUIRES_REVIEW
             assert procurement.current_phase is ProcurementPhase.UNKNOWN
             assert await session.scalar(select(func.count()).select_from(Evidence)) == 1

@@ -37,6 +37,7 @@ from app.models import (
     FieldObservation,
     FieldValueStatus,
     Lead,
+    LeadReview,
     LeadStatus,
     Participant,
     ParticipantRole,
@@ -285,11 +286,16 @@ async def suspend_event_work(
     for lead in (
         await session.scalars(select(Lead).where(Lead.triggering_event_id.in_(event_ids)))
     ).all():
-        if lead.lead_status not in {LeadStatus.REJECTED, LeadStatus.ARCHIVED}:
+        reviewed = await session.scalar(
+            select(LeadReview.id).where(LeadReview.lead_id == lead.id).limit(1)
+        )
+        if reviewed is None and lead.lead_status not in {
+            LeadStatus.APPROVED,
+            LeadStatus.NEEDS_CHANGES,
+            LeadStatus.REJECTED,
+            LeadStatus.ARCHIVED,
+        }:
             lead.lead_status = LeadStatus.PENDING_REVIEW
-        lead.score = lead.fit_score = lead.evidence_score = lead.urgency_score = 0
-        lead.recommended_action = reason
-        lead.score_breakdown = {**(lead.score_breakdown or {}), "source_state": reason}
 
 
 async def review_cancelled_award_derivatives(
@@ -2345,9 +2351,11 @@ class DocumentProcessingService:
         event: ProcurementEvent,
     ) -> bool:
         if not await event_document_is_active(session, event):
-            evidence = await session.get(Evidence, event.evidence_id) if event.evidence_id else None
-            if evidence is not None and evidence.document_id is not None:
-                await suspend_document_derivatives(session, evidence.document_id)
+            # A reviewed/invalidated fact does not withdraw its entire source
+            # document, which can still prove unrelated participants and values.
+            await suspend_event_work(
+                session, [event], "Evento ou evidência sem vigência atual; revisar os fatos."
+            )
             return False
         if not await event_award_inference_is_current(session, event):
             await suspend_event_work(

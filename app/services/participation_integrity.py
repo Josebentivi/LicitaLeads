@@ -26,7 +26,7 @@ from app.models.entities import (
     ProcurementEvent,
     ProcurementItem,
 )
-from app.models.enums import LeadStatus, ProcurementEventType
+from app.models.enums import LeadStatus, ParticipantRole, ParticipantStatus, ProcurementEventType
 from app.models.participation import FactVerification, ParticipantValue
 from app.services.event_detection.participation_values import (
     VERSION,
@@ -75,6 +75,34 @@ def event_verified():
     return and_(
         fact_current("procurement_event", ProcurementEvent.id),
         evidence_current(ProcurementEvent.evidence_id),
+        or_(
+            ~exists(
+                select(FieldObservation.id).where(
+                    FieldObservation.entity_type == "procurement_event",
+                    FieldObservation.entity_id == ProcurementEvent.id,
+                    FieldObservation.field_name == "company_id",
+                    FieldObservation.source == "inferred_single_winner",
+                )
+            ),
+            exists(
+                select(Participant.id).where(
+                    Participant.procurement_id == ProcurementEvent.procurement_id,
+                    Participant.company_id == ProcurementEvent.company_id,
+                    participant_current(),
+                    or_(
+                        Participant.status_code.in_(
+                            [ParticipantStatus.WINNER, ParticipantStatus.AWARDED]
+                        ),
+                        and_(
+                            Participant.status_code.is_(None),
+                            Participant.participation_role.in_(
+                                [ParticipantRole.WINNER, ParticipantRole.AWARDED]
+                            ),
+                        ),
+                    ),
+                )
+            ),
+        ),
     )
 
 

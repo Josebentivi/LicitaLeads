@@ -503,13 +503,25 @@ async def _assert_suspended(
             previous = before["Lead"][lead_id]["lead_status"]
             expected = (
                 previous
-                if previous in {LeadStatus.REJECTED, LeadStatus.ARCHIVED}
+                if previous
+                in {
+                    LeadStatus.APPROVED,
+                    LeadStatus.NEEDS_CHANGES,
+                    LeadStatus.REJECTED,
+                    LeadStatus.ARCHIVED,
+                }
                 else LeadStatus.PENDING_REVIEW
             )
             assert lead["lead_status"] is expected
-            assert lead["score"] == lead["fit_score"] == 0
-            assert lead["urgency_score"] == lead["evidence_score"] == 0
-            assert "Fonte documental desativada" in lead["recommended_action"]
+            assert lead["score"] == before["Lead"][lead_id]["score"]
+            assert lead["fit_score"] == before["Lead"][lead_id]["fit_score"]
+            for field in (
+                "urgency_score",
+                "evidence_score",
+                "recommended_action",
+                "score_breakdown",
+            ):
+                assert lead[field] == before["Lead"][lead_id][field]
 
 
 @pytest.mark.parametrize("entry_point", ["pending", "recheck"])

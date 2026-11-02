@@ -226,6 +226,35 @@ async def apply_repair(database, settings, *, resume=None):
         )
 
 
+@pytest.mark.parametrize("reviewed", [False, True])
+async def test_periodic_processing_keeps_reviewed_fact_source_and_historical_score(
+    database, tmp_path, reviewed
+):
+    from app.services.ingestion.processor import DocumentProcessingService
+
+    settings, ids = await seed(database, tmp_path, reviewed=reviewed)
+    await apply_repair(database, settings)
+    service = DocumentProcessingService(settings, session_factory=database.sessions)
+    try:
+        await service.recalculate_deadlines_and_leads()
+        async with database.sessions() as db:
+            document = await db.get(Document, ids["document"])
+            lead = await db.get(Lead, ids["lead"])
+            assert document.is_active and document.deactivated_at is None
+            assert lead.score == lead.fit_score == 35
+            assert lead.evidence_score == 25 and lead.scoring_version == "1.0"
+            assert lead.recommended_action == "Revisar a fonte"
+            assert lead.assigned_to == "Analista"
+            assert lead.lead_status is (
+                LeadStatus.APPROVED if reviewed else LeadStatus.PENDING_REVIEW
+            )
+            assert (
+                await db.scalar(select(Lead.id).where(Lead.id == lead.id, lead_current())) is None
+            )
+    finally:
+        await service.aclose()
+
+
 async def test_retained_archive_member_verified_without_new_extraction(database, tmp_path):
     import io
     from zipfile import ZIP_DEFLATED, ZipFile

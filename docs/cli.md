@@ -175,3 +175,23 @@ python -m app.cli reconcile-data --participation-integrity --apply --resume ID
 A aplicação exige manutenção exclusiva e cria backup verificado, relatório de impacto e relatório de resultado. Há confirmação por processo e ponto de retomada persistente. Repetir o reparo não duplica fatos ou histórico; retomar uma execução concluída apenas retorna seu resultado.
 
 O comando não inicia coleta, download, OCR, contatos ou IA. Arquivos ausentes, hashes divergentes e atribuições ambíguas são diagnosticados. IDs, payloads, evidências, revisões e notas históricas são preservados. Sem `--participation-integrity`, permanecem os reparos legados já existentes do comando.
+
+Se uma rotina anterior de suspensão zerou uma nota histórica, é possível
+diagnosticar sua recuperação exata pelo backup SQLite vinculado a uma
+reconciliação concluída:
+
+```powershell
+python -m app.cli reconcile-data --restore-suspended-state-from ID_DO_REPARO
+python -m app.cli reconcile-data --restore-suspended-state-from ID_DO_REPARO --apply
+```
+
+A recuperação exige a assinatura exata do defeito, identidade e componentes
+compatíveis e ausência de avaliação posterior. Ela verifica o backup de origem
+e cria outro backup na manutenção atual, sem recalcular a nota ou alterar a
+decisão humana. A restauração recebe histórico próprio; o bloqueio operacional
+do fato inválido permanece. Casos divergentes não são sobrescritos.
+
+O mesmo modo pode recuperar documentos desativados pela suspensão de um fato:
+exige estado oficial aceito como ativo, resposta completa, identidade e hash
+inalterados e verificação do arquivo armazenado. Membros de ZIP exigem também
+o contêiner original completo e inalterado. Não há download ou reextração.

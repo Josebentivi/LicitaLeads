@@ -116,6 +116,13 @@ def reconcile_data_command(
         str | None,
         typer.Option("--resume", help="retoma o ID de uma reconciliação de participantes"),
     ] = None,
+    restore_suspended_state_from: Annotated[
+        str | None,
+        typer.Option(
+            "--restore-suspended-state-from",
+            help="recupera notas históricas e estado documental comprovados pelo reparo SQLite informado",
+        ),
+    ] = None,
 ) -> None:
     """Audita dados legados e aplica apenas reparos deriváveis do bruto."""
 
@@ -129,6 +136,59 @@ def reconcile_data_command(
     )
 
     async def run() -> dict[str, object]:
+        if restore_suspended_state_from:
+            from uuid import UUID
+
+            from app.services.suspension_restoration import restore_suspended_state
+
+            if participation_integrity or resume:
+                raise typer.BadParameter("recuperação de notas não aceita outros modos de reparo")
+            baseline_id = UUID(restore_suspended_state_from)
+            if not apply:
+                return await restore_suspended_state(
+                    async_session_factory, get_settings(), baseline_id
+                )
+            async with exclusive_maintenance(async_session_factory) as owner:
+                restoration_impact = await restore_suspended_state(
+                    async_session_factory, get_settings(), baseline_id
+                )
+                if (
+                    not restoration_impact["restorable"]
+                    and not restoration_impact["documents_restorable"]
+                    and not restoration_impact["pending_run_id"]
+                ):
+                    return {**restoration_impact, "applied": True}
+                backup = await run_blocking_maintenance(
+                    lambda: create_backup(
+                        get_settings(),
+                        backup_dir,
+                        maintenance_owner=owner,
+                        sqlite_timeout_seconds=300,
+                    )
+                )
+                restoration_result = await restore_suspended_state(
+                    async_session_factory,
+                    get_settings(),
+                    baseline_id,
+                    apply=True,
+                    backup=backup,
+                    maintenance_owner=owner,
+                )
+                report_path = backup.path.with_suffix(".score-restoration.json")
+                await asyncio.to_thread(
+                    report_path.write_text,
+                    json.dumps(
+                        {"impact": restoration_impact, **restoration_result},
+                        ensure_ascii=False,
+                        indent=2,
+                    ),
+                    encoding="utf-8",
+                )
+                return {
+                    **restoration_result,
+                    "backup": backup.as_dict(),
+                    "result_report": str(report_path),
+                }
         if participation_integrity:
             from uuid import UUID
 
