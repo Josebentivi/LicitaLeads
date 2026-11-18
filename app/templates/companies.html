@@ -3,30 +3,42 @@
 {% block title %}Empresas · LicitaLead Monitor{% endblock %}
 {% block content %}
 <div class="page-heading"><div><p class="eyebrow">Monitoramento</p><h1>Empresas</h1></div></div>
-<form method="get" class="filters">
+<form method="get" action="/empresas" class="filters" data-filter-form>
   <label>Nome ou CNPJ <input name="search" value="{{ filters.search or '' }}"></label>
-  <label>UF <select name="uf"><option value="">Todas</option>{% for code, name in ufs %}<option value="{{ code }}"{% if code == filters.uf %} selected{% endif %}>{{ code }} · {{ name }}</option>{% endfor %}</select></label>
+  <label>Origem da presença <select name="origin"><option value="">Todas</option>{% for key, label in origins.items() %}<option value="{{ key }}"{% if key == filters.origin %} selected{% endif %}>{{ label }}</option>{% endfor %}</select></label>
+  <label>Local do órgão ou portal <input name="activity_location" maxlength="160" value="{{ filters.activity_location }}" placeholder="Município ou nome do órgão"></label>
+  <label>UF da sede <select name="uf"><option value="">Todas</option>{% for code, name in ufs %}<option value="{{ code }}"{% if code == filters.uf %} selected{% endif %}>{{ code }} · {{ name }}</option>{% endfor %}</select></label>
   <label>Publicação da contratação (de) <input type="date" name="published_from" value="{{ filters.published_from }}"></label>
   <label>Publicação da contratação (até) <input type="date" name="published_to" value="{{ filters.published_to }}"></label>
   <label><input type="checkbox" name="has_lead" value="true"{% if filters.has_lead %} checked{% endif %}> Somente com lead{{ info_tip('Mostra apenas empresas que já geraram um lead (evento comprovado em documento oficial ou participação detectada em processo ativo).') }}</label>
   <label><input type="checkbox" name="active_only" value="true"{% if filters.active_only %} checked{% endif %}> Em processo ativo{{ info_tip('Considera apenas participações comprovadas (resultado publicado ou documento oficial) em processos que ainda podem receber propostas. A cobertura depende de documento; processo sem participação comprovada não aparece.') }}</label>
   <button type="submit">Filtrar</button>
+  <a href="/empresas">Limpar filtros</a>
 </form>
+{% if filter_error %}<p class="alert error" role="alert">{{ filter_error }}</p>{% endif %}
+<div class="section-heading"><p role="status">{{ pagination.total }} empresa(s) · {{ active_filter_count }} filtro(s) ativo(s)</p><a href="{{ list_url }}" data-save-search>Guardar esta busca neste navegador</a></div><p data-saved-search role="status"></p>
+{% include "_active_filters.html" %}
 <section class="panel table-wrap">
-<table><thead><tr><th>Empresa</th><th>CNPJ</th><th>Local</th><th>Participações{{ info_tip('Participações comprovadas: resultados homologados publicados pelas APIs e fatos extraídos de documentos oficiais com evidência.') }}</th><th>Adjudicações</th><th>Desclassificações</th><th>Inabilitações</th><th>Derrotas documentadas{{ info_tip('Processos distintos com participante desclassificado ou inabilitado. Eventos adicionais aparecem no detalhe da empresa.') }}</th><th>Taxa</th><th>Última participação</th></tr></thead>
+<table><thead><tr><th>Empresa e CNPJ</th><th>Sede</th><th>Origem da presença no acervo</th><th>Órgãos ou locais observados</th><th>Participações no recorte</th></tr></thead>
 <tbody>{% for item in companies %}<tr>
-  <td><a href="/empresas/{{ item.cnpj }}">{{ item.name }}</a></td>
-  <td>{{ item.cnpj_label }}</td>
+  <td><a href="/empresas/{{ item.cnpj }}{% if filters.origin %}?{{ {'return_to': list_url, 'section': 'procurements' if filters.origin == 'participations' else filters.origin}|urlencode }}{% if filters.origin == 'participations' %}&amp;status=documented{% endif %}{% elif list_url != '/empresas' %}?{{ {'return_to': list_url}|urlencode }}{% endif %}">{{ item.name }}</a><small>{{ item.cnpj_label }}</small></td>
   <td>{{ item.location }}</td>
-  <td>{{ item.participations }}</td>
-  <td>{{ item.awarded }}</td>
-  <td>{{ item.disqualified }}</td>
-  <td>{{ item.ineligible }}</td>
-  <td>{{ item.documented_losses }}</td>
-  <td>{{ item.failure_rate }}</td>
-  <td>{{ item.last_participation_at }}</td>
-</tr>{% else %}<tr><td colspan="10" class="empty">Nenhuma empresa identificada.</td></tr>{% endfor %}</tbody></table>
+  <td>{% for key, label in origins.items() if item.activity.counts.get(key) %}
+    {% set section = 'procurements' if key == 'participations' else key %}
+    <div><a href="/empresas/{{ item.cnpj }}?{{ {'section': section, 'return_to': list_url}|urlencode }}{% if key == 'participations' %}&amp;status=documented{% endif %}#company-{{ section }}">{{ label }} ({{ item.activity.counts[key] }})</a></div>
+    {% if key == 'payments' and item.activity.aggregates %}<small>{{ item.activity.aggregates }} agregado(s) por empenho</small>{% endif %}
+  {% else %}Sem vínculo vigente identificado{% endfor %}</td>
+  <td>{{ item.activity.locations[:2]|join(' · ') or 'Local não informado' }}
+    {% if item.activity.locations|length > 2 %}<details><summary>Outros {{ item.activity.locations|length - 2 }}</summary>{{ item.activity.locations[2:]|join(' · ') }}</details>{% endif %}
+  </td>
+  <td>{{ item.participations }}
+    {% if item.participations %}<details><summary>Resultados documentados</summary>
+      <p>Adjudicações: {{ item.awarded }} · Desclassificações: {{ item.disqualified }} · Inabilitações: {{ item.ineligible }}</p>
+      <p>Derrotas documentadas: {{ item.documented_losses }} · Taxa: {{ item.failure_rate }} · Última participação: {{ item.last_participation_at }}</p>
+    </details>{% endif %}
+  </td>
+</tr>{% else %}<tr><td colspan="5" class="empty">Nenhuma empresa identificada para esta busca. <a href="/empresas">Limpar filtros</a> ou <a href="/crawls">ver cobertura e documentos das coletas</a>.</td></tr>{% endfor %}</tbody></table>
 </section>
-<p class="hint">Os números refletem apenas fatos comprovados: resultados homologados publicados pelas APIs e eventos extraídos de documentos oficiais com evidência e revisão humana quando aplicável. Participações sem documento não aparecem.</p>
+<p class="hint">Cada origem mostra registros do acervo vinculados à empresa. No recorte de participações, cada contratação com resultado oficial ou participação documentada conta uma vez. A UF da sede e o local de atuação têm filtros próprios.</p>
 {{ pagination_nav(request, pagination.page, pagination.page_size, pagination.total) }}
 {% endblock %}

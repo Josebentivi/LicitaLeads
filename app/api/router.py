@@ -13,6 +13,7 @@ from app.api.routes import (
     health,
     history,
     leads,
+    llm,
     maintenance,
     payments,
     price_registries,
@@ -21,6 +22,7 @@ from app.api.routes import (
 from app.api.routes.company_overview import router as company_overview_router
 
 api_router = APIRouter()
+api_router.include_router(llm.router, prefix="/api")
 api_router.include_router(health.router)
 api_router.include_router(history.router, prefix="/api")
 api_router.include_router(procurements.router, prefix="/api")

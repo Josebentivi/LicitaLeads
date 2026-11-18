@@ -51,8 +51,10 @@ async def test_api_and_forms_forward_force_refresh(api_client, monkeypatch, url,
     assert calls and calls[0].force_refresh is True
 
 
-@pytest.mark.parametrize("page", ["/", "/atas", "/contratos"])
-async def test_forms_offer_forced_refresh(api_client, page):
-    response = await api_client.get(page, follow_redirects=True)
+async def test_complete_scope_offers_forced_refresh(api_client):
+    response = await api_client.get("/crawls")
     assert response.status_code == 200
-    assert 'name="force_refresh"' in response.text
+    assert (
+        'name="force_refresh" type="checkbox" value="true" form="complete-collection-form"'
+        in response.text
+    )

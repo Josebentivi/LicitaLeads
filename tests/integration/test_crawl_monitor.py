@@ -142,6 +142,73 @@ async def test_idle_monitor_polls_for_background_jobs_and_handles_legacy_run(dat
     assert 'hx-trigger="every 15s"' in result.text
 
 
+@pytest.mark.parametrize("status", [CrawlRunStatus.RUNNING, CrawlRunStatus.CANCELLED])
+async def test_municipal_cards_report_committed_blocks_even_after_cancellation(
+    database, api_client, status
+):
+    now = datetime.now(UTC)
+    running = status is CrawlRunStatus.RUNNING
+    async with database.sessions() as session, session.begin():
+        session.add(
+            CrawlRun(
+                connector="municipal:imperatriz",
+                status=status,
+                filters={"mode": "municipal_payments"},
+                started_at=now - timedelta(minutes=6),
+                heartbeat_at=now - timedelta(minutes=3),
+                finished_at=None if running else now,
+                records_found=4563,
+                records_created=240,
+                records_updated=10,
+                cursor={
+                    "progress": {
+                        "stage": "persisting" if running else "cancelled",
+                        "processed": 4563,
+                        "total": 4563,
+                    },
+                    "municipal_write": {"processed": 250, "total": 4000},
+                },
+            )
+        )
+
+    for url in ("/crawls/progress", "/pagamentos/portais"):
+        response = await api_client.get(url)
+        assert response.status_code == 200
+        assert "4563" in response.text
+        assert "250 de 4000 registros gravados nesta execução" in response.text
+        assert ('<progress value="250" max="4000"' in response.text) == running
+        assert "4563 de 4563" not in response.text
+        if url == "/crawls/progress":
+            assert ("Sem sinal recente do coletor" in response.text) == running
+            assert "<dt>Gravados</dt><dd>250</dd>" in response.text
+
+
+@pytest.mark.parametrize("stage", ["preparing", "persisting"])
+async def test_municipal_monitor_waits_for_a_confirmed_block_total(database, api_client, stage):
+    now = datetime.now(UTC)
+    async with database.sessions() as session, session.begin():
+        session.add(
+            CrawlRun(
+                connector="municipal:imperatriz",
+                status=CrawlRunStatus.RUNNING,
+                filters={"mode": "municipal_payments"},
+                started_at=now,
+                heartbeat_at=now,
+                records_found=4563,
+                cursor={"progress": {"stage": stage, "processed": 0, "total": 4563}},
+            )
+        )
+
+    response = await api_client.get("/crawls/progress")
+    assert response.status_code == 200
+    assert "<progress value=" not in response.text
+    assert (
+        "Organizando os registros recebidos."
+        if stage == "preparing"
+        else "Aguardando confirmação da gravação."
+    ) in response.text
+
+
 @pytest.mark.parametrize("lose_ownership", [False, True])
 async def test_pipeline_reports_while_discovery_waits_and_fences_old_progress(
     database, lose_ownership

@@ -3,21 +3,21 @@
 {% block content %}
 <div class="page-heading">
   <div>
-    <p class="eyebrow">Somente leitura · dados locais</p>
+    <p class="eyebrow">Instalação e atualização dos dados</p>
     <h1>Configurações</h1>
   </div>
 </div>
-<section class="panel">
+<details class="panel"><summary>Configuração técnica · somente leitura</summary>
   <dl class="facts">{% for key, value in settings.items() %}<div><dt>{{ key }}</dt><dd>{{ value }}</dd></div>{% endfor %}</dl>
   <p class="hint">Segredos são sempre ocultados. Edite o arquivo .env e reinicie os processos para alterar configurações.</p>
-</section>
+</details>
 <section class="panel">
   <h2>Coletas automáticas (scheduler)</h2>
   <p>
     O scheduler é um processo separado que atualiza contratações e atas de registro de preços, processa documentos e recalcula prazos em intervalos fixos. Pausar aqui não encerra o processo: os jobs são simplesmente pulados até você retomar.
   </p>
   <p>
-    <span class="badge{% if scheduler.paused or not scheduler.alive %} status-pending{% endif %}">{% if not scheduler.enabled %}Desabilitado{% elif scheduler.paused %}Pausado{% elif scheduler.alive %}Ativo{% else %}Sem heartbeat{% endif %}</span>
+    <span class="badge{% if scheduler.paused or not scheduler.alive %} status-pending{% endif %}">{% if not scheduler.enabled %}Desabilitado{% elif scheduler.paused %}Pausado{% elif scheduler.alive %}Ativo{% else %}Sem sinal recente{% endif %}</span>
     {% if scheduler.last_activity_at %}<small>Última atividade: {{ scheduler.last_activity_at }}</small>{% else %}<small>Sem atividade registrada.</small>{% endif %}
   </p>
   {% if scheduler_feedback == 'pausado' %}

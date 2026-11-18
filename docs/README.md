@@ -14,6 +14,8 @@ comportamento que o sistema não implemente.
 | [API](api.md) | Endpoints REST, páginas web e formato de erros |
 | [CLI](cli.md) | Comandos operacionais e scheduler |
 | [Guia de uso](guia_de_uso.md) | Instalação, fluxo de trabalho e revisão de leads |
+| [Experiência do analista](experiencia_usuario.md) | Agenda, evidências, revisão, buscas e coletas simplificadas |
+| [Validação de usabilidade](validacao_usabilidade.md) | Roteiro e ficha para sessões com advogados/analistas |
 | [Configuração](configuracao.md) | Variáveis de ambiente e valores padrão |
 | [Segurança](seguranca.md) | Downloads, arquivos ZIP, segredos e privacidade |
 | [Operação](operacao.md) | Banco, migrations, testes, lint e troubleshooting |

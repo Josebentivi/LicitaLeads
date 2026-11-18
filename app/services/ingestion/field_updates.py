@@ -72,9 +72,45 @@ METADATA = {
     "confidence",
 }
 # These values are recalculated from identity/evidence, not missing source fields.
-DERIVED = {"contract_id", "procurement_id", "company_id", "match_status", "deactivated_at"}
+DERIVED = {
+    "contract_id",
+    "procurement_id",
+    "price_registry_id",
+    "company_id",
+    "match_status",
+    "deactivated_at",
+}
 # DTO and canonical names differ here; unchanged observations must refresh their clock too.
 SOURCE_FIELDS = {"documents": {"is_active": "active"}}
+
+DERIVED_FROM: dict[str, dict[str, tuple[str, ...]]] = {
+    "contracts": {
+        "company_id": ("supplier_cnpj",),
+        "procurement_id": ("procurement_control_number",),
+        "price_registry_id": ("price_registry_control_number",),
+    },
+    "price_registries": {"procurement_id": ("linked_pncp_control_number",)},
+    "payments": {
+        "company_id": ("supplier_cnpj",),
+        "procurement_id": ("procurement_control_number", "agency_cnpj"),
+        "contract_id": (
+            "supplier_cnpj",
+            "contract_control_number",
+            "contract_number",
+            "process_number",
+            "agency_cnpj",
+            "payment_date",
+        ),
+        "match_status": (
+            "supplier_cnpj",
+            "contract_control_number",
+            "contract_number",
+            "process_number",
+            "agency_cnpj",
+            "payment_date",
+        ),
+    },
+}
 
 
 def utc(value: datetime) -> datetime:
@@ -226,12 +262,31 @@ def _before_flush(session: Session, _flush_context: Any, _instances: Any) -> Non
             prior_clock = clock_history.deleted[0]
             if prior_clock and source_at < utc(prior_clock):
                 entity.last_source_update_at = prior_clock
+        provenance = (source, source_id, source_at, origin, observed_at)
         for attribute in inspection.mapper.column_attrs:
+            source, source_id, source_at, origin, observed_at = provenance
             name = attribute.key
             if name in METADATA:
                 continue
             history = inspection.attrs[name].history
             received = getattr(entity, name)
+            accepted_dependencies = [
+                states[dep] for dep in DERIVED_FROM.get(table, {}).get(name, ()) if dep in states
+            ]
+            derived = bool(accepted_dependencies)
+            if derived:
+                # Associations follow already-merged identity fields, not the
+                # clock of a rejected incoming DTO. Refresh unchanged links too.
+                official = [dep for dep in accepted_dependencies if dep.source_updated_at]
+                reference = (
+                    max(official, key=lambda dep: utc(dep.source_updated_at or dep.observed_at))
+                    if official
+                    else max(accepted_dependencies, key=lambda dep: utc(dep.observed_at))
+                )
+                source, source_id = reference.source, reference.source_record_id
+                source_at = reference.source_updated_at
+                origin = f"derived_from:{reference.field_name}"
+                observed_at = max(utc(dep.observed_at) for dep in accepted_dependencies)
             source_name = SOURCE_FIELDS.get(table, {}).get(name, name)
             source_value = getattr(raw, source_name, None)
             provided = (
@@ -239,6 +294,7 @@ def _before_flush(session: Session, _flush_context: Any, _instances: Any) -> Non
                 and source_value is not None
                 and json_value(source_value) == json_value(received)
             )
+            provided = provided or derived
             if not history.has_changes() and not provided:
                 continue
             previous = history.deleted[0] if history.deleted else None
@@ -296,7 +352,9 @@ def _before_flush(session: Session, _flush_context: Any, _instances: Any) -> Non
                 continue
             decision = "created" if old is None else "updated"
             applied = True
-            if state is not None:
+            if derived:
+                decision = "derived_created" if old is None else "derived_updated"
+            elif state is not None:
                 if (
                     source_at is not None
                     and state.source_updated_at is not None

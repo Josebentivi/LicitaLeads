@@ -2,7 +2,7 @@
 <dl class="cell-list">{% for value in values %}<div>
   <dt>{{ value.kind_label }} · {{ value.scope_label }}</dt>
   <dd>{{ value.amount_display }}{% if value.verification_status != 'confirmed' %} <span class="badge">Divergência — revisar</span>{% endif %}{% if not value.is_current %} <span class="badge">Histórico</span>{% endif %}</dd>
-  <dd><a href="{{ value.evidence_url }}">Fonte do valor{% if value.evidence_page %}, página {{ value.evidence_page }}{% endif %}</a></dd>
+  <dd><a href="{{ value.evidence_url|replace('/api/evidence/', '/evidencias/') }}">Fonte do valor{% if value.evidence_page %}, página {{ value.evidence_page }}{% endif %}</a></dd>
 </div>{% endfor %}</dl>
 {% endmacro %}
 

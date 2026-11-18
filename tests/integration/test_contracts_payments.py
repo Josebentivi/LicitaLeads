@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, time, timedelta
 from decimal import Decimal
+from zoneinfo import ZoneInfo
 
 import httpx
 import pytest
@@ -78,18 +79,32 @@ async def test_contract_value_fallback_preserves_official_zero_in_api_and_pages(
     assert detail.status_code == 200
     summary = detail.json()["payment_summary"]
     assert summary["contracted_value"] == (float(expected) if expected is not None else None)
-    assert summary["balance"] == (float(expected) if expected is not None else None)
-    if expected == "0":
-        assert summary["status"] != "sem_pagamento_localizado"
+    assert summary["payment_count"] == 0
+    assert summary["paid_value"] is None
+    assert summary["balance"] is None
+    assert summary["status"] == (
+        "sem_pagamento_localizado" if expected in {"25", "100"} else "nao_avaliado"
+    )
     page = await api_client.get(f"/contratos/{identifier}")
     listing = await api_client.get("/contratos")
     assert page.status_code == listing.status_code == 200
-    if expected == "0":
-        html = BeautifulSoup(page.text, "html.parser")
-        assert (
-            html.find("dt", string="Valor global").find_next_sibling("dd").get_text(strip=True)
-            == "R$ 0,00"
+    html = BeautifulSoup(page.text, "html.parser")
+    for label, value in (
+        ("Valor global", global_value),
+        ("Valor acumulado", accumulated),
+        ("Valor inicial", initial),
+    ):
+        assert html.find("dt", string=label).find_next_sibling("dd").get_text(strip=True) == (
+            f"R$ {value},00" if value is not None else "Não informado"
         )
+    assert (
+        html.find("dt", string="Registros de pagamento vinculados")
+        .find_next_sibling("dd")
+        .get_text(strip=True)
+        == "0"
+    )
+    assert "A cobertura das fontes pode ser parcial" in page.text
+    if expected == "0":
         row = (
             BeautifulSoup(listing.text, "html.parser")
             .find("a", href=f"/contratos/{identifier}")
@@ -127,6 +142,111 @@ def _raw_contract() -> RawContract:
         supplier_cnpj=SUPPLIER_CNPJ,
         supplier_name="Empresa Contratada Ltda.",
     )
+
+
+async def test_contract_expiration_windows_keep_header_and_term_sources(api_client, database):
+    timezone = ZoneInfo("America/Sao_Paulo")
+    today = datetime.now(timezone).date()
+
+    def at_day(offset):
+        return datetime.combine(today + timedelta(days=offset), time.min, timezone)
+
+    async with database.sessions() as session, session.begin():
+        header = Contract(source="pncp", external_id="contract-header", valid_until=at_day(30))
+        term = Contract(source="pncp", external_id="contract-term", valid_until=at_day(-2))
+        later = Contract(source="pncp", external_id="contract-later", valid_until=at_day(90))
+        unknown = Contract(source="pncp", external_id="contract-unknown")
+        session.add_all([header, term, later, unknown])
+        await session.flush()
+        session.add_all(
+            [
+                ContractTerm(
+                    contract_id=term.id,
+                    term_number="T1",
+                    new_valid_until=at_day(0),
+                    status="Para conferência",
+                    source_url="https://example.org/termo",
+                ),
+                ContractTerm(contract_id=term.id, term_number="T2", new_valid_until=at_day(59)),
+            ]
+        )
+        term_id = term.id
+
+    for days, expected in [
+        (30, ["contract-term", "contract-header"]),
+        (60, ["contract-term", "contract-header"]),
+        (90, ["contract-term", "contract-header", "contract-later"]),
+    ]:
+        response = await api_client.get("/api/contracts", params={"expiring_within_days": days})
+        assert response.status_code == 200
+        data = response.json()
+        assert data["total"] == len(expected)
+        assert [item["external_id"] for item in data["items"]] == expected
+        first = data["items"][0]
+        assert first["valid_until"] == at_day(-2).astimezone(UTC).isoformat()
+        assert [item["term_number"] for item in first["term_expirations"]] == ["T1", "T2"]
+    page = await api_client.get("/contratos", params={"expiring_within_days": "30"})
+    assert page.status_code == 200
+    assert "Conferir termos e fontes" in page.text
+    assert at_day(0).strftime("%d/%m/%Y") in page.text
+    detail = await api_client.get(f"/contratos/{term_id}")
+    assert 'href="https://example.org/termo"' in detail.text
+    assert "Para conferência" in detail.text
+    assert (await api_client.get("/contratos?expiring_within_days=")).status_code == 200
+    assert (await api_client.get("/api/contracts?expiring_within_days=-1")).status_code == 422
+
+
+async def test_contract_payment_proof_and_inactive_representations(api_client, database):
+    async with database.sessions() as session, session.begin():
+        company = Company(cnpj=SUPPLIER_CNPJ, normalized_name="empresa")
+        session.add(company)
+        await session.flush()
+        contract = Contract(
+            source="pncp",
+            external_id="proof",
+            company_id=company.id,
+            supplier_cnpj=company.cnpj,
+            global_value=Decimal(100),
+        )
+        session.add(contract)
+        await session.flush()
+        for number, amount, current in [("current", 100, True), ("replaced", 100, False)]:
+            session.add(
+                Payment(
+                    source="manual",
+                    external_id=number,
+                    company_id=company.id,
+                    contract_id=contract.id,
+                    supplier_cnpj=company.cnpj,
+                    phase="pago",
+                    amount=amount,
+                    is_current=current,
+                )
+            )
+        contract_id = contract.id
+    detail = await api_client.get(f"/api/contracts/{contract_id}")
+    summary = detail.json()["payment_summary"]
+    assert (summary["status"], summary["payment_count"], summary["paid_value"]) == ("pago", 1, 100)
+    dossier = await api_client.get(
+        f"/api/companies/{SUPPLIER_CNPJ}/sections/contracts/{contract_id}"
+    )
+    execution = next(
+        group for group in dossier.json()["groups"] if group["label"] == "Execução financeira"
+    )
+    assert [item["external_id"] for item in execution["items"]] == ["current"]
+    async with database.sessions() as session, session.begin():
+        session.add(
+            Payment(
+                source="manual", external_id="unknown-amount", contract_id=contract_id, phase="pago"
+            )
+        )
+    summary = (await api_client.get(f"/api/contracts/{contract_id}")).json()["payment_summary"]
+    assert (summary["status"], summary["payment_count"], summary["paid_value"]) == (
+        "nao_avaliado",
+        2,
+        None,
+    )
+    assert summary["balance"] is None
 
 
 class ContractConnector(StaticConnector):
@@ -287,7 +407,7 @@ async def test_payment_api_and_page_show_unlinked_payment(
     assert {item["id"] for item in sources.json()} >= {"transparencia", "manual"}
     assert listing.json()["items"][0]["match_status"] == "unlinked"
     assert str(payment_id) in listing.json()["items"][0]["id"]
-    assert page.status_code == 200 and "Nao conciliado" in page.text
+    assert page.status_code == 200 and "Sem vínculo exato localizado" in page.text
 
 
 class FakePaymentConnector:
@@ -590,6 +710,7 @@ async def test_contract_payment_summary_ignores_commitment_and_liquidation(
     assert summary["paid_value"] == 250.0
     assert summary["balance"] == 750.0
     assert summary["status"] == "parcial"
+    assert summary["payment_count"] == 1
 
 
 @pytest.mark.asyncio
@@ -673,7 +794,7 @@ async def test_contract_matching_requires_a_proven_year(
 
 
 @pytest.mark.asyncio
-async def test_payment_reingestion_clears_stale_contract_link(
+async def test_payment_reingestion_missing_fields_preserves_proven_link(
     database: DatabaseContext,
 ) -> None:
     now = datetime.now(UTC)
@@ -708,9 +829,9 @@ async def test_payment_reingestion_clears_stale_contract_link(
     async with database.sessions() as session:
         stored = await session.scalar(select(Payment))
     assert stored is not None
-    assert stored.contract_id is None
-    assert stored.match_status == "unlinked"
-    assert stored.contract_id != contract_id
+    # Missing source fields cannot erase the accepted official identity.
+    assert stored.contract_id == contract_id
+    assert stored.match_status == "linked"
 
 
 @pytest.mark.asyncio

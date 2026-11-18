@@ -14,6 +14,7 @@ from uuid import UUID, uuid4
 
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.orm import load_only
 
 from app.config import Settings, get_settings
 from app.connectors.base import ConnectorResult, DataAvailability, RawPayment, RawSourceRecord
@@ -471,10 +472,12 @@ class PaymentIngestionService:
         checkpoint: Callable[[AsyncSession], Awaitable[None]] | None = None,
     ) -> PaymentIngestionSummary:
         summary = PaymentIngestionSummary()
-        session.info["crawl_run_id"] = self._collection_run.get() or session.info.get(
-            "crawl_run_id"
-        )
+        run_id = self._collection_run.get() or session.info.get("crawl_run_id")
+        session.info["crawl_run_id"] = run_id
         total = len(payments)
+        # Many payments share a single portal page. Keep its audit metadata in
+        # the identity map for this block without decoding the saved response.
+        payment_sources: dict[UUID, SourceRecord | None] = {}
         for index, payment in enumerate(payments, start=1):
             await self.assert_ingestion_fence(session)
             if checkpoint is not None:
@@ -482,11 +485,24 @@ class PaymentIngestionService:
             payment_source: SourceRecord | None = None
             linked_source_id = payment.source_record_id or source_record_id
             if linked_source_id:
-                payment_source = await session.get(SourceRecord, linked_source_id)
+                if linked_source_id not in payment_sources:
+                    payment_sources[linked_source_id] = await session.get(
+                        SourceRecord,
+                        linked_source_id,
+                        options=[
+                            load_only(
+                                SourceRecord.id,
+                                SourceRecord.source,
+                                SourceRecord.collected_at,
+                                SourceRecord.collection_complete,
+                            )
+                        ],
+                    )
+                payment_source = payment_sources[linked_source_id]
             tracker = install_audit(
                 session,
                 payment,
-                run_id=session.info.get("crawl_run_id"),
+                run_id=run_id,
                 source_record_id=linked_source_id,
                 complete=bool(payment_source and payment_source.collection_complete),
             )
@@ -498,37 +514,26 @@ class PaymentIngestionService:
                 )
                 await coordinator.confirm(session, payment)
             tracker.outcome.count(summary, created, prefix="payments")
-            run_id = session.info.get("crawl_run_id")
-            if run_id:
-                run = await session.get(CrawlRun, run_id)
-                if run is not None and run.status in {
-                    CrawlRunStatus.PENDING,
-                    CrawlRunStatus.RUNNING,
-                }:
-                    run.counting_version = 2
-                    run.records_created = (run.records_created or 0) + int(created)
-                    run.records_updated = (run.records_updated or 0) + int(not created)
-                    run.records_found = run.records_created + run.records_updated
-                    run.records_changed = (run.records_changed or 0) + int(
-                        not created and tracker.outcome.changed
-                    )
-                    run.records_unchanged = (run.records_unchanged or 0) + int(
-                        not created and not tracker.outcome.changed
-                    )
-                    run.records_stale_ignored = (run.records_stale_ignored or 0) + int(
-                        tracker.outcome.stale
-                    )
-                    run.records_conflicted = (run.records_conflicted or 0) + int(
-                        tracker.outcome.conflicted
-                    )
-                    run.heartbeat_at = datetime.now(UTC)
-
             summary.payments_created += int(created)
             summary.payments_updated += int(not created)
             summary.payments_linked += int(linked)
             summary.payments_unlinked += int(not linked)
             if progress_callback is not None and (index % 25 == 0 or index == total):
                 progress_callback(index, total)
+        if run_id and total:
+            run = await session.get(CrawlRun, run_id)
+            if run is not None and run.status in {CrawlRunStatus.PENDING, CrawlRunStatus.RUNNING}:
+                run.counting_version = 2
+                run.records_created = (run.records_created or 0) + summary.payments_created
+                run.records_updated = (run.records_updated or 0) + summary.payments_updated
+                run.records_found = run.records_created + run.records_updated
+                run.records_changed = (run.records_changed or 0) + summary.payments_changed
+                run.records_unchanged = (run.records_unchanged or 0) + summary.payments_unchanged
+                run.records_stale_ignored = (
+                    run.records_stale_ignored or 0
+                ) + summary.payments_stale_ignored
+                run.records_conflicted = (run.records_conflicted or 0) + summary.payments_conflicted
+                run.heartbeat_at = datetime.now(UTC)
         return summary
 
     async def _source_record(
@@ -582,11 +587,6 @@ class PaymentIngestionService:
     ) -> tuple[bool, bool]:
         raw_document = normalize_cnpj(raw.supplier_cnpj)
         cnpj = raw_document if is_valid_cnpj(raw_document) else None
-        company = await self._company(session, cnpj, raw.supplier_name)
-        contract, confidence, match_reason, ambiguous = await self._match_contract(
-            session, raw, cnpj
-        )
-        procurement = await self._match_procurement(session, raw)
         fingerprint = stable_fingerprint("payment", raw.source, raw.external_id)
         payment = await session.scalar(select(Payment).where(Payment.fingerprint == fingerprint))
         created = payment is None
@@ -598,11 +598,9 @@ class PaymentIngestionService:
             )
             session.add(payment)
         for name, value in {
-            "contract_id": contract.id if contract else None,
-            "procurement_id": procurement.id if procurement else None,
-            "company_id": company.id if company else None,
             "source_record_id": source.id if source else None,
             "contract_number": raw.contract_number,
+            "contract_control_number": raw.contract_control_number,
             "procurement_control_number": raw.procurement_control_number,
             "agency_name": raw.agency_name,
             "agency_cnpj": normalize_cnpj(raw.agency_cnpj),
@@ -617,23 +615,50 @@ class PaymentIngestionService:
             "is_current": bool(getattr(raw, "is_current", True)),
             "status": raw.status,
             "supplier_cnpj": cnpj,
-            "supplier_name": raw.supplier_name,
             "source_url": raw.source_url,
-            "match_status": (
-                "linked"
-                if contract is not None
-                else (
-                    "ambiguous"
-                    if ambiguous
-                    else ("procurement_linked" if procurement is not None else "unlinked")
-                )
-            ),
-            "match_confidence": confidence,
-            "match_reason": match_reason,
-            "requires_manual_review": contract is None,
         }.items():
-            if value is not None:
+            if value is not None or name in raw.cleared_fields:
                 setattr(payment, name, value)
+        await session.flush()
+        if (raw.supplier_name is not None or "supplier_name" in raw.cleared_fields) and (
+            not raw.supplier_cnpj or normalize_cnpj(raw.supplier_cnpj) == payment.supplier_cnpj
+        ):
+            payment.supplier_name = raw.supplier_name
+            await session.flush()
+        accepted = raw.model_copy(
+            update={
+                name: getattr(payment, name)
+                for name in (
+                    "supplier_cnpj",
+                    "supplier_name",
+                    "agency_cnpj",
+                    "contract_number",
+                    "contract_control_number",
+                    "process_number",
+                    "payment_date",
+                    "procurement_control_number",
+                )
+            }
+        )
+        cnpj = normalize_cnpj(payment.supplier_cnpj)
+        company = await self._company(session, cnpj, payment.supplier_name)
+        contract, confidence, match_reason, ambiguous = await self._match_contract(
+            session, accepted, cnpj
+        )
+        procurement = await self._match_procurement(session, accepted)
+        if (
+            procurement
+            and payment.agency_cnpj
+            and normalize_cnpj(procurement.agency_cnpj) != normalize_cnpj(payment.agency_cnpj)
+        ):
+            procurement = None
+        payment.match_status = (
+            "linked"
+            if contract
+            else (
+                "ambiguous" if ambiguous else ("procurement_linked" if procurement else "unlinked")
+            )
+        )
         # Never keep a stale link when a later run cannot reproduce the match.
         payment.contract_id = contract.id if contract else None
         payment.procurement_id = procurement.id if procurement else None
@@ -672,6 +697,46 @@ class PaymentIngestionService:
         """Match only an unambiguous contract and a proven supplier."""
 
         agency_cnpj = normalize_cnpj(raw.agency_cnpj)
+        if raw.contract_control_number:
+            if not cnpj:
+                return None, None, "official contract identifier without supplier CNPJ", False
+            matches = list(
+                (
+                    await session.scalars(
+                        select(Contract)
+                        .where(
+                            Contract.pncp_control_number == raw.contract_control_number,
+                            Contract.supplier_cnpj == cnpj,
+                        )
+                        .limit(2)
+                    )
+                ).all()
+            )
+            if len(matches) != 1 or (
+                agency_cnpj and normalize_cnpj(matches[0].agency_cnpj) != agency_cnpj
+            ):
+                return (
+                    None,
+                    None,
+                    "official contract identifier/supplier/agency mismatch",
+                    len(matches) > 1,
+                )
+            if (
+                raw.procurement_control_number
+                and matches[0].procurement_control_number
+                and raw.procurement_control_number != matches[0].procurement_control_number
+            ):
+                return None, None, "official contract and procurement identifiers contradict", False
+            if raw.payment_date is None:
+                return (
+                    None,
+                    None,
+                    "official contract identifier without proven payment date; manual review required",
+                    False,
+                )
+            if not self._contract_covers_payment(matches[0], raw.payment_date):
+                return None, None, "payment date is outside contract validity", False
+            return matches[0], Decimal("1"), "pncp_contract_control+supplier+agency+validity", False
         contract_date_missing = bool(raw.contract_number and cnpj and raw.payment_date is None)
         if raw.contract_number and cnpj and raw.payment_date is not None:
             base = select(Contract).where(

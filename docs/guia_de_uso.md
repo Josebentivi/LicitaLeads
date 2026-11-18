@@ -1,5 +1,31 @@
 # Guia de uso
 
+## Comece pela sua agenda
+
+No início, **Minha agenda de análise** oferece filas de revisão, prazos nas
+próximas 72 horas, novas oportunidades e ajustes solicitados. Abra um cartão
+para ver a lista já filtrada. Em **Oportunidades**, confira o fato, a natureza
+do prazo e a prova; registre sua decisão e, se desejar, analise a próxima.
+O retorno à lista mantém a busca e a página. Veja o
+[guia da experiência do analista](experiencia_usuario.md).
+
+## Encerrar o programa
+
+Use **Encerrar a aplicação**, no rodapé do menu lateral, e confirme. O sistema
+cancela coletas, análises de IA e testes ativos ou pendentes, encerra os processos
+filhos e fecha API, scheduler e launcher. Dados já gravados, evidências e
+resultados concluídos são preservados.
+
+A próxima abertura manterá coletas automáticas e IA pausadas. Retomá-las ou
+continuar trabalhos cancelados exige uma ação explícita. O botão não apaga o
+acervo e não equivale apenas a pausar o scheduler.
+
+O encerramento completo está disponível para a instância iniciada pelo
+`iniciar.bat`, com acesso pela própria máquina. O navegador pode impedir que a
+aba seja fechada; nesse caso ela mantém a mensagem **Aplicação encerrada**.
+Se a comunicação cair antes da confirmação, confira o log do launcher. Há até
+60 segundos de limpeza cooperativa antes de finalizar processos travados.
+
 ## Instalação
 
 ```powershell
@@ -56,22 +82,26 @@ Ou tudo de uma vez com `python -m app.cli run-pipeline --uf MA --days 7`.
 
 | Tela | Uso |
 |---|---|
-| **Dashboard** | Métricas (contratações, eventos, empresas, leads, prazos em 24 h, vencidos, revisões pendentes, erros de coleta) e últimos leads |
+| **Minha agenda / Dashboard** | Filas de prioridades, atualização das fontes, oportunidades e acesso à coleta; indicadores técnicos expansíveis |
 | **Contratações** | Filtros por UF, município e órgão; detalhe com itens, documentos, participantes, eventos e origem de cada dado |
 | **Empresas** | CNPJ, participações comprovadas, eventos e contatos corporativos com origem |
-| **Atas (ARP)** | Consulta manual por UF e órgãos/unidades conhecidos, fontes e período; itens e fornecedores registrados |
-| **Contratos** | Coleta por fonte, CNPJ do órgão e período; itens, termos e pagamentos conciliados |
-| **Pagamentos** | Fontes municipais e importação CSV/JSON; pagamentos conciliados ou para revisão |
-| **Leads** | Filtros por score mínimo, tipo de evento e revisão pendente; detalhe com evidências e rascunho |
+| **Atas (ARP)** | Busca no acervo; unidades, itens e fornecedores registrados |
+| **Contratos** | Busca por número, órgão ou CNPJ do fornecedor; itens, termos e pagamentos conciliados |
+| **Pagamentos** | Pagamentos conciliados ou para revisão e importação CSV/JSON de arquivos oficiais |
+| **Oportunidades** | Busca por empresa/CNPJ/processo, filas por situação, prazo, filtros avançados, evidências legíveis e revisão contínua |
 | **Coletas** | Progresso, histórico, fontes, continuação, repetição, falhas documentais e fila de IA |
 | **Configurações** | Configuração pública sem segredos, pausa do scheduler e manutenção |
 | **Fontes** | Matriz de capacidades auditadas |
 | **Testes** | Diagnóstico rápido e suíte local com etapas e relatórios identificados |
 | **Ajuda** | Orientações de uso e operação dentro da aplicação |
 
-No Dashboard, selecione UF e dias, mantenha **Baixar/processar documentos**
-marcado quando quiser identificar eventos em documentos e clique em **Executar
-coleta**. Em **Coletas**, acompanhe fontes, estágio, falhas e documentos. O
+Clique em **Coletar dados** no topo de qualquer página. Para mudar a UF ou o
+período, abra **Coletas → Escopo da próxima coleta** e use o mesmo botão.
+O período inclui as duas datas. O padrão usa `DEFAULT_UF` e
+`DEFAULT_LOOKBACK_DAYS`; os atalhos de calendário permitem trocar a janela.
+Em **Coletas**, cada etapa mostra o estado e as pendências. Assim que a etapa
+de contratações e documentos terminar, o atalho **Ver oportunidades vinculadas**
+abre a fila daquela coleta. O
 total informado pela fonte é o total da consulta, não uma garantia de que
 todos serão processados naquela execução. Uma execução parcial também pode
 decorrer de limite ou resposta incompleta. Os resultados confirmados permanecem
@@ -84,20 +114,23 @@ ser reaproveitados. Marque **Reconsultar detalhes já verificados** para forçar
 consulta completa. Continuações mantêm a opção original. Documentos com falha
 elegíveis têm reprocessamento próprio, sem repetir a descoberta.
 
-Em **Atas**, selecione UF, órgão/unidade e fonte ou as opções de todos os
-órgãos conhecidos e todas as fontes disponíveis. As unidades vêm de
-contratações já identificadas e podem não cobrir toda a UF. O formulário manual
-começa com o menor valor entre 7 dias e a janela automática configurada; o job
-automático usa a janela geral de 30 dias por padrão ou
-o override de atas. A CLI `crawl-atas` usa 365 dias se `--days` for omitido.
-O formulário manual não muda o agendamento.
-
-Em **Contratos**, informe o CNPJ do órgão e o período; a janela é de publicação
-no PNCP e de início de vigência no Compras.gov.br. Em **Pagamentos**, escolha
-uma fonte municipal ou importe CSV/JSON do portal. Um identificador oficial,
+As atas usam órgãos e unidades conhecidos na UF. A coleta de contratos usa os
+órgãos configurados ou os já identificados na UF; a janela é de publicação no
+PNCP e de início de vigência no Compras.gov.br. Os pagamentos municipais são
+consultados pelos exercícios que o período inclui. Pagamentos federais
+dependem da chave do Portal da Transparência e dos CNPJs de favorecidos
+configurados. Em **Pagamentos**, também é possível importar CSV/JSON oficial. Um
+identificador oficial,
 quando disponível, é vinculado ao portal de origem. Sem ele, uma linha alterada
 pode gerar outro registro. Empenho, contrato, aditivo e pagamento são fatos
 distintos; pagamento não conciliado não prova inadimplência.
+
+O **TCE-MA** complementa os pregões eletrônicos da Prefeitura de São Luís
+(UASG 980921) com vínculo confirmado pelo controle PNCP. No detalhe do
+pregão, consulte a plataforma de origem, quando o PNCP publica o link, e a
+seção **TCE-MA · dados complementares**, com referências oficiais e registros
+para revisão quando o controle coincide e a identificação diverge. A lista do tribunal não vira evento ou oportunidade
+automaticamente.
 
 ## Revisão de leads
 
@@ -203,3 +236,14 @@ Os valores mostram empresa, lote/item local, natureza da proposta e evidência. 
 Totais publicados para vários itens, sem valores individuais e sem correspondência suficiente de escopo, não são atribuídos ao processo inteiro. Consulte a evidência e o histórico quando não houver um valor individual confirmado.
 
 Divergências ficam identificadas e não entram na referência econômica dos leads. O cálculo usa o maior valor individual elegível, sem somar lotes. O reparo do acervo preserva notas antigas, decisões humanas e rascunhos; o operador pode solicitar recálculo explícito posteriormente. Leads com atribuição invalidada ficam históricos e não permitem gerar outro rascunho.
+## Central de IA
+
+Em **Operação de dados → Central de IA**, acompanhe análises de documentos já
+extraídos, bloqueios, consumo e cobertura parcial. A IA pode ser pausada ou
+retomada independentemente das coletas automáticas. Enfileirar ou tentar IA
+novamente não baixa documentos nem inicia OCR.
+
+Confira **Sugestões para revisão** antes de confirmar empresa e ato. O candidato
+não é um fato comprovado e não gera leads ou prazos automaticamente. Os detalhes
+da contratação e da empresa oferecem acessos filtrados à central. Veja o
+[guia da fila de IA](fila_ia.md) para limites, custos e cancelamento.

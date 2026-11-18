@@ -42,6 +42,7 @@ NAV_GROUPS: tuple[NavigationGroup, ...] = (
         description="Contratações, atas de registro de preços e contratos oficiais.",
         items=(
             NavigationItem("Contratações", "/procurements"),
+            NavigationItem("Itens de compra", "/itens"),
             NavigationItem("Atas (ARP)", "/atas"),
             NavigationItem("Contratos", "/contratos"),
         ),
@@ -64,7 +65,7 @@ NAV_GROUPS: tuple[NavigationGroup, ...] = (
         description="Empresas monitoradas, participações, leads e revisão humana.",
         items=(
             NavigationItem("Empresas", "/empresas"),
-            NavigationItem("Leads", "/leads"),
+            NavigationItem("Oportunidades", "/leads"),
         ),
     ),
     NavigationGroup(
@@ -76,6 +77,8 @@ NAV_GROUPS: tuple[NavigationGroup, ...] = (
         description="Coletas, qualidade das fontes e saúde do scheduler.",
         items=(
             NavigationItem("Coletas", "/crawls"),
+            NavigationItem("Alterações do acervo", "/alteracoes"),
+            NavigationItem("Central de IA", "/ia"),
             NavigationItem("Fontes", "/source-capabilities"),
         ),
     ),

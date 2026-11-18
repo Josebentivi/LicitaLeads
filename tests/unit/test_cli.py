@@ -413,42 +413,47 @@ def test_optional_municipal_sources_and_backfill_are_explicit(monkeypatch):
 def test_export_cli_preserves_csv_quotes_and_optional_deadlines(
     tmp_path, monkeypatch, has_deadline
 ):
+    from datetime import UTC, datetime, timedelta
+
     from app.cli import main as cli
 
-    lead = SimpleNamespace(
-        id="lead-1",
-        company=SimpleNamespace(
-            legal_name=None, normalized_name="Empresa normalizada", cnpj="00000000000191"
-        ),
-        procurement=SimpleNamespace(
-            agency_name="Órgão", pncp_control_number=None, purchase_number="1/2026"
-        ),
-        triggering_event=SimpleNamespace(
-            event_type=SimpleNamespace(value="participation_detected"),
-            source_url="https://official.test/document",
-        ),
-        deadline=SimpleNamespace(
-            explicit_deadline_at=None,
-            estimated_deadline_at="2026-01-10",
-            status=SimpleNamespace(value="estimated"),
-        )
-        if has_deadline
-        else None,
-        score=70,
-        lead_status=SimpleNamespace(value="draft"),
-        reason_summary='Motivo, com "aspas"\ne quebra',
-    )
-    session = _CLISession([], [lead])
-    monkeypatch.setattr(cli, "async_session_factory", lambda: session)
+    row = {
+        "empresa": "Empresa normalizada",
+        "processo": "1/2026",
+        "motivo": 'Motivo, com "aspas"\ne quebra',
+        "prazo_estimado": datetime.now(UTC) - timedelta(days=2) if has_deadline else None,
+        "prazo_explicito": None,
+        "vigente": True,
+        "prazo_vigente": has_deadline,
+        "evidencia_id": None,
+    }
+
+    class Result:
+        def keys(self):
+            return row.keys()
+
+        async def mappings(self):
+            yield row
+
+        async def close(self):
+            pass
+
+    class Session(_CLISession):
+        async def stream(self, statement):
+            return Result()
+
+    monkeypatch.setattr(cli, "async_session_factory", lambda: Session([]))
     destination = tmp_path / "exports" / "leads.csv"
     result = CliRunner().invoke(app, ["export-leads", str(destination)])
     assert result.exit_code == 0, result.output
     with destination.open(encoding="utf-8-sig", newline="") as stream:
         rows = list(csv.DictReader(stream))
-    assert len(rows) == 1 and rows[0]["motivo"] == lead.reason_summary
+    assert len(rows) == 1 and rows[0]["motivo"] == row["motivo"]
     assert rows[0]["empresa"] == "Empresa normalizada"
     assert rows[0]["processo"] == "1/2026"
-    assert rows[0]["status_prazo"] == ("estimated" if has_deadline else "UNKNOWN")
+    assert rows[0]["status_prazo"] == (
+        "Data estimada ultrapassada" if has_deadline else "Data-limite não identificada"
+    )
 
 
 # CLI enqueue is intentionally separate from all document/network processing.

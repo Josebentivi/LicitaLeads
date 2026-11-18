@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+{% block title %}Encerrar a aplicação · LicitaLead Monitor{% endblock %}
+{% block content %}
+<section class="card" data-application-shutdown data-phase="{{ state.phase }}">
+  <h1>Encerrar a aplicação</h1>
+  {% if not available %}
+    <p>Abra a aplicação pelo <code>iniciar.bat</code> para usar o encerramento completo.</p>
+  {% elif state.phase == 'running' %}
+    <p>Encerrar a aplicação? Coletas, análises de IA e testes ativos ou pendentes serão cancelados. Os dados já gravados serão preservados.</p>
+    <p>Na próxima abertura, coletas automáticas e IA permanecerão pausadas. Trabalhos cancelados dependerão de ação explícita para voltar.</p>
+    <form method="post" action="/application/shutdown">
+      <input type="hidden" name="token" value="{{ token }}">
+      <button type="submit" class="danger">Confirmar encerramento</button>
+      <a class="button secondary" href="/dashboard">Voltar</a>
+    </form>
+  {% else %}
+    <h2 data-shutdown-title>{% if state.phase in ['complete', 'exit'] %}Aplicação encerrada{% else %}Encerramento solicitado{% endif %}</h2>
+    <p role="status" aria-live="polite" data-shutdown-status>{{ state.detail or 'Aguardando o cancelamento dos trabalhos e o encerramento dos serviços.' }}</p>
+    <p>Coletas automáticas e IA permanecerão pausadas na próxima abertura.</p>
+    <noscript><p>O encerramento continuará sem JavaScript. <a href="/application/shutdown">Consultar andamento</a> antes de a interface sair do ar.</p></noscript>
+  {% endif %}
+</section>
+{% endblock %}

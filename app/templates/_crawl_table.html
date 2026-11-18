@@ -1,11 +1,11 @@
 <div id="crawl-table"
-     hx-get="/crawls/table" hx-trigger="crawls:changed from:body{% if has_active %}, every 5s{% endif %}" hx-swap="outerHTML">
+     hx-get="/crawls/table{% if focused_run %}?run={{ focused_run }}{% endif %}" hx-trigger="crawls:changed from:body{% if has_active %}, every 5s{% endif %}" hx-swap="outerHTML">
   <section class="panel table-wrap">
     <table class="crawl-table">
       <thead>
         <tr>
           <th>Coleta</th>
-          <th>Período</th>
+          <th>Período consultado / execução</th>
           <th>Status</th>
           <th>Fontes</th>
           <th>Encontrados</th>
@@ -15,18 +15,25 @@
       </thead>
       <tbody>
         {% for run in crawls %}
-        <tr>
+        <tr id="execucao-{{ run.id }}">
           <td>
             <strong>{{ run.connector_label }}</strong>
             {% if run.mode_label %}<span class="badge">{{ run.mode_label }}</span>{% endif %}
             <small title="{{ run.id }}">{{ run.id|string|truncate(13, True, '…') }}</small>
           </td>
           <td class="date-cell">
-            <span>{{ run.started_at }}</span>
-            <small>até {{ run.finished_at }}</small>
+            <strong>{{ run.query_start }} → {{ run.query_end }}</strong>
+            <small>Execução: {{ run.started_at }}</small>
+            <small>Finalizada em: {{ run.finished_at }}</small>
           </td>
           <td><span class="badge status-{{ run.status }}">{{ run.status_label }}</span></td>
           <td>
+            {% if run.complete %}
+              {% if run.active %}<a href="#coleta-{{ run.id }}">Acompanhar etapas</a>
+              {% else %}<details class="complete-history" id="complete-history-{{ run.id }}" hx-preserve>
+                <summary>Ver etapas</summary>{% include "_complete_collection_stages.html" %}
+              </details>{% endif %}
+            {% else %}
             <div class="source-list">
               {% for source in run.sources %}
               <div class="source-result">
@@ -43,13 +50,15 @@
               </div>
               {% endfor %}
             </div>
+            {% endif %}
           </td>
-          <td><strong class="record-count">{{ run.records_found }}</strong>{% if run.counting_version == 2 %}<small>{{ run.records_created }} novos · {{ run.records_changed }} alterados · {{ run.records_unchanged }} sem alteração</small>{% if run.records_conflicted %}<small class="badge status-pending">{{ run.records_conflicted }} com divergência para revisão</small>{% endif %}{% if run.records_stale_ignored %}<small>{{ run.records_stale_ignored }} com versão antiga ignorada</small>{% endif %}{% else %}<small>Contadores detalhados indisponíveis nesta execução antiga.</small>{% endif %}{% if run.progress %}<small>{{ run.progress }}</small>{% endif %}</td>
+          <td>{% if run.complete %}{{ run.complete_stages|length }} etapas{% else %}<strong class="record-count">{{ run.records_found }}</strong>{% if run.counting_version == 2 %}<small>{{ run.records_created }} novos · {{ run.records_changed }} alterados · {{ run.records_unchanged }} sem alteração</small>{% if run.records_conflicted %}<small class="badge status-pending">{{ run.records_conflicted }} com divergência para revisão</small>{% endif %}{% if run.records_stale_ignored %}<small>{{ run.records_stale_ignored }} com versão antiga ignorada</small>{% endif %}{% else %}<small>Contadores detalhados indisponíveis nesta execução antiga.</small>{% endif %}{% if run.progress %}<small>{{ run.progress }}</small>{% endif %}{% endif %}</td>
           <td>
             {{ run.duration }}
             {% if run.documents_progress %}<small>{{ run.documents_progress }}</small>{% endif %}
           </td>
           <td class="crawl-actions">
+            {% if not run.active and (not run.complete or run.has_linked_opportunities) %}<p><a href="{{ run.result_url }}">{{ run.result_label }}</a>{% if run.records_url %} · <a href="{{ run.records_url }}">Ver contratações vinculadas</a>{% endif %}</p>{% endif %}
             {% if run.can_continue %}<form method="post" action="/crawls/{{ run.id }}/continue" class="retry-form"><button type="submit" class="button compact">Continuar coleta</button></form>{% endif %}
             {% if run.has_document_batch %}<a href="/crawls/{{ run.id }}/documents">Arquivos, falhas e próximas tentativas</a>{% endif %}
             {% if run.retry_documents %}
@@ -57,7 +66,7 @@
               <button type="submit" class="button compact">Reprocessar documentos com falha</button>
             </form>
             {% endif %}
-            {% if run.active %}
+            {% if run.active and not run.complete %}
             <form method="post" action="/crawls/{{ run.id }}/cancel" class="retry-form" onsubmit="return confirm('Encerrar esta coleta em andamento?');">
               <button type="submit" class="button secondary compact">Encerrar coleta</button>
             </form>
@@ -99,7 +108,7 @@
                 </details>
               </div>
             {% endif %}
-            {% if not diagnostics.found %}<span class="hint">Nenhuma falha registrada.</span>{% endif %}
+            {% if not diagnostics.found and not run.complete %}<span class="hint">Nenhuma falha registrada.</span>{% endif %}
           </td>
         </tr>
         {% else %}

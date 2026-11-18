@@ -3,24 +3,32 @@
 from __future__ import annotations
 
 import asyncio
+import ipaddress
+import re
 from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Annotated, Any, cast
+from urllib.parse import urlencode, urlsplit
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile
-from fastapi.responses import RedirectResponse
+from fastapi.responses import RedirectResponse, StreamingResponse
 from fastapi.templating import Jinja2Templates
 from pydantic import BeforeValidator
-from sqlalchemy import func, select
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy import false, func, select
+from sqlalchemy.ext.asyncio import AsyncScalarResult, AsyncSession, async_sessionmaker
 from sqlalchemy.orm import selectinload
 
-from app.api.routes.crawls import cancel_crawl, continue_crawl_endpoint, launch_crawl
-from app.api.routes.history import EntityType, history_page
+from app.api.routes.crawls import (
+    cancel_crawl,
+    continue_crawl_endpoint,
+    launch_complete_collection,
+    launch_crawl,
+)
+from app.api.routes.history import EntityType, history_page, relevant_changes
 from app.api.routes.leads import generate_outreach
 from app.api.serialization import model_dict
 from app.config import Settings, get_settings
@@ -29,22 +37,26 @@ from app.connectors.municipal_payments.sources import get_municipal_source, list
 from app.dependencies import get_db
 from app.models import (
     CollectionBatch,
+    CollectionWorkItem,
     Company,
     CompanyContact,
     CrawlRun,
     CrawlRunStatus,
     Deadline,
-    DeadlineStatus,
     Document,
+    Evidence,
     FieldChange,
     Lead,
     LeadReview,
     LeadStatus,
     Participant,
+    Payment,
     Procurement,
     ProcurementEvent,
     ProcurementItem,
+    ProcurementSource,
     ReviewDecision,
+    SourceRecord,
 )
 from app.models.participation import FactVerification
 from app.navigation import (
@@ -54,8 +66,16 @@ from app.navigation import (
     breadcrumbs,
     get_group,
 )
-from app.repositories.contracts import ContractRepository, PaymentRepository, contract_value
+from app.repositories.base import Page
+from app.repositories.company_origins import ORIGIN_LABELS
+from app.repositories.contracts import (
+    ContractRepository,
+    PaymentRepository,
+    contract_value,
+    published_term_dates,
+)
 from app.repositories.crawls import JobLeaseRepository
+from app.repositories.current_evidence import evidence_current
 from app.repositories.price_registries import PriceRegistryRepository
 from app.repositories.procurements import (
     CompanyRepository,
@@ -63,11 +83,16 @@ from app.repositories.procurements import (
 )
 from app.schemas import OutreachRequest
 from app.services.application_tests import ApplicationTestService, TestRunBusy
-from app.services.crawl_monitor import monitor_view, nonnegative_int
+from app.services.crawl_monitor import monitor_view, municipal_write_progress, nonnegative_int
 from app.services.crawl_progress import safe_label
 from app.services.group_hubs import build_group_hub
 from app.services.identifiers import canonical_modality, is_valid_cnpj, normalize_cnpj
 from app.services.ingestion import IngestionPipeline, PipelineRequest
+from app.services.ingestion.complete_collection import (
+    COMPLETE_COLLECTION_MODE,
+    CollectionScope,
+    CompleteCollection,
+)
 from app.services.ingestion.document_retry import (
     batch_document_ids,
     create_document_retry,
@@ -83,6 +108,7 @@ from app.services.ingestion.municipal_payments import (
 )
 from app.services.ingestion.payment_import import PaymentImportErrorList, PaymentImportService
 from app.services.ingestion.processor import DocumentProcessingService
+from app.services.ingestion.tce_ma_observations import tce_observations_for
 from app.services.maintenance import (
     COUNT_TABLE_LABELS,
     MaintenanceBlocked,
@@ -91,12 +117,24 @@ from app.services.maintenance import (
     data_counts,
     maintenance_blocked_reason,
 )
+from app.services.opportunity_workspace import (
+    ACTIONABLE_STATUSES,
+    OpportunityFilters,
+    deadline_indication,
+    loaded_opportunities,
+    next_opportunity,
+    opportunity_count,
+    opportunity_query,
+    resolve_queue_filters,
+    safe_list_url,
+)
 from app.services.participation_integrity import deadline_current, event_verified, lead_current
 from app.services.price_registry_scopes import (
     known_price_registry_scopes,
     restore_price_registry_scopes,
 )
 from app.services.scheduler_control import scheduler_status, set_scheduler_paused
+from app.shutdown_web import shutdown_available
 
 router = APIRouter(include_in_schema=False)
 templates = Jinja2Templates(directory=str(Path(__file__).resolve().parent / "templates"))
@@ -105,9 +143,46 @@ templates.env.globals.update(
     nav_active_group=active_group_id,
     nav_active_item=active_item_href,
     nav_breadcrumbs=breadcrumbs,
+    shutdown_available=shutdown_available,
 )
 _application_tests = ApplicationTestService()
 _municipal_progress: dict[UUID, dict[str, Any]] = {}
+COLLECTION_FORM_PATHS = {
+    "/crawls/run": "/dashboard",
+    "/crawls/collect": "/crawls#escopo",
+    "/atas/collect": "/atas",
+    "/contratos/collect": "/contratos",
+}
+
+
+async def collection_form_error(request: Request, message: str):
+    """Keep only editable, nonsecret collection fields when validation fails."""
+    form = await request.form()
+    allowed = {
+        "uf",
+        "connector",
+        "registry_scope",
+        "agency_cnpj",
+        "start_date",
+        "end_date",
+        "days",
+        "batch_size",
+        "process_documents",
+        "force_refresh",
+    }
+    values = {key: str(value)[:250] for key, value in form.items() if key in allowed}
+    return templates.TemplateResponse(
+        request,
+        "collection_form_error.html",
+        {
+            "message": message,
+            "values": values,
+            "action": request.url.path,
+            "back": COLLECTION_FORM_PATHS[request.url.path],
+            "ufs": _BRAZILIAN_UFS,
+        },
+        status_code=422,
+    )
 
 
 def _empty_query_to_none(value: object) -> object:
@@ -125,6 +200,7 @@ def _empty_query_to_none(value: object) -> object:
 
 OptionalUfQuery = Annotated[str | None, BeforeValidator(_empty_query_to_none)]
 OptionalDateQuery = Annotated[date | None, BeforeValidator(_empty_query_to_none)]
+OptionalDateForm = Annotated[date | None, BeforeValidator(_empty_query_to_none)]
 OptionalDecimalQuery = Annotated[Decimal | None, BeforeValidator(_empty_query_to_none)]
 OptionalScoreQuery = Annotated[int | None, BeforeValidator(_empty_query_to_none)]
 
@@ -148,7 +224,11 @@ _SOURCE_LABELS = {
         for source in list_municipal_sources()
     },
 }
-_CONNECTOR_LABELS = {**_SOURCE_LABELS, "all": "Todas as fontes"}
+_CONNECTOR_LABELS = {
+    **_SOURCE_LABELS,
+    "all": "Todas as fontes",
+    COMPLETE_COLLECTION_MODE: "Coleta completa",
+}
 _STATUS_LABELS = {
     "pending": "Aguardando",
     "running": "Em andamento",
@@ -301,6 +381,16 @@ _DEADLINE_STATUS_LABELS = {
     "DUE_WITHIN_72H": "Vence em 72h",
     "EXPIRED": "Vencido",
     "UNKNOWN": "Não informado",
+    "REQUIRES_REVIEW": "Conferência necessária",
+}
+_DEADLINE_TYPE_LABELS = {
+    "appeal": "Recurso",
+    "intent_to_appeal": "Intenção de recurso",
+    "counterargument": "Contrarrazões",
+    "counterarguments": "Contrarrazões",
+    "proposal": "Proposta",
+    "documentation": "Documentação",
+    "diligence": "Diligência",
 }
 
 _EVENT_TYPE_LABELS = {
@@ -387,6 +477,12 @@ _CONTACT_STATUS_LABELS = {
     "invalid": "Inválido",
     "requires_review": "Revisão necessária",
 }
+_PAYMENT_PHASE_LABELS = {
+    "empenhado": "Empenhado",
+    "liquidado": "Liquidado",
+    "pago": "Pago",
+    "pago_agregado": "Pago agregado por empenho",
+}
 
 
 def _day_bounds(day: date) -> tuple[datetime, datetime]:
@@ -395,6 +491,267 @@ def _day_bounds(day: date) -> tuple[datetime, datetime]:
     start = datetime.combine(day, time.min, tzinfo=local_timezone).astimezone(UTC)
     end = datetime.combine(day, time.max, tzinfo=local_timezone).astimezone(UTC)
     return start, end
+
+
+def _collection_period(days: int, *, today: date | None = None) -> SimpleNamespace:
+    """Build the inclusive default window shown by the manual collection forms."""
+
+    end = today or datetime.now(ZoneInfo(get_settings().timezone)).date()
+    start = end - timedelta(days=max(days, 1) - 1)
+    return SimpleNamespace(
+        start_date=start.isoformat(),
+        end_date=end.isoformat(),
+        label=f"{start:%d/%m/%Y} a {end:%d/%m/%Y}",
+    )
+
+
+def _validate_collection_dates(
+    start_date: date | None, end_date: date | None
+) -> tuple[date | None, date | None]:
+    """Require a coherent complete range when the forms use explicit dates."""
+
+    if bool(start_date) != bool(end_date):
+        raise HTTPException(status_code=422, detail="Informe as datas inicial e final do período")
+    if start_date and end_date and start_date > end_date:
+        raise HTTPException(
+            status_code=422, detail="A data inicial não pode ser posterior à data final"
+        )
+    return start_date, end_date
+
+
+def _public_link(value: str | None) -> str | None:
+    if not value or "\\" in value or any(ord(c) < 32 for c in value):
+        return None
+    try:
+        parts = urlsplit(value)
+        host = (parts.hostname or "").rstrip(".")
+        if (
+            parts.scheme not in {"http", "https"}
+            or not host
+            or parts.username is not None
+            or parts.password is not None
+            or parts.port == 0
+            or host == "localhost"
+            or host.endswith(".localhost")
+        ):
+            return None
+    except ValueError:
+        return None
+    try:
+        return value if ipaddress.ip_address(host).is_global else None
+    except ValueError:
+        return value if "." in host else None
+
+
+async def _origin_platform_url(db: AsyncSession, procurement: Procurement) -> str | None:
+    """Read the published platform link from the matched PNCP response."""
+    control = procurement.pncp_control_number
+    if not control:
+        return None
+    payloads: AsyncScalarResult[Any] = await db.stream_scalars(
+        select(SourceRecord.raw_payload)
+        .join(ProcurementSource, ProcurementSource.source_record_id == SourceRecord.id)
+        .where(ProcurementSource.procurement_id == procurement.id, SourceRecord.source == "pncp")
+        .order_by(SourceRecord.collected_at.desc())
+    )
+    try:
+        async for payload in payloads:
+            rows = payload.get("data", [payload]) if isinstance(payload, dict) else payload
+            if not isinstance(rows, list):
+                continue
+            for row in rows:
+                if isinstance(row, dict) and row.get("numeroControlePNCP") == control:
+                    link = row.get("linkSistemaOrigem")
+                    if isinstance(link, str) and (official := _public_link(link)):
+                        return official
+        return None
+    finally:
+        await payloads.close()
+
+
+def _deadline_view(deadline: Deadline | None, *, current: bool = True) -> SimpleNamespace:
+    """A triggering fact is not a deadline; historical dates are never current urgency."""
+    value = (deadline.explicit_deadline_at or deadline.estimated_deadline_at) if deadline else None
+    kind = (
+        "Prazo expresso na fonte"
+        if deadline and deadline.explicit_deadline_at
+        else "Prazo estimado — confirmar"
+        if value
+        else "Prazo não identificado"
+    )
+    if deadline and not current:
+        kind = "Prazo histórico — não usar como atual"
+    elif deadline and value and deadline.calculation_method.value == "MANUAL":
+        kind = "Prazo informado manualmente — conferir origem"
+    relative = deadline_indication(
+        value,
+        explicit=bool(deadline and deadline.explicit_deadline_at),
+        current=current,
+        now=datetime.now(UTC),
+        timezone=get_settings().timezone,
+    )
+    return SimpleNamespace(
+        when=_local_datetime(value) if value else "Data-limite não identificada",
+        kind=kind,
+        recorded_status=_label(deadline.status, _DEADLINE_STATUS_LABELS)
+        if deadline and current
+        else "Não informado",
+        status=relative,
+        type=_label(deadline.deadline_type, _DEADLINE_TYPE_LABELS) if deadline else "Não informado",
+        trigger=_local_datetime(deadline.trigger_at) if deadline else None,
+        explanation=deadline.calculation_explanation if deadline else None,
+        requires_review=bool(deadline and deadline.requires_manual_review),
+        current=current,
+    )
+
+
+def _lead_view(
+    lead: Lead, *, return_to: str = "/leads", current_deadline: bool = True
+) -> SimpleNamespace:
+    deadline = _deadline_view(lead.deadline, current=current_deadline)
+    return SimpleNamespace(
+        id=lead.id,
+        href=f"/leads/{lead.id}?{urlencode({'return_to': safe_list_url(return_to)})}",
+        company_name=lead.company.legal_name or lead.company.normalized_name,
+        cnpj=lead.company.cnpj,
+        cnpj_label=_format_cnpj(lead.company.cnpj),
+        event_type=_label(lead.triggering_event.event_type, _EVENT_TYPE_LABELS),
+        reason=lead.reason_summary,
+        score=lead.score,
+        created_at=_local_datetime(lead.created_at),
+        deadline=deadline,
+        deadline_status=deadline.status,
+        lead_status=_label(lead.lead_status, _LEAD_STATUS_LABELS),
+        requires_manual_review=lead.triggering_event.requires_manual_review,
+    )
+
+
+async def _lead_views(db: AsyncSession, rows, *, return_to: str = "/leads"):
+    deadline_ids = {row.deadline_id for row in rows if row.deadline_id}
+    current_ids = (
+        set(
+            (
+                await db.scalars(
+                    select(Deadline.id).where(Deadline.id.in_(deadline_ids), deadline_current())
+                )
+            ).all()
+        )
+        if deadline_ids
+        else set()
+    )
+    current_leads = (
+        set(
+            (
+                await db.scalars(
+                    select(Lead.id).where(Lead.id.in_([row.id for row in rows]), lead_current())
+                )
+            ).all()
+        )
+        if rows
+        else set()
+    )
+    views = []
+    for row in rows:
+        view = _lead_view(
+            row,
+            return_to=return_to,
+            current_deadline=row.deadline_id in current_ids and row.id in current_leads,
+        )
+        view.historical = row.id not in current_leads
+        views.append(view)
+    return views
+
+
+def _list_context(request: Request, path: str, *, keys: set[str] | None = None) -> dict[str, Any]:
+    params = [
+        (key, value)
+        for key, value in request.query_params.multi_items()
+        if keys is None or key in keys
+    ]
+    meaningful = [
+        (key, value)
+        for key, value in params
+        if value
+        and key not in {"page", "page_size", "view"}
+        and not (
+            value == "false"
+            and key in {"requires_review", "include_history", "has_lead", "active_only"}
+        )
+    ]
+    labels = {
+        "q": "Busca",
+        "search": "Busca",
+        "uf": "UF",
+        "lead_status": "Situação",
+        "due": "Prazo",
+        "created_from": "Adicionado de",
+        "created_to": "Adicionado até",
+        "published_from": "Publicação de",
+        "published_to": "Publicação até",
+        "agency_cnpj": "CNPJ do órgão",
+        "company_cnpj": "CNPJ da empresa",
+        "min_score": "Prioridade mínima",
+        "event_type": "Evento",
+        "municipality": "Município",
+        "agency": "Órgão",
+        "origin": "Origem da presença",
+        "activity_location": "Local do órgão ou portal",
+        "run": "Coleta",
+        "status_category": "Situação",
+        "supplier_cnpj": "CNPJ do fornecedor",
+        "match_status": "Conciliação",
+        "budget_function": "Função orçamentária",
+        "fiscal_year": "Exercício",
+        "source": "Fonte",
+        "valid_on": "Vigente em",
+        "registry_number": "Número da ata",
+        "expiring_within_days": "A vencer em dias",
+        "allows_adhesion": "Permite adesão",
+        "modality": "Modalidade",
+        "phase": "Fase",
+        "procurement_type": "Tipo de contratação",
+        "has_lead": "Com oportunidade",
+        "active_only": "Proposta aberta",
+        "requires_review": "Evidência exige conferência",
+        "include_history": "Histórico",
+    }
+    values = {
+        **ORIGIN_LABELS,
+        **_LEAD_STATUS_LABELS,
+        **_EVENT_TYPE_LABELS,
+        **_PROCUREMENT_STATUS_CATEGORY_LABELS,
+        **_PROCUREMENT_MODALITY_LABELS,
+        **_PROCUREMENT_PHASE_LABELS,
+        **_PROCUREMENT_TYPE_LABELS,
+        **_SOURCE_LABELS,
+        **_PAYMENT_PHASE_LABELS,
+        "today": "Hoje",
+        "actionable": "Para analisar",
+        "24h": "Próximas 24 horas",
+        "72h": "Próximas 72 horas",
+        "true": "Sim",
+    }
+    chips = []
+    for key, value in meaningful:
+        remaining = [(k, v) for k, v in params if k not in {key, "page"}]
+        chips.append(
+            SimpleNamespace(
+                label=labels.get(key, key.replace("_", " ").capitalize()),
+                value="Selecionada" if key == "run" else values.get(value, value),
+                remove_url=path + ("?" + urlencode(remaining) if remaining else ""),
+            )
+        )
+    return {
+        "list_url": path + ("?" + urlencode(params) if params else ""),
+        "active_filter_count": str(len(meaningful)),
+        "active_filters": chips,
+    }
+
+
+def _supplier_filter_error(value: str | None) -> str | None:
+    if value and not is_valid_cnpj(normalize_cnpj(value) or ""):
+        return "CNPJ do fornecedor inválido. Corrija o campo; os demais filtros foram mantidos."
+    return None
 
 
 def _local_datetime(value: datetime | None) -> str:
@@ -444,10 +801,10 @@ def _stats_datetime(stats: dict[str, object]) -> str:
     return _procurement_datetime(value if isinstance(value, datetime) else None)
 
 
-def _brl(value: Decimal | None) -> str:
+def _brl(value: Decimal | None, decimal_places: int = 2) -> str:
     if value is None:
         return "Não informado"
-    rendered = f"{value:,.2f}".replace(",", "_").replace(".", ",").replace("_", ".")
+    rendered = f"{value:,.{decimal_places}f}".replace(",", "_").replace(".", ",").replace("_", ".")
     return f"R$ {rendered}"
 
 
@@ -503,10 +860,10 @@ def _technical_origin(
 ) -> SimpleNamespace:
     return SimpleNamespace(
         source_label=_label(source, _TECHNICAL_SOURCE_LABELS),
-        official_url=official_url,
+        official_url=_public_link(official_url),
         source_record_id=str(source_record_id) if source_record_id else None,
         external_id=_display_text(external_id) if external_id else None,
-        evidence_url=f"/api/evidence/{evidence_id}" if evidence_id else None,
+        evidence_url=f"/evidencias/{evidence_id}" if evidence_id else None,
         evidence_id=str(evidence_id) if evidence_id else None,
     )
 
@@ -519,12 +876,13 @@ def _item_matches(item: ProcurementItem, query: str) -> bool:
 def _item_view(item: ProcurementItem, procurement: Procurement) -> SimpleNamespace:
     summary, description, is_long = _short_description(item.description)
     return SimpleNamespace(
+        id=item.id,
         item_number=_display_text(item.item_number),
         description_summary=summary,
         description=description,
         description_is_long=is_long,
         quantity=_quantity_with_unit(item.quantity, item.unit),
-        unit_value=_brl(item.estimated_unit_value),
+        unit_value=_brl(item.estimated_unit_value, 4),
         total_value=_brl(item.estimated_total_value),
         status=_label(item.result_status, _PROCUREMENT_STATUS_LABELS),
         origin=_technical_origin(
@@ -535,20 +893,39 @@ def _item_view(item: ProcurementItem, procurement: Procurement) -> SimpleNamespa
     )
 
 
-def _document_view(document: Document, procurement: Procurement) -> SimpleNamespace:
+def _document_view(
+    document: Document, *, local_file: bool, source: str | None, has_text: bool, current: bool
+) -> SimpleNamespace:
+    source_url = _public_link(document.original_url)
     return SimpleNamespace(
         title=_display_text(document.title),
+        current=current,
         document_type=_label(document.document_type, _DOCUMENT_TYPE_LABELS),
         published_at=_procurement_datetime(document.published_at),
         extraction_status=_label(document.extraction_status, _EXTRACTION_STATUS_LABELS),
         extraction_state=_enum_key(document.extraction_status) or "pending",
-        official_url=document.original_url,
+        official_url=source_url,
+        stored_url=f"/api/documents/{document.id}/view" if local_file or has_text else None,
+        copy_label="Abrir texto extraído" if has_text else "Abrir cópia coletada",
         origin=_technical_origin(
-            source=procurement.source,
-            official_url=document.original_url,
+            source=source,
+            official_url=source_url,
             source_record_id=document.source_record_id,
         ),
     )
+
+
+def _available_document_files(paths: list[tuple[UUID, str]], root: Path) -> set[UUID]:
+    available: set[UUID] = set()
+    root = root.resolve()
+    for identifier, path in paths:
+        try:
+            candidate = Path(path).resolve()
+            if candidate.is_relative_to(root) and candidate.is_file():
+                available.add(identifier)
+        except (OSError, RuntimeError, ValueError):
+            continue
+    return available
 
 
 def _participant_view(
@@ -570,7 +947,7 @@ def _participant_view(
         verification_reason=(payload or {}).get("verification_reason"),
         status=_label(participant.status, _PROCUREMENT_STATUS_LABELS),
         confidence=_confidence(participant.confidence),
-        evidence_url=f"/api/evidence/{evidence.id}" if evidence else None,
+        evidence_url=f"/evidencias/{evidence.id}" if evidence else None,
         origin=_technical_origin(
             source=participant.source,
             official_url=evidence.source_url if evidence else None,
@@ -602,7 +979,7 @@ def _event_view(event: ProcurementEvent) -> SimpleNamespace:
         if event.requires_manual_review
         else "Sem revisão pendente",
         requires_manual_review=event.requires_manual_review,
-        evidence_url=f"/api/evidence/{evidence.id}" if evidence else None,
+        evidence_url=f"/evidencias/{evidence.id}" if evidence else None,
         origin=_technical_origin(
             source=event.source,
             official_url=event.source_url or (evidence.source_url if evidence else None),
@@ -619,7 +996,7 @@ def _contact_view(contact: CompanyContact) -> SimpleNamespace:
         value=contact.contact_value,
         status=_label(contact.status, _CONTACT_STATUS_LABELS),
         is_corporate=contact.is_corporate,
-        source_url=contact.source_url,
+        source_url=_public_link(contact.source_url),
         verified_at=_local_datetime(contact.verified_at) if contact.verified_at else None,
     )
 
@@ -663,10 +1040,11 @@ def _procurement_view(procurement: Procurement) -> SimpleNamespace:
         phase=_label(procurement.current_phase, _PROCUREMENT_PHASE_LABELS),
         agency_name=_display_text(procurement.agency_name),
         process=process,
+        year=procurement.purchase_year,
         pncp_control_number=_display_text(procurement.pncp_control_number),
         location=_display_text(location),
         estimated_value=_brl(procurement.estimated_value),
-        official_url=procurement.source_url,
+        official_url=_public_link(procurement.source_url),
         dates=dates,
         origin=_technical_origin(
             source=procurement.source,
@@ -722,6 +1100,8 @@ def _friendly_source_error(source_id: str, diagnostics: list[str]) -> str | None
 
 
 def _source_views(run: CrawlRun) -> list[SimpleNamespace]:
+    if run.connector == COMPLETE_COLLECTION_MODE:
+        return []
     document_mode = isinstance(run.filters, dict) and run.filters.get("mode") == "documents"
     requested = (
         ["documents"]
@@ -899,11 +1279,30 @@ def _crawl_view(run: CrawlRun) -> SimpleNamespace:
                 f"{nonnegative_int(documents_result.get('leads_created'))} lead(s)"
             )
         progress_label = _crawl_progress_label(stored_sources)
+    period = (run.cursor or {}).get("collection") or run.filters or {}
+    if not isinstance(period, dict):
+        period = {}
+
+    def calendar(key: str) -> str:
+        try:
+            return date.fromisoformat(str(period.get(key))).strftime("%d/%m/%Y")
+        except (ValueError, TypeError):
+            return "Não registrado"
+
+    mode = (run.filters or {}).get("mode", "procurements")
+    complete_stages = (run.cursor or {}).get("complete_stages", [])
+    procurement_runs: list[str] = next(
+        (step.get("run_ids", []) for step in complete_stages if step.get("key") == "procurements"),
+        [],
+    )
+    linked_run = procurement_runs[0] if procurement_runs else None
     return SimpleNamespace(
         id=run.id,
         connector_label=_CONNECTOR_LABELS.get(run.connector, run.connector),
         mode_label=(
-            "Reprocessamento de documentos"
+            "Todas as etapas"
+            if mode == COMPLETE_COLLECTION_MODE
+            else "Reprocessamento de documentos"
             if isinstance(run.filters, dict) and run.filters.get("mode") == "documents"
             else "Atas (ARP)"
             if isinstance(run.filters, dict) and run.filters.get("mode") == "price_registries"
@@ -911,6 +1310,8 @@ def _crawl_view(run: CrawlRun) -> SimpleNamespace:
             if isinstance(run.filters, dict) and run.filters.get("mode") == "contracts"
             else "Pagamentos municipais"
             if run.connector.startswith("municipal:")
+            else "Pagamentos"
+            if mode in {"payments", "payment_import"}
             else "Licitações"
         ),
         started_at=_local_datetime(run.started_at),
@@ -929,6 +1330,34 @@ def _crawl_view(run: CrawlRun) -> SimpleNamespace:
         duration=_duration_label(duration),
         progress=progress_label,
         documents_progress=documents_progress,
+        query_start=calendar("start_date"),
+        query_end=calendar("end_date"),
+        result_url="/atas"
+        if mode == "price_registries"
+        else "/contratos"
+        if mode == "contracts"
+        else "/pagamentos"
+        if run.connector.startswith("municipal:") or mode in {"payments", "payment_import"}
+        else f"/leads?run={linked_run}"
+        if linked_run
+        else "/leads"
+        if mode == COMPLETE_COLLECTION_MODE
+        else f"/leads?run={run.id}",
+        result_label="Ver acervo de atas"
+        if mode == "price_registries"
+        else "Ver acervo de contratos"
+        if mode == "contracts"
+        else "Ver pagamentos"
+        if run.connector.startswith("municipal:") or mode in {"payments", "payment_import"}
+        else "Ver oportunidades"
+        if mode == COMPLETE_COLLECTION_MODE and not linked_run
+        else "Ver oportunidades vinculadas",
+        records_url=f"/procurements?run={run.id}"
+        if mode in {"procurements", "documents"} and not run.connector.startswith("municipal:")
+        else None,
+        complete_stages=complete_stages,
+        complete=mode == COMPLETE_COLLECTION_MODE,
+        has_linked_opportunities=bool(linked_run),
         has_document_batch=isinstance(stored_sources, dict)
         and isinstance(stored_sources.get("documents"), dict),
         retry_documents=run.status not in {CrawlRunStatus.PENDING, CrawlRunStatus.RUNNING}
@@ -947,7 +1376,7 @@ def _crawl_view(run: CrawlRun) -> SimpleNamespace:
             }
             and bool(run.filters)
             and not run.connector.startswith("municipal:")
-            and run.filters.get("mode") != "documents"
+            and mode not in {"documents", COMPLETE_COLLECTION_MODE, "payments", "payment_import"}
         ),
     )
 
@@ -968,6 +1397,10 @@ async def root() -> RedirectResponse:
 @router.get("/dashboard")
 async def dashboard(request: Request, db: AsyncSession = Depends(get_db)):
     """Render operational counts and recent opportunities."""
+    from app.services.collection_coverage import document_counters, latest_procurement_run
+
+    now = datetime.now(UTC)
+    due_at = func.coalesce(Deadline.explicit_deadline_at, Deadline.estimated_deadline_at)
     counts = {
         "Contratações monitoradas": int((await db.scalar(select(func.count(Procurement.id)))) or 0),
         "Novos processos": int(
@@ -989,7 +1422,7 @@ async def dashboard(request: Request, db: AsyncSession = Depends(get_db)):
             (
                 await db.scalar(
                     select(func.count(Deadline.id)).where(
-                        Deadline.status == DeadlineStatus.DUE_WITHIN_24H, deadline_current()
+                        due_at >= now, due_at <= now + timedelta(hours=24), deadline_current()
                     )
                 )
             )
@@ -998,9 +1431,7 @@ async def dashboard(request: Request, db: AsyncSession = Depends(get_db)):
         "Prazos vencidos": int(
             (
                 await db.scalar(
-                    select(func.count(Deadline.id)).where(
-                        Deadline.status == DeadlineStatus.EXPIRED, deadline_current()
-                    )
+                    select(func.count(Deadline.id)).where(due_at < now, deadline_current())
                 )
             )
             or 0
@@ -1026,41 +1457,66 @@ async def dashboard(request: Request, db: AsyncSession = Depends(get_db)):
     }
     recent = (
         await db.scalars(
-            select(Lead)
-            .where(lead_current())
-            .options(
-                selectinload(Lead.company),
-                selectinload(Lead.triggering_event),
-                selectinload(Lead.deadline),
+            loaded_opportunities(opportunity_query(OpportunityFilters(status="actionable"))).limit(
+                10
             )
-            .order_by(Lead.created_at.desc())
-            .limit(10)
         )
     ).all()
-    leads = [
-        SimpleNamespace(
-            id=item.id,
-            company_name=item.company.legal_name or item.company.normalized_name,
-            event_type=_label(item.triggering_event.event_type, _EVENT_TYPE_LABELS),
-            score=item.score,
-            created_at=_local_datetime(item.created_at),
-            deadline_status=(
-                _label(item.deadline.status, _DEADLINE_STATUS_LABELS)
-                if item.deadline
-                else "Nao informado"
-            ),
-            requires_manual_review=item.triggering_event.requires_manual_review,
+    leads = await _lead_views(db, recent, return_to="/leads?lead_status=actionable")
+    agenda = []
+    for title, params, hint in [
+        ("Aguardando revisão", {"lead_status": "pending_review"}, "Decisões humanas pendentes"),
+        (
+            "Prazos próximos",
+            {"due": "72h", "lead_status": "actionable"},
+            "Oportunidades para revisar em até 72 horas",
+        ),
+        ("Novas oportunidades", {"lead_status": "new"}, "Ainda não analisadas"),
+        (
+            "Ajustes solicitados",
+            {"lead_status": "needs_changes"},
+            "Análises que precisam de complemento",
+        ),
+    ]:
+        selected = OpportunityFilters.from_params(params, timezone=get_settings().timezone)
+        agenda.append(
+            SimpleNamespace(
+                title=title,
+                hint=hint,
+                total=await opportunity_count(db, selected),
+                href="/leads?" + urlencode(params),
+            )
         )
-        for item in recent
-    ]
+    last_collection = await db.scalar(
+        select(func.max(SourceRecord.collected_at)).where(
+            SourceRecord.http_status.between(200, 299),
+            SourceRecord.availability.in_(["available", "empty"]),
+        )
+    )
+    pending_documents = int(
+        await db.scalar(
+            select(func.count(Document.id)).where(
+                Document.is_active.is_(True),
+                Document.extraction_status.in_(["pending", "ocr_required"]),
+            )
+        )
+        or 0
+    )
+    last_run = await latest_procurement_run(db)
     return templates.TemplateResponse(
         request,
         "dashboard.html",
         {
             "metrics": counts,
             "leads": leads,
-            "ufs": _BRAZILIAN_UFS,
+            "agenda": agenda,
+            "scheduler": await scheduler_status(db, get_settings()),
+            "last_collection": _local_datetime(last_collection),
+            "pending_documents": pending_documents,
+            "last_procurement_run": _crawl_view(last_run) if last_run else None,
+            "document_counts": document_counters(last_run) if last_run else {},
             "selected_uf": get_settings().default_uf,
+            "collection_days": get_settings().default_lookback_days,
         },
     )
 
@@ -1085,6 +1541,10 @@ async def group_hub_page(
 @router.get("/procurements")
 async def procurements_page(
     request: Request,
+    q: str = Query("", max_length=200),
+    published_from: OptionalDateQuery = None,
+    published_to: OptionalDateQuery = None,
+    run: UUID | None = None,
     uf: OptionalUfQuery = None,
     municipality: str | None = None,
     agency: str | None = None,
@@ -1114,7 +1574,7 @@ async def procurements_page(
     elif is_srp in {"false", "0", "nao", "não"}:
         parsed_srp = False
     selected_agency_cnpj = normalize_cnpj(agency_cnpj) if agency_cnpj else None
-    if selected_agency_cnpj is not None and len(selected_agency_cnpj) != 14:
+    if selected_agency_cnpj is not None and not is_valid_cnpj(selected_agency_cnpj):
         selected_agency_cnpj = None
     selected_company_cnpj = normalize_cnpj(company_cnpj) if company_cnpj else None
     if selected_company_cnpj is not None and not is_valid_cnpj(selected_company_cnpj):
@@ -1128,21 +1588,40 @@ async def procurements_page(
         value_min = None
     if value_max is not None and value_max < 0:
         value_max = None
-    page = await ProcurementRepository(db).list_filtered(
-        page=max(page_number, 1),
-        page_size=50,
-        uf=selected_uf,
-        municipality=municipality,
-        agency=agency,
-        agency_cnpj=selected_agency_cnpj,
-        company_cnpj=selected_company_cnpj,
-        modalities=selected_modalities,
-        procurement_type=selected_type,
-        status_category=selected_category,
-        phase=selected_phase,
-        is_srp=parsed_srp,
-        value_min=value_min,
-        value_max=value_max,
+    errors = []
+    if invalid_cnpj:
+        errors.append(
+            "CNPJ inválido informado. Corrija o campo para aplicar a busca; nenhum filtro foi removido."
+        )
+    if published_from and published_to and published_from > published_to:
+        errors.append("A data inicial de publicação não pode ser posterior à final.")
+    if value_min is not None and value_max is not None and value_min > value_max:
+        errors.append("O valor mínimo não pode ser maior que o máximo.")
+    if run and await db.get(CrawlRun, run) is None:
+        raise HTTPException(404, "Coleta não encontrada")
+    page = (
+        Page(items=[], page=page_number, page_size=50, total=0)
+        if errors
+        else await ProcurementRepository(db).list_filtered(
+            page=max(page_number, 1),
+            page_size=50,
+            query=q,
+            crawl_run_id=run,
+            published_from=_day_bounds(published_from)[0] if published_from else None,
+            published_to=_day_bounds(published_to)[1] if published_to else None,
+            uf=selected_uf,
+            municipality=municipality,
+            agency=agency,
+            agency_cnpj=selected_agency_cnpj,
+            company_cnpj=selected_company_cnpj,
+            modalities=selected_modalities,
+            procurement_type=selected_type,
+            status_category=selected_category,
+            phase=selected_phase,
+            is_srp=parsed_srp,
+            value_min=value_min,
+            value_max=value_max,
+        )
     )
     return templates.TemplateResponse(
         request,
@@ -1150,8 +1629,14 @@ async def procurements_page(
         {
             "procurements": page.items,
             "pagination": page,
+            **_list_context(request, "/procurements"),
+            "filter_errors": errors,
             "ufs": _BRAZILIAN_UFS,
             "filters": SimpleNamespace(
+                q=q,
+                published_from=published_from.isoformat() if published_from else "",
+                published_to=published_to.isoformat() if published_to else "",
+                run=str(run) if run else "",
                 uf=selected_uf,
                 municipality=municipality,
                 agency=agency,
@@ -1174,6 +1659,113 @@ async def procurements_page(
             "status_category_options": list(_PROCUREMENT_STATUS_CATEGORY_LABELS.items()),
             "phase_options": list(_PROCUREMENT_PHASE_LABELS.items()),
         },
+        status_code=422 if errors else 200,
+    )
+
+
+def _last_changes_review(request: Request) -> datetime | None:
+    try:
+        stamp = datetime.fromisoformat(request.cookies.get("licita_changes_review", ""))
+    except ValueError:
+        return None
+    return stamp if stamp.tzinfo and stamp <= datetime.now(UTC) else None
+
+
+@router.get("/alteracoes")
+async def archive_changes_page(
+    request: Request,
+    todas: bool = False,
+    ate: datetime | None = None,
+    page_number: int = Query(1, alias="page", ge=1),
+    db: AsyncSession = Depends(get_db),
+):
+    now = datetime.now(UTC)
+    if ate is not None and (ate.tzinfo is None or ate > now):
+        raise HTTPException(422, "Data de corte inválida.")
+    cutoff = ate or now
+    after = None if todas else _last_changes_review(request)
+    history = await relevant_changes(db, after, cutoff, page_number)
+    return templates.TemplateResponse(
+        request,
+        "archive_changes.html",
+        {
+            "history": history,
+            "after": _local_datetime(after) if after else None,
+            "cutoff": cutoff.isoformat(),
+            "cutoff_label": _local_datetime(cutoff),
+            "all_changes": todas,
+        },
+    )
+
+
+@router.post("/alteracoes/revisar")
+async def mark_changes_reviewed(request: Request, ate: datetime = Form(...)):
+    if ate.tzinfo is None or ate > datetime.now(UTC):
+        raise HTTPException(422, "Data de corte inválida.")
+    previous = _last_changes_review(request)
+    cutoff = max(ate, previous) if previous else ate
+    response = RedirectResponse("/alteracoes", status_code=303)
+    response.set_cookie(
+        "licita_changes_review",
+        cutoff.isoformat(),
+        httponly=True,
+        samesite="strict",
+        path="/alteracoes",
+        max_age=365 * 86400,
+    )
+    return response
+
+
+@router.get("/itens")
+async def procurement_items_page(
+    request: Request,
+    q: str = Query("", max_length=200),
+    agency: str = Query("", max_length=160),
+    unit: str = Query("", max_length=100),
+    page_number: int = Query(1, alias="page", ge=1),
+    db: AsyncSession = Depends(get_db),
+):
+    statement = select(ProcurementItem, Procurement).join(ProcurementItem.procurement)
+    if q.strip():
+        statement = statement.where(
+            ProcurementItem.description.icontains(q.strip(), autoescape=True)
+        )
+    if agency.strip():
+        statement = statement.where(
+            Procurement.agency_name.icontains(agency.strip(), autoescape=True)
+        )
+    if unit.strip():
+        statement = statement.where(func.lower(ProcurementItem.unit) == func.lower(unit.strip()))
+    total = await db.scalar(select(func.count()).select_from(statement.subquery()))
+    rows = await db.execute(
+        statement.order_by(
+            Procurement.publication_at.desc().nullslast(),
+            Procurement.id,
+            ProcurementItem.item_number,
+            ProcurementItem.id,
+        )
+        .offset((page_number - 1) * 50)
+        .limit(50)
+    )
+    units = await db.scalars(
+        select(ProcurementItem.unit)
+        .distinct()
+        .where(ProcurementItem.unit.is_not(None), ProcurementItem.unit != "")
+        .order_by(ProcurementItem.unit)
+    )
+    return templates.TemplateResponse(
+        request,
+        "item_search.html",
+        {
+            **_list_context(request, "/itens"),
+            "rows": rows.all(),
+            "units": units.all(),
+            "q": q,
+            "agency": agency,
+            "unit": unit,
+            "page": page_number,
+            "total": total or 0,
+        },
     )
 
 
@@ -1185,13 +1777,15 @@ async def procurement_page(
     include_history: bool = False,
     db: AsyncSession = Depends(get_db),
 ):
+    from app.services.collection_coverage import procurement_catalogs
+
     procurement = await db.scalar(
         select(Procurement)
         .where(Procurement.id == procurement_id)
         .options(
             selectinload(Procurement.sources),
             selectinload(Procurement.items),
-            selectinload(Procurement.documents),
+            selectinload(Procurement.documents).defer(Document.extracted_text),
             selectinload(Procurement.participants).selectinload(Participant.company),
             selectinload(Procurement.participants).selectinload(Participant.item),
             selectinload(Procurement.participants).selectinload(Participant.source_evidence),
@@ -1228,6 +1822,7 @@ async def procurement_page(
             await db.scalars(
                 select(Document.id).where(
                     Document.procurement_id == procurement_id,
+                    Document.is_active.is_(True),
                     Document.id.not_in(noncanonical_document_ids()),
                 )
             )
@@ -1295,19 +1890,60 @@ async def procurement_page(
             )
         )
     candidate_companies.sort(key=lambda company: company.name.casefold())
+    shown_documents = [
+        document
+        for document in procurement.documents
+        if include_history or document.id in canonical_ids
+    ]
+    file_paths = [(doc.id, doc.local_path) for doc in shown_documents if doc.local_path]
+    local_files = (
+        await asyncio.to_thread(
+            _available_document_files, file_paths, get_settings().document_storage_path
+        )
+        if file_paths
+        else set()
+    )
+    document_meta = {
+        identifier: (source, bool(has_text))
+        for identifier, source, has_text in await db.execute(
+            select(
+                Document.id,
+                SourceRecord.source,
+                Document.local_path.is_(None) & (Document.extracted_text != ""),
+            )
+            .outerjoin(SourceRecord, SourceRecord.id == Document.source_record_id)
+            .where(Document.procurement_id == procurement.id)
+        )
+    }
     return templates.TemplateResponse(
         request,
         "procurement_detail.html",
         {
             "procurement": _procurement_view(procurement),
+            "origin_platform_url": await _origin_platform_url(db, procurement),
+            "return_to": safe_list_url(
+                request.query_params.get("return_to"),
+                path="/itens"
+                if (request.query_params.get("return_to") or "").partition("?")[0] == "/itens"
+                else "/procurements",
+            ),
             "items": [_item_view(item, procurement) for item in items],
             "item_query": query,
             "item_count": len(items),
             "documents": [
-                _document_view(document, procurement)
-                for document in procurement.documents
-                if include_history or document.id in canonical_ids
+                _document_view(
+                    doc,
+                    local_file=doc.id in local_files,
+                    source=document_meta[doc.id][0],
+                    has_text=document_meta[doc.id][1],
+                    current=doc.id in canonical_ids,
+                )
+                for doc in shown_documents
+                if doc.id in document_meta
             ],
+            "catalogs": await procurement_catalogs(db, procurement, get_settings()),
+            "source_labels": _SOURCE_LABELS,
+            "format_collection_time": _local_datetime,
             "participants": [views[p.id] for p in procurement.participants if p.id in current_ids],
             "participant_candidates": [
                 views[p.id]
@@ -1329,6 +1965,7 @@ async def procurement_page(
                 if include_history or event.id in event_ids
             ],
             "candidate_companies": candidate_companies,
+            "tce_observations": await tce_observations_for(db, procurement.id),
             "link_feedback": request.query_params.get("link"),
         },
     )
@@ -1374,6 +2011,8 @@ async def companies_page(
     published_to: OptionalDateQuery = None,
     has_lead: bool = False,
     active_only: bool = False,
+    origin: str = Query("", max_length=30),
+    activity_location: str = Query("", max_length=160),
     page_number: int = Query(1, alias="page", ge=1),
     db: AsyncSession = Depends(get_db),
 ):
@@ -1391,11 +2030,23 @@ async def companies_page(
         published_to=end,
         has_lead=has_lead,
         active_only=active_only,
+        origin=origin,
+        activity_location=activity_location.strip(),
     )
+    filter_error = (
+        "A data inicial de publicação não pode ser posterior à final."
+        if published_from and published_to and published_from > published_to
+        else None
+    )
+    if filter_error:
+        result = Page(items=[], page=page_number, page_size=50, total=0)
+    elif origin and origin not in ORIGIN_LABELS:
+        filter_error = "Origem da presença inválida. Escolha uma opção da lista."
     companies = [
         SimpleNamespace(
             cnpj=company.cnpj,
             cnpj_label=_format_cnpj(company.cnpj),
+            activity=stats["activity"],
             name=_display_text(company.legal_name or company.normalized_name),
             location="/".join(value for value in (company.municipality, company.uf) if value)
             or "—",
@@ -1418,17 +2069,23 @@ async def companies_page(
         "companies.html",
         {
             "companies": companies,
+            "origins": ORIGIN_LABELS,
+            **_list_context(request, "/empresas"),
+            "filter_error": filter_error,
             "pagination": result,
             "ufs": _BRAZILIAN_UFS,
             "filters": SimpleNamespace(
                 uf=selected_uf,
                 search=search,
+                origin=origin,
+                activity_location=activity_location,
                 published_from=published_from.isoformat() if published_from else "",
                 published_to=published_to.isoformat() if published_to else "",
                 has_lead=has_lead,
                 active_only=active_only,
             ),
         },
+        status_code=422 if filter_error else 200,
     )
 
 
@@ -1461,8 +2118,6 @@ async def price_registries_page(
 ):
     """List atas de registro de precos with vigencia and supplier filters."""
 
-    settings = get_settings()
-    collection_scopes = await known_price_registry_scopes(db, settings.default_uf)
     normalized_supplier = normalize_cnpj(supplier_cnpj) if supplier_cnpj else None
     parsed_adhesion: bool | None = None
     if allows_adhesion in {"true", "1", "sim"}:
@@ -1480,6 +2135,9 @@ async def price_registries_page(
         expiring_within_days=expiring_within_days,
         allows_adhesion=parsed_adhesion,
     )
+    filter_error = _supplier_filter_error(supplier_cnpj)
+    if filter_error:
+        result = Page(items=[], page=page_number, page_size=50, total=0)
     registries = [
         SimpleNamespace(
             id=item.id,
@@ -1504,15 +2162,9 @@ async def price_registries_page(
         request,
         "atas.html",
         {
-            "collection": SimpleNamespace(
-                interval_hours=settings.scheduler_price_registry_hours,
-                lookback_days=settings.effective_price_registry_lookback_days,
-                default_days=min(7, settings.effective_price_registry_lookback_days),
-                uf=settings.default_uf,
-                scopes=collection_scopes,
-            ),
-            "ufs": _BRAZILIAN_UFS,
             "registries": registries,
+            **_list_context(request, "/atas"),
+            "filter_error": filter_error,
             "pagination": result,
             "filters": SimpleNamespace(
                 search=search,
@@ -1524,6 +2176,7 @@ async def price_registries_page(
                 allows_adhesion=allows_adhesion,
             ),
         },
+        status_code=422 if filter_error else 200,
     )
 
 
@@ -1533,12 +2186,15 @@ async def collect_price_registries_from_web(
     registry_scope: str = Form(..., min_length=1, max_length=80),
     connector: str = Form("all"),
     days: int = Form(7, ge=1, le=3650),
+    start_date: OptionalDateForm = Form(None),
+    end_date: OptionalDateForm = Form(None),
     force_refresh: bool = Form(False),
     db: AsyncSession = Depends(get_db),
 ) -> RedirectResponse:
     """Collect explicit known units, without turning a UF choice into a national query."""
 
     settings = get_settings()
+    start_date, end_date = _validate_collection_dates(start_date, end_date)
     uf = uf.strip().upper()
     if uf not in dict(_BRAZILIAN_UFS):
         raise HTTPException(status_code=422, detail="UF inválida")
@@ -1561,7 +2217,9 @@ async def collect_price_registries_from_web(
         mode="price_registries",
         force_refresh=force_refresh,
         uf=uf,
-        days=days,
+        days=None if start_date else days,
+        start_date=start_date,
+        end_date=end_date,
         agency=scope.agency_name if scope else None,
         agency_cnpj=scope.agency_cnpj if scope else None,
         unit_code=scope.unit_code if scope else None,
@@ -1579,8 +2237,11 @@ async def collect_contracts_from_web(
     connector: str = Form("all"),
     agency_cnpj: str = Form(..., min_length=14, max_length=30),
     days: int = Form(30, ge=1, le=3650),
+    start_date: OptionalDateForm = Form(None),
+    end_date: OptionalDateForm = Form(None),
     force_refresh: bool = Form(False),
 ) -> RedirectResponse:
+    start_date, end_date = _validate_collection_dates(start_date, end_date)
     cnpj = normalize_cnpj(agency_cnpj)
     if connector not in {"all", "pncp", "compras_gov"} or not cnpj or not is_valid_cnpj(cnpj):
         raise HTTPException(status_code=422, detail="Fonte ou CNPJ do órgão inválido")
@@ -1588,7 +2249,9 @@ async def collect_contracts_from_web(
         connector=connector,
         mode="contracts",
         agency_cnpj=cnpj,
-        days=days,
+        days=None if start_date else days,
+        start_date=start_date,
+        end_date=end_date,
         uf=get_settings().default_uf,
         modalities=(),
         process_documents=False,
@@ -1630,6 +2293,7 @@ async def price_registry_page(
         request,
         "ata_detail.html",
         {
+            "return_to": safe_list_url(request.query_params.get("return_to"), path="/atas"),
             "registry": SimpleNamespace(
                 id=registry.id,
                 registry_number=_display_text(registry.registry_number),
@@ -1725,6 +2389,9 @@ async def contracts_page(
     search: str | None = Query(None, max_length=120),
     agency: str | None = None,
     supplier_cnpj: str | None = None,
+    expiring_within_days: Annotated[
+        int | None, Query(ge=1, le=365), BeforeValidator(_empty_query_to_none)
+    ] = None,
     page_number: int = Query(1, alias="page", ge=1),
     db: AsyncSession = Depends(get_db),
 ):
@@ -1737,7 +2404,11 @@ async def contracts_page(
         search=search,
         agency=agency,
         supplier_cnpj=normalized_supplier,
+        expiring_within_days=expiring_within_days,
     )
+    filter_error = _supplier_filter_error(supplier_cnpj)
+    if filter_error:
+        result = Page(items=[], page=page_number, page_size=50, total=0)
     contracts = [
         SimpleNamespace(
             id=contract.id,
@@ -1749,6 +2420,13 @@ async def contracts_page(
             object_description=_display_text(contract.object_description),
             signed_at=_procurement_datetime(contract.signed_at),
             valid_until=_procurement_datetime(contract.valid_until),
+            term_dates=[
+                SimpleNamespace(
+                    number=_display_text(term.term_number),
+                    date=_procurement_datetime(term.new_valid_until),
+                )
+                for term in published_term_dates(contract)
+            ],
             value=_brl(contract_value(contract)),
             source=_label(contract.source, _SOURCE_LABELS),
         )
@@ -1759,13 +2437,17 @@ async def contracts_page(
         "contracts.html",
         {
             "contracts": contracts,
+            **_list_context(request, "/contratos"),
+            "filter_error": filter_error,
             "pagination": result,
             "filters": SimpleNamespace(
                 search=search,
                 agency=agency,
                 supplier_cnpj=supplier_cnpj,
+                expiring_within_days=expiring_within_days,
             ),
         },
+        status_code=422 if filter_error else 200,
     )
 
 
@@ -1788,6 +2470,7 @@ async def contract_page(
         request,
         "contract_detail.html",
         {
+            "return_to": safe_list_url(request.query_params.get("return_to"), path="/contratos"),
             "contract": SimpleNamespace(
                 id=contract.id,
                 number=_display_text(contract.contract_number),
@@ -1804,7 +2487,7 @@ async def contract_page(
                 valid_from=_procurement_datetime(contract.valid_from),
                 valid_until=_procurement_datetime(contract.valid_until),
                 initial_value=_brl(contract.initial_value),
-                global_value=_brl(contract_value(contract)),
+                global_value=_brl(contract.global_value),
                 accumulated_value=_brl(contract.accumulated_value),
                 is_adhesion=(
                     "Sim"
@@ -1812,22 +2495,25 @@ async def contract_page(
                     else ("Nao" if contract.is_adhesion is not None else "Nao informado")
                 ),
                 source=_label(contract.source, _SOURCE_LABELS),
-                source_url=contract.source_url,
+                source_url=_public_link(contract.source_url),
                 procurement_id=contract.procurement_id,
                 price_registry_id=contract.price_registry_id,
             ),
-            "paid_value": _brl(Decimal(str(summary["paid_value"]))),
+            "payment_count": summary["payment_count"],
+            "paid_value": (
+                _brl(Decimal(str(summary["paid_value"])))
+                if summary["paid_value"] is not None
+                else "Não apurado"
+            ),
             "balance": (
                 _brl(Decimal(str(summary["balance"])))
                 if summary["balance"] is not None
-                else "Nao informado"
+                else "Não apurada"
             ),
             "payment_status": {
-                "pago": "Pago",
-                "parcial": "Pagamento parcial localizado",
-                "sem_pagamento_localizado": "Pagamento nao localizado na fonte",
-                "nao_avaliado": "Pagamento nao avaliado (contrato recente ou sem valor)",
-            }.get(str(summary["status"]), "Pagamento nao avaliado"),
+                "pago": "Os pagamentos vinculados atingem o valor de referência do contrato.",
+                "parcial": "Os pagamentos vinculados cobrem parte do valor de referência.",
+            }.get(str(summary["status"]), "Situação de pagamento não avaliada."),
             "items": [
                 SimpleNamespace(
                     item_number=_display_text(item.item_number),
@@ -1851,7 +2537,8 @@ async def contract_page(
                     new_valid_until=_procurement_datetime(term.new_valid_until),
                     object_description=_display_text(term.object_description),
                     status=_display_text(term.status),
-                    source_url=term.source_url,
+                    source_url=_public_link(term.source_url),
+                    source_record_id=term.source_record_id,
                 )
                 for term in contract.terms
             ],
@@ -1865,7 +2552,7 @@ async def contract_page(
                     agency=_display_text(payment.agency_name),
                     match_status=_display_text(payment.match_status),
                     source=_label(payment.source, _SOURCE_LABELS),
-                    source_url=payment.source_url,
+                    source_url=_public_link(payment.source_url),
                 )
                 for payment in contract.payments
             ],
@@ -1876,6 +2563,7 @@ async def contract_page(
 _MUNICIPAL_STAGE_LABELS = {
     "queued": "Aguardando início",
     "discovery": "Consultando o portal",
+    "preparing": "Preparando gravação",
     "persisting": "Gravando pagamentos",
     "finalizing": "Finalizando",
     "completed": "Concluída",
@@ -1900,20 +2588,26 @@ async def _municipal_source_views(
             CrawlRunStatus.RUNNING,
         }
         cursor = dict(latest.cursor or {}) if latest is not None and latest.cursor else {}
+        stored_progress = cursor.get("progress")
+        if not isinstance(stored_progress, dict) or not stored_progress:
+            stored_progress = cursor
         progress = _municipal_progress.get(latest.id, {}) if active and latest is not None else {}
-        stage = str(progress.get("stage") or cursor.get("stage") or "queued") if active else ""
-        processed_value = progress.get("processed", cursor.get("processed", 0))
-        total_value = progress.get("total", cursor.get("total"))
-        try:
-            processed = max(int(processed_value or 0), 0)
-        except (TypeError, ValueError):
-            processed = 0
-        try:
-            total = max(int(total_value), 0) if total_value is not None else None
-        except (TypeError, ValueError):
-            total = None
-        if total == 0:
-            total = None
+        stage = (
+            str(progress.get("stage") or stored_progress.get("stage") or "queued") if active else ""
+        )
+        write_progress = municipal_write_progress(cursor)
+        total: int | None
+        if write_progress is not None:
+            processed, total = write_progress
+            written = processed
+        else:
+            processed = nonnegative_int(progress.get("processed", stored_progress.get("processed")))
+            total = nonnegative_int(progress.get("total", stored_progress.get("total"))) or None
+            written = 0
+            if latest is not None:
+                written = nonnegative_int(latest.records_created) + nonnegative_int(
+                    latest.records_updated
+                )
         percentage = min(round(processed * 100 / total), 100) if total else None
         started = latest.started_at if latest is not None else None
         elapsed_label = None
@@ -1925,7 +2619,7 @@ async def _municipal_source_views(
             status_label = "Cancelando"
         message = str(
             progress.get("message")
-            or cursor.get("message")
+            or stored_progress.get("message")
             or ("Coleta em andamento" if active else "")
         )
         views.append(
@@ -1951,8 +2645,9 @@ async def _municipal_source_views(
                     (latest.finished_at or latest.started_at) if latest is not None else None
                 ),
                 last_found=latest.records_found if latest is not None else None,
-                last_created=latest.records_created if latest is not None else None,
+                last_written=written,
                 last_diagnostic=latest.diagnostic if latest is not None else None,
+                municipal_write=write_progress,
                 stage=stage,
                 stage_label=_MUNICIPAL_STAGE_LABELS.get(stage, stage),
                 progress_message=message,
@@ -2026,6 +2721,11 @@ async def payments_page(
     supplier_cnpj: str | None = None,
     phase: str | None = None,
     source: str | None = None,
+    municipality: str | None = None,
+    budget_function: str | None = None,
+    fiscal_year: str | None = None,
+    match_status: str | None = None,
+    view: str = "records",
     import_created: int | None = None,
     import_updated: int | None = None,
     import_errors: int | None = None,
@@ -2045,27 +2745,78 @@ async def payments_page(
     settings = get_settings()
     current_year = datetime.now(ZoneInfo(get_settings().timezone)).year
     normalized_supplier = normalize_cnpj(supplier_cnpj) if supplier_cnpj else None
-    result = await PaymentRepository(db).list_filtered(
-        page=max(page_number, 1),
-        page_size=50,
+    repository = PaymentRepository(db)
+    year = int(fiscal_year) if fiscal_year and re.fullmatch(r"20\d{2}|2100", fiscal_year) else None
+    scope = repository.filtered_query(
         supplier_cnpj=normalized_supplier,
         phase=phase,
         source=source,
+        municipality=municipality,
+        budget_function=budget_function,
+        fiscal_year=year,
+        match_status=match_status,
     )
     municipal_sources, municipal_has_active = await _municipal_source_views(db, settings)
+    filter_error = _supplier_filter_error(supplier_cnpj)
+    if fiscal_year and year is None:
+        filter_error = "Informe um exercício entre 2000 e 2100."
+    supplier_count = 0
+    suppliers: list[dict[str, Any]] = []
+    supplier_view = view == "suppliers"
+    result: Page[Payment] = Page(items=[], page=page_number, page_size=50, total=0)
+    if not filter_error:
+        if supplier_view:
+            result = Page(
+                items=[], page=page_number, page_size=50, total=await repository.count(scope)
+            )
+        else:
+            result = await repository.page(scope, page=page_number, page_size=50)
+        supplier_count, suppliers = await repository.suppliers_in_scope(
+            scope, page_number if supplier_view else None
+        )
+    entries = await repository.budget_entries(list(result.items))
+    functions, years = await repository.budget_options()
+    portals = {f"municipal:{item.id}": item for item in list_municipal_sources(settings)}
+    receipt_ids = {
+        p.source_record_id for p in result.items if p.source in portals and p.source_record_id
+    }
+    receipts = (
+        {
+            key: (digest, _local_datetime(collected))
+            for key, digest, collected in await db.execute(
+                select(
+                    SourceRecord.id, SourceRecord.response_hash, SourceRecord.collected_at
+                ).where(SourceRecord.id.in_(receipt_ids))
+            )
+        }
+        if receipt_ids
+        else {}
+    )
+    match_labels = {
+        "review": "Todos que exigem revisão",
+        "unlinked": "Sem vínculo exato localizado",
+        "linked": "Vínculo exato com contrato",
+        "ambiguous": "Vínculo para revisão",
+        "procurement_linked": "Vínculo exato com processo",
+    }
     payments = [
         SimpleNamespace(
             id=payment.id,
             date=_procurement_datetime(payment.payment_date),
             supplier=_display_text(payment.supplier_name),
-            supplier_cnpj=payment.supplier_cnpj,
+            supplier_cnpj=payment.supplier_cnpj if is_valid_cnpj(payment.supplier_cnpj) else None,
             agency=_display_text(payment.agency_name),
             amount=_brl(payment.amount),
-            phase=_display_text(payment.phase),
+            phase=_PAYMENT_PHASE_LABELS.get(payment.phase or "", _display_text(payment.phase)),
             document_number=_display_text(payment.document_number),
-            match_status=_display_text(payment.match_status),
+            match_status=match_labels.get(payment.match_status, "Conciliação não informada"),
             source=_label(payment.source, _SOURCE_LABELS),
-            source_url=payment.source_url,
+            source_url=portals[payment.source].portal_url if payment.source in portals else None,
+            record_id=payment.source_record_id,
+            receipt=receipts.get(payment.source_record_id) if payment.source_record_id else None,
+            budget=entries.get(payment.id),
+            aggregate=payment.status == "agregado_por_empenho",
+            procurement_id=payment.procurement_id,
             contract_id=payment.contract_id,
         )
         for payment in result.items
@@ -2075,8 +2826,41 @@ async def payments_page(
         "payments.html",
         {
             "payments": payments,
+            **_list_context(
+                request,
+                "/pagamentos",
+                keys={
+                    "supplier_cnpj",
+                    "phase",
+                    "source",
+                    "page",
+                    "municipality",
+                    "budget_function",
+                    "fiscal_year",
+                    "match_status",
+                    "view",
+                },
+            ),
+            "filter_error": filter_error,
+            "source_options": list(_SOURCE_LABELS.items()),
+            "phase_options": list(_PAYMENT_PHASE_LABELS.items()),
+            "budget_functions": functions,
+            "budget_years": years,
+            "municipalities": list(portals.values()),
+            "match_options": match_labels,
+            "supplier_count": supplier_count,
+            "suppliers": suppliers,
+            "supplier_view": supplier_view,
             "pagination": result,
-            "filters": SimpleNamespace(supplier_cnpj=supplier_cnpj, phase=phase, source=source),
+            "filters": SimpleNamespace(
+                supplier_cnpj=supplier_cnpj,
+                phase=phase,
+                source=source,
+                municipality=municipality,
+                budget_function=budget_function,
+                fiscal_year=fiscal_year,
+                match_status=match_status,
+            ),
             "import_result": (
                 {
                     "created": import_created,
@@ -2104,6 +2888,7 @@ async def payments_page(
             ),
             "current_year": current_year,
         },
+        status_code=422 if filter_error else 200,
     )
 
 
@@ -2203,9 +2988,13 @@ async def municipal_payment_cards(
     )
 
 
+@router.get("/leads/exportar.csv")
 @router.get("/leads")
 async def leads_page(
     request: Request,
+    q: str = Query("", max_length=200),
+    due: str = "",
+    run: UUID | None = None,
     min_score: OptionalScoreQuery = None,
     event_type: str | None = None,
     requires_review: bool = False,
@@ -2216,67 +3005,56 @@ async def leads_page(
     include_history: bool = False,
     db: AsyncSession = Depends(get_db),
 ):
-    if min_score is not None and not 0 <= min_score <= 100:
-        min_score = None
-    statement = select(Lead).options(
-        selectinload(Lead.company), selectinload(Lead.triggering_event), selectinload(Lead.deadline)
+    selected = OpportunityFilters(
+        query=q.strip(),
+        status=lead_status or "",
+        event_type=event_type or "",
+        min_score=min_score,
+        requires_review=requires_review,
+        include_history=include_history,
+        created_from=created_from,
+        created_to=created_to,
+        due=due,
+        run_id=run,
+        timezone=get_settings().timezone,
     )
-    if not include_history:
-        statement = statement.where(lead_current())
-    if min_score is not None:
-        statement = statement.where(Lead.score >= min_score)
-    if event_type:
-        statement = statement.join(Lead.triggering_event).where(
-            ProcurementEvent.event_type == event_type
+    errors = []
+    if created_from and created_to and created_from > created_to:
+        errors.append("A data inicial não pode ser posterior à data final.")
+    if min_score is not None and not 0 <= min_score <= 100:
+        errors.append("A prioridade mínima deve estar entre 0 e 100.")
+    if run and await db.get(CrawlRun, run) is None:
+        raise HTTPException(404, "Coleta não encontrada")
+    selected = await resolve_queue_filters(db, selected)
+    if request.url.path == "/leads/exportar.csv":
+        from app.services.opportunity_export import opportunity_csv
+
+        if errors:
+            raise HTTPException(422, detail=" ".join(errors))
+        cutoff = datetime.now(UTC)
+        filename = f"oportunidades-{cutoff:%Y%m%d-%H%M%SZ}.csv"
+        return StreamingResponse(
+            opportunity_csv(db, selected, cutoff=cutoff),
+            media_type="text/csv; charset=utf-8",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
         )
-    if requires_review:
-        statement = statement.join(Lead.triggering_event).where(
-            ProcurementEvent.requires_manual_review.is_(True)
-        )
-    if lead_status:
-        try:
-            selected_lead_status = LeadStatus(lead_status)
-        except ValueError:
-            selected_lead_status = None
-        if selected_lead_status is not None:
-            statement = statement.where(Lead.lead_status == selected_lead_status)
-    if created_from is not None:
-        start, _ = _day_bounds(created_from)
-        statement = statement.where(Lead.created_at >= start)
-    if created_to is not None:
-        _, end = _day_bounds(created_to)
-        statement = statement.where(Lead.created_at <= end)
+    statement = opportunity_query(selected)
+    if errors:
+        statement = statement.where(false())
     total = int(
         await db.scalar(select(func.count()).select_from(statement.order_by(None).subquery())) or 0
     )
     rows = (
         (
             await db.scalars(
-                statement.order_by(Lead.score.desc(), Lead.created_at.desc())
-                .offset((max(page_number, 1) - 1) * 50)
-                .limit(50)
+                loaded_opportunities(statement).offset((max(page_number, 1) - 1) * 50).limit(50)
             )
         )
         .unique()
         .all()
     )
-    leads = [
-        SimpleNamespace(
-            id=item.id,
-            company_name=item.company.legal_name or item.company.normalized_name,
-            cnpj=item.company.cnpj,
-            event_type=_label(item.triggering_event.event_type, _EVENT_TYPE_LABELS),
-            score=item.score,
-            created_at=_local_datetime(item.created_at),
-            deadline_status=(
-                _label(item.deadline.status, _DEADLINE_STATUS_LABELS)
-                if item.deadline
-                else "Nao informado"
-            ),
-            lead_status=_label(item.lead_status, _LEAD_STATUS_LABELS),
-        )
-        for item in rows
-    ]
+    context = _list_context(request, "/leads")
+    leads = await _lead_views(db, rows, return_to=context["list_url"])
     filters = SimpleNamespace(
         min_score=min_score,
         include_history=include_history,
@@ -2285,6 +3063,9 @@ async def leads_page(
         lead_status=lead_status or "",
         created_from=created_from.isoformat() if created_from else "",
         created_to=created_to.isoformat() if created_to else "",
+        q=q,
+        due=due,
+        run=str(run) if run else "",
     )
     return templates.TemplateResponse(
         request,
@@ -2292,12 +3073,18 @@ async def leads_page(
         {
             "leads": leads,
             "filters": filters,
+            **context,
+            "filter_errors": errors,
+            "event_options": list(_EVENT_TYPE_LABELS.items()),
+            "status_options": [("actionable", "Para analisar"), *_LEAD_STATUS_LABELS.items()],
+            "empty_has_data": bool(await db.scalar(select(Lead.id).where(lead_current()).limit(1))),
             "pagination": SimpleNamespace(
                 page=max(page_number, 1),
                 page_size=50,
                 total=total,
             ),
         },
+        status_code=422 if errors else 200,
     )
 
 
@@ -2306,8 +3093,53 @@ async def lead_page(request: Request, lead_id: UUID, db: AsyncSession = Depends(
     return await _render_lead_page(request, lead_id, db)
 
 
+@router.get("/evidencias/{evidence_id}")
+async def evidence_page(request: Request, evidence_id: UUID, db: AsyncSession = Depends(get_db)):
+    evidence = await db.scalar(
+        select(Evidence)
+        .where(Evidence.id == evidence_id)
+        .options(
+            selectinload(Evidence.document),
+            selectinload(Evidence.procurement),
+            selectinload(Evidence.source_record),
+        )
+    )
+    if evidence is None:
+        raise HTTPException(404, "Evidência não encontrada")
+    current = (
+        await db.scalar(
+            select(Evidence.id).where(Evidence.id == evidence_id, evidence_current(Evidence.id))
+        )
+        is not None
+    )
+    document = evidence.document
+    stored = bool(document and (document.local_path or document.extracted_text))
+    document_url = f"/api/documents/{document.id}/view" if document and stored else None
+    if document_url and evidence.page_number:
+        document_url += f"#page={evidence.page_number}"
+    return templates.TemplateResponse(
+        request,
+        "evidence_detail.html",
+        {
+            "evidence": evidence,
+            "title": document.title if document else "Registro oficial",
+            "document_url": document_url,
+            "official_url": _public_link(evidence.source_url)
+            or _public_link(document.original_url if document else None),
+            "collected_at": _local_datetime(evidence.collected_at),
+            "current": current,
+        },
+    )
+
+
 async def _render_lead_page(
-    request: Request, lead_id: UUID, db: AsyncSession, *, draft_error: str | None = None
+    request: Request,
+    lead_id: UUID,
+    db: AsyncSession,
+    *,
+    draft_error: str | None = None,
+    review_error: str | None = None,
+    review_form: dict[str, str] | None = None,
 ):
     lead = await db.scalar(
         select(Lead)
@@ -2318,25 +3150,40 @@ async def _render_lead_page(
             selectinload(Lead.deadline),
             selectinload(Lead.outreach_drafts),
             selectinload(Lead.reviews),
+            selectinload(Lead.procurement),
         )
     )
     if lead is None:
         raise HTTPException(status_code=404, detail="Lead não encontrado")
-    draft = lead.outreach_drafts[-1] if lead.outreach_drafts else None
+    draft = (
+        max(lead.outreach_drafts, key=lambda item: item.created_at)
+        if lead.outreach_drafts
+        else None
+    )
     data = model_dict(lead)
     data.update(
         company_name=lead.company.legal_name or lead.company.normalized_name,
         cnpj=lead.company.cnpj,
+        cnpj_label=_format_cnpj(lead.company.cnpj),
         created_at=_local_datetime(lead.created_at),
         updated_at=_local_datetime(lead.updated_at),
         draft_created_at=_local_datetime(draft.created_at) if draft else None,
+        event_label=_label(lead.triggering_event.event_type, _EVENT_TYPE_LABELS),
+        event_at=_local_datetime(
+            lead.triggering_event.occurred_at or lead.triggering_event.published_at
+        ),
+        lead_status=_label(lead.lead_status, _LEAD_STATUS_LABELS),
+        process=lead.procurement.purchase_number or lead.procurement.title or "Contratação",
+        agency=lead.procurement.agency_name or "Órgão não informado",
+        official_url=_public_link(lead.procurement.source_url),
+        origin_platform_url=await _origin_platform_url(db, lead.procurement),
     )
     view = SimpleNamespace(**data)
     reviews = [
         SimpleNamespace(
             decision=_label(review.decision, _REVIEW_DECISION_LABELS),
             reviewer=review.reviewer,
-            previous_status=review.previous_status,
+            previous_status=_label(review.previous_status, _LEAD_STATUS_LABELS),
             notes=review.notes,
             reviewed_at=_local_datetime(review.reviewed_at),
         )
@@ -2349,6 +3196,29 @@ async def _render_lead_page(
             FactVerification.entity_type == "lead", FactVerification.entity_id == lead.id
         )
     )
+    current = await db.scalar(select(Lead.id).where(Lead.id == lead.id, lead_current())) is not None
+    notice = (
+        verification.reason
+        if verification and verification.status != "confirmed"
+        else (
+            "Evidência histórica ou desativada: novas operações bloqueadas."
+            if not current
+            else None
+        )
+    )
+    deadline_is_current = bool(
+        lead.deadline_id
+        and await db.scalar(
+            select(Deadline.id).where(Deadline.id == lead.deadline_id, deadline_current())
+        )
+    )
+    return_to = safe_list_url(request.query_params.get("return_to"))
+    queue_filters = OpportunityFilters.from_url(return_to, timezone=get_settings().timezone)
+    next_item = (
+        await next_opportunity(db, lead, queue_filters)
+        if current or queue_filters.include_history
+        else None
+    )
     return templates.TemplateResponse(
         request,
         "lead_detail.html",
@@ -2357,32 +3227,24 @@ async def _render_lead_page(
             "evidences": evidences,
             "draft": draft,
             "draft_error": draft_error,
-            "integrity_notice": verification.reason
-            if verification and verification.status != "confirmed"
-            else (
-                "Evidência histórica ou desativada: novas operações bloqueadas."
-                if await db.scalar(select(Lead.id).where(Lead.id == lead.id, lead_current()))
-                is None
-                else None
-            ),
+            "integrity_notice": notice,
             "reviews": reviews,
             "contacts": contacts,
-            "deadline": (
-                SimpleNamespace(
-                    when=_procurement_datetime(
-                        lead.deadline.explicit_deadline_at
-                        or lead.deadline.estimated_deadline_at
-                        or lead.deadline.trigger_at
-                    ),
-                    status=lead.deadline.status.value,
-                    type=lead.deadline.deadline_type,
-                )
-                if lead.deadline is not None
-                else None
-            ),
+            "deadline": _deadline_view(lead.deadline, current=deadline_is_current),
             "review_feedback": request.query_params.get("review"),
+            "review_error": review_error,
+            "review_form": review_form or {},
+            "return_to": return_to,
+            "next_href": f"/leads/{next_item.id}?{urlencode({'return_to': return_to})}"
+            if next_item
+            else None,
+            "continue_available": bool(
+                next_item
+                and not queue_filters.include_history
+                and next_item.lead_status in ACTIONABLE_STATUSES
+            ),
         },
-        status_code=409 if draft_error else 200,
+        status_code=422 if review_error else 409 if draft_error else 200,
     )
 
 
@@ -2406,29 +3268,62 @@ async def draft_lead_from_web(request: Request, lead_id: UUID, db: AsyncSession 
                 "rastreável. Confira as evidências e a origem da contratação."
             ),
         )
-    return RedirectResponse(f"/leads/{lead_id}#rascunho", status_code=303)
+    context = safe_list_url(request.query_params.get("return_to"))
+    suffix = "?" + urlencode({"return_to": context}) if context != "/leads" else ""
+    return RedirectResponse(f"/leads/{lead_id}{suffix}#rascunho", status_code=303)
 
 
 @router.post("/leads/{lead_id}/review")
 async def review_lead_from_web(
+    request: Request,
     lead_id: UUID,
-    decision: str = Form(...),
-    reviewer: str = Form(...),
+    decision: str = Form(""),
+    reviewer: str = Form(""),
     notes: str = Form(""),
+    return_to: str = Form("/leads"),
+    continue_review: bool = Form(False),
     db: AsyncSession = Depends(get_db),
-) -> RedirectResponse:
+):
     """Record a human review decision from the operator page."""
 
     reviewer_name = reviewer.strip()
-    if not reviewer_name:
-        raise HTTPException(status_code=422, detail="Informe o revisor")
+    error = None
+    if not reviewer_name or len(reviewer_name) > 255:
+        error = "Informe o nome do revisor (até 255 caracteres)."
     try:
         selected_decision = ReviewDecision(decision)
     except ValueError:
-        raise HTTPException(status_code=422, detail="Decisão de revisão inválida") from None
+        selected_decision = None
+        error = "Selecione uma decisão de revisão."
+    if len(notes) > 4000:
+        error = "As observações devem ter até 4.000 caracteres."
+    if error or selected_decision is None:
+        return await _render_lead_page(
+            request,
+            lead_id,
+            db,
+            review_error=error or "Selecione uma decisão.",
+            review_form={"decision": decision, "reviewer": reviewer, "notes": notes},
+        )
     lead = await db.get(Lead, lead_id)
     if lead is None:
         raise HTTPException(status_code=404, detail="Lead não encontrado")
+    if await db.scalar(select(Lead.id).where(Lead.id == lead_id, lead_current())) is None:
+        raise HTTPException(
+            409, "Oportunidade histórica ou invalidada: consulte a evidência atual."
+        )
+    await JobLeaseRepository(db).assert_writes_allowed(now=datetime.now(UTC))
+    return_to = safe_list_url(return_to)
+    next_item = (
+        await next_opportunity(
+            db,
+            lead,
+            OpportunityFilters.from_url(return_to, timezone=get_settings().timezone),
+            for_review=True,
+        )
+        if continue_review
+        else None
+    )
     previous = lead.lead_status.value
     lead.lead_status = LeadStatus(selected_decision.value)
     db.add(
@@ -2442,22 +3337,33 @@ async def review_lead_from_web(
         )
     )
     await db.commit()
-    return RedirectResponse(f"/leads/{lead_id}?review=ok", status_code=303)
+    target = next_item.id if next_item else lead_id
+    query = {"review": "previous" if next_item else "ok"}
+    if return_to != "/leads":
+        query["return_to"] = return_to
+    return RedirectResponse(f"/leads/{target}?{urlencode(query)}", status_code=303)
 
 
 @router.get("/crawls")
-async def crawls_page(request: Request, db: AsyncSession = Depends(get_db)):
-    views, has_active = await _crawl_views(db)
+async def crawls_page(
+    request: Request, run: UUID | None = None, db: AsyncSession = Depends(get_db)
+):
+    views, has_active = await _crawl_views(db, run)
     progress_views, llm_status = await _crawl_monitor_views(db)
     return templates.TemplateResponse(
         request,
         "crawls.html",
         {
             "crawls": views,
+            "focused_run": run,
             "has_active": has_active,
             "monitored_crawls": progress_views,
             "monitor_has_active": any(item.active for item in progress_views),
+            "resumable_crawls": await _resumable_crawl_views(db),
             "llm_status": llm_status,
+            "ufs": _BRAZILIAN_UFS,
+            "selected_uf": get_settings().default_uf,
+            "period": _collection_period(get_settings().default_lookback_days),
         },
     )
 
@@ -2471,6 +3377,7 @@ async def crawls_progress(request: Request, db: AsyncSession = Depends(get_db)):
         {
             "monitored_crawls": views,
             "monitor_has_active": any(item.active for item in views),
+            "resumable_crawls": await _resumable_crawl_views(db),
             "llm_status": llm_status,
         },
     )
@@ -2507,6 +3414,14 @@ async def _crawl_monitor_views(
     from app.services.llm.queue import queue_statuses
 
     runs = [*active, *finished]
+    latest_complete = await db.scalar(
+        select(CrawlRun)
+        .where(CrawlRun.connector == COMPLETE_COLLECTION_MODE)
+        .order_by(CrawlRun.created_at.desc())
+        .limit(1)
+    )
+    if latest_complete and all(run.id != latest_complete.id for run in runs):
+        runs.insert(0, latest_complete)
     summaries = await queue_statuses(
         db, get_settings(), run_ids=[run.id for run in runs], include_global=True
     )
@@ -2516,6 +3431,42 @@ async def _crawl_monitor_views(
         view.llm = summaries[run.id]
         views.append(view)
     return views, summaries[None]
+
+
+async def _resumable_crawl_views(db: AsyncSession) -> list[SimpleNamespace]:
+    saved_records = (
+        select(CollectionWorkItem.id)
+        .where(
+            CollectionWorkItem.batch_id == CollectionBatch.id,
+            CollectionWorkItem.kind == "record",
+            CollectionWorkItem.status.in_(("pending", "failed")),
+        )
+        .exists()
+    )
+    runs = (
+        await db.scalars(
+            select(CrawlRun)
+            .join(CollectionBatch, CrawlRun.batch_id == CollectionBatch.id)
+            .where(
+                CollectionBatch.status.in_(("limited", "failed", "suspended")),
+                CollectionBatch.last_run_id == CrawlRun.id,
+                CrawlRun.status.not_in((CrawlRunStatus.PENDING, CrawlRunStatus.RUNNING)),
+                saved_records,
+            )
+            .order_by(CrawlRun.created_at.desc(), CrawlRun.id)
+            .limit(8)
+        )
+    ).all()
+    municipal_names = {
+        f"municipal:{source.id}": source.name for source in list_municipal_sources(get_settings())
+    }
+    views = []
+    for run in runs:
+        view = _crawl_view(run)
+        view.connector_label = municipal_names.get(run.connector, view.connector_label)
+        view.year = (run.filters or {}).get("year")
+        views.append(view)
+    return views
 
 
 @router.post("/crawls/{run_id}/retry-llm")
@@ -2557,12 +3508,16 @@ async def retry_llm_batch_from_web(batch_id: UUID, db: AsyncSession = Depends(ge
 
 
 @router.get("/crawls/table")
-async def crawls_table(request: Request, db: AsyncSession = Depends(get_db)):
+async def crawls_table(
+    request: Request, run: UUID | None = None, db: AsyncSession = Depends(get_db)
+):
     """HTMX fragment repolled while a crawl is still running or pending."""
 
-    views, has_active = await _crawl_views(db)
+    views, has_active = await _crawl_views(db, run)
     return templates.TemplateResponse(
-        request, "_crawl_table.html", {"crawls": views, "has_active": has_active}
+        request,
+        "_crawl_table.html",
+        {"crawls": views, "has_active": has_active, "focused_run": run},
     )
 
 
@@ -2617,10 +3572,15 @@ async def retry_documents_from_web(run_id: UUID, db: AsyncSession = Depends(get_
     return RedirectResponse("/crawls", status_code=303)
 
 
-async def _crawl_views(db: AsyncSession) -> tuple[list[SimpleNamespace], bool]:
-    rows = (
-        await db.scalars(select(CrawlRun).order_by(CrawlRun.created_at.desc()).limit(200))
-    ).all()
+async def _crawl_views(
+    db: AsyncSession, focused_run: UUID | None = None
+) -> tuple[list[SimpleNamespace], bool]:
+    statement = select(CrawlRun)
+    if focused_run:
+        statement = statement.where(CrawlRun.id == focused_run)
+    rows = (await db.scalars(statement.order_by(CrawlRun.created_at.desc()).limit(200))).all()
+    if focused_run and not rows:
+        raise HTTPException(status_code=404, detail="Execução de coleta não encontrada")
     views = [_crawl_view(run) for run in rows]
     batch_ids = {run.batch_id for run in rows if run.batch_id}
     batches = (
@@ -2635,6 +3595,9 @@ async def _crawl_views(db: AsyncSession) -> tuple[list[SimpleNamespace], bool]:
     )
     for run, view in zip(rows, views, strict=True):
         batch = batches.get(run.batch_id) if run.batch_id else None
+        if batch and batch.filters.get("start_date") and batch.filters.get("end_date"):
+            view.query_start = date.fromisoformat(batch.filters["start_date"]).strftime("%d/%m/%Y")
+            view.query_end = date.fromisoformat(batch.filters["end_date"]).strftime("%d/%m/%Y")
         view.can_continue = bool(
             batch
             and batch.status in {"limited", "failed", "suspended"}
@@ -2644,21 +3607,60 @@ async def _crawl_views(db: AsyncSession) -> tuple[list[SimpleNamespace], bool]:
     return views, any(view.active for view in views)
 
 
+@router.post("/crawls/collect")
+async def collect_all_from_web(
+    uf: str | None = Form(None),
+    start_date: OptionalDateForm = Form(None),
+    end_date: OptionalDateForm = Form(None),
+    force_refresh: bool = Form(False),
+) -> RedirectResponse:
+    """Start one background run across the available sources and record categories."""
+    settings = get_settings()
+    region = (uf or settings.default_uf).strip().upper()
+    if region not in dict(_BRAZILIAN_UFS):
+        raise HTTPException(422, "Selecione uma UF válida")
+    start_date, end_date = _validate_collection_dates(start_date, end_date)
+    if start_date and end_date and (end_date == date.max or (end_date - start_date).days >= 3650):
+        raise HTTPException(422, "Informe um período de até 3.650 dias")
+    if start_date is None or end_date is None:
+        period = _collection_period(settings.default_lookback_days)
+        start_date, end_date = (
+            date.fromisoformat(period.start_date),
+            date.fromisoformat(period.end_date),
+        )
+    scope = CollectionScope(region, start_date, end_date, force_refresh=force_refresh)
+    service = CompleteCollection(settings)
+    try:
+        ticket = await service.enqueue(scope)
+    except RuntimeError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    launch_complete_collection(service, ticket, scope)
+    return RedirectResponse(f"/crawls#coleta-{ticket.run_id}", status_code=303)
+
+
 @router.post("/crawls/run")
 async def run_crawl_from_web(
     connector: str = Form("all"),
     uf: str = Form("MA"),
-    days: int = Form(7),
-    batch_size: int = Form(30),
+    days: int = Form(7, ge=1, le=3650),
+    start_date: OptionalDateForm = Form(None),
+    end_date: OptionalDateForm = Form(None),
+    batch_size: int = Form(30, ge=1, le=500),
     process_documents: bool = Form(False),
     force_refresh: bool = Form(False),
 ) -> RedirectResponse:
     """Start a default crawl from the dashboard without exposing JSON details."""
 
+    start_date, end_date = _validate_collection_dates(start_date, end_date)
+    uf = uf.strip().upper()
+    if connector not in {"all", "pncp", "compras_gov"} or uf not in dict(_BRAZILIAN_UFS):
+        raise HTTPException(422, "Selecione uma fonte e uma UF válidas.")
     request = PipelineRequest(
         connector=connector,
         uf=uf,
-        days=days,
+        days=None if start_date else days,
+        start_date=start_date,
+        end_date=end_date,
         process_documents=process_documents,
         document_batch_size=max(1, batch_size),
         force_refresh=force_refresh,
@@ -2908,7 +3910,9 @@ async def settings_page(request: Request, db: AsyncSession = Depends(get_db)):
 async def pause_scheduler(db: AsyncSession = Depends(get_db)) -> RedirectResponse:
     """Pause the automatic collection jobs without stopping the process."""
 
-    set_scheduler_paused(True)
+    await JobLeaseRepository(db).assert_writes_allowed(now=datetime.now(UTC))
+    await asyncio.to_thread(set_scheduler_paused, True)
+    await db.commit()
     return RedirectResponse("/settings?scheduler=pausado", status_code=303)
 
 
@@ -2916,7 +3920,9 @@ async def pause_scheduler(db: AsyncSession = Depends(get_db)) -> RedirectRespons
 async def resume_scheduler(db: AsyncSession = Depends(get_db)) -> RedirectResponse:
     """Resume the automatic collection jobs."""
 
-    set_scheduler_paused(False)
+    await JobLeaseRepository(db).assert_writes_allowed(now=datetime.now(UTC))
+    await asyncio.to_thread(set_scheduler_paused, False)
+    await db.commit()
     return RedirectResponse("/settings?scheduler=ativo", status_code=303)
 
 

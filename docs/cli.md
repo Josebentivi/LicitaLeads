@@ -13,6 +13,7 @@ licita-lead --help
 | Comando | O que faz |
 |---|---|
 | `audit-sources` | Compara os OpenAPI vivos com os contratos conhecidos e grava `docs/source_audit_AAAA-MM-DD.md` |
+| `piloto-tce-ma` | Cruza até 20 pregões da Prefeitura de São Luís com o TCE-MA e o Compras.gov.br e grava a auditoria em uma pasta própria |
 | `crawl <pncp\|compras-gov>` | Coleta registros estruturados sem baixar documentos |
 | `crawl-atas [pncp\|compras-gov\|all]` | Coleta atas de registro de preços (ARP) e itens publicados |
 | `crawl-contracts [pncp\|compras-gov]` | Coleta contratos e, por padrão, itens e termos |
@@ -29,7 +30,7 @@ licita-lead --help
 | `enrich-contacts` | Enriquece contatos corporativos com domínio já evidenciado |
 | `create-leads` | Cria/atualiza leads idempotentemente a partir de eventos confirmados |
 | `run-pipeline` | Coleta → documentos → eventos → prazos → leads em um comando |
-| `export-leads <arquivo.csv>` | Exporta o resumo auditável dos leads em CSV UTF-8 |
+| `export-leads <arquivo.csv>` | Exporta os leads atuais em CSV UTF-8. Aceita `--busca` e `--incluir-historico`. |
 
 ### Opções principais
 
@@ -37,9 +38,9 @@ licita-lead --help
   (repetível), `--max-pages`.
 - `crawl-atas`: `--days` (1–3650, padrão 365), `--max-pages`; a janela filtra
   a vigência inicial das atas no Compras.gov.br e o período de vigência no PNCP.
-  Esse padrão da CLI é independente do formulário, que inicia com até 7 dias
-  (ou a janela automática, se menor), e da janela automática herdada de
-  `DEFAULT_LOOKBACK_DAYS` (30 no exemplo).
+  Esse padrão da CLI é independente do formulário, que usa um período De/Até
+  inclusivo preenchido com até 7 dias (ou a janela automática, se menor), e da
+  janela automática herdada de `DEFAULT_LOOKBACK_DAYS` (30 no exemplo).
 - `crawl-contracts`: `--uf`, `--days`, `--agency-cnpj`, `--start-date`,
   `--end-date`, `--skip-details`, `--max-pages` e `--force-refresh`.
 - `crawl-payments-municipal`: `--source` (`all` ou uma fonte), `--year`,
@@ -52,6 +53,39 @@ licita-lead --help
 - `run-pipeline`: `--uf`, `--days`, `--connector` (`pncp`, `compras-gov`,
   `all`), `--modality`, `--max-pages`, `--document-batch-size`,
   `--skip-documents`.
+
+### Piloto de pregões do TCE-MA
+
+```powershell
+python -m app.cli piloto-tce-ma --inicio 2026-05-01 --fim 2026-07-31 --saida "$env:LOCALAPPDATA/LicitaLeads/pilotos/sao-luis"
+```
+
+Use uma pasta nova em `--saida`. A consulta seleciona até 20 pregões eletrônicos
+do CNPJ municipal `06307102000130`, UASG `980921`, pela data de publicação no
+PNCP e pelo número de controle em caso de empate. As datas são inclusivas e
+devem estar no mesmo ano. Use `--limite` para uma amostra menor.
+
+O SINC-Contrata fornece procedimentos, licitantes, resultados e contratos. O
+conector pagina pelo filtro `enteId=2111300` e verifica o ente e a continuidade
+das páginas recebidas. O vínculo ao PNCP exige o controle oficial e os campos
+compatíveis de órgão, número, ano e modalidade. A partir dele, o vínculo às
+linhas do TCE-MA usa o CNPJ do órgão e o identificador do procedimento. Registros
+com identidade conflitante ou incompleta ficam para conferência. O relatório
+mostra arquivos do PNCP, referências documentais do TCE-MA, itens do Compras.gov.br
+e a comparação dos CNPJs em resultados do item 1.
+
+Para incluir observações da página pública, passe `--origem` com um arquivo JSON
+UTF-8 contendo uma lista de objetos. Cada objeto informa `controle_pncp`, `url`
+oficial e `observado_em` com fuso horário. `controle_exibido` registra o controle
+mostrado na página. Para o item 1, informe também `url_item` e, conforme observado,
+`propostas_visiveis`, `cnpjs`, `termo_julgamento` ou `termo_homologacao`. Os dados do
+item entram na comparação quando a URL e o controle conferem com o PNCP.
+
+A execução grava `relatorio.md`, `comparativo.json` e `fontes.sqlite3`. Os IDs
+de `SourceRecord` no JSON apontam para a base isolada de auditoria, com a
+projeção dos campos utilizados e o hash da resposta original. A execução é
+sob demanda e mantém os registros como observações para análise. Um lote
+parcial fica sinalizado no relatório e retorna código `2`.
 
 ### Exemplos
 
@@ -71,9 +105,13 @@ python -m app.cli export-leads leads.csv
 python -m app.cli audit-sources
 ```
 
-O CSV exportado contém: `lead_id`, `empresa`, `cnpj`, `orgao`, `processo`,
-`evento`, `motivo`, `prazo_explicito`, `prazo_estimado`, `status_prazo`,
-`score`, `status_lead` e `fonte`.
+O CSV identifica empresa, órgão, processo, evento, motivo, nota e situação da oportunidade.
+Quando disponíveis, inclui a fonte, o registro de origem, o documento, o trecho, a página e o
+localizador da evidência. A coluna `status_prazo` considera o instante de `emissao_utc` e
+`status_prazo_gravado` conserva o estado registrado no último cálculo. Datas expressas e
+estimadas têm colunas próprias. Com `--incluir-historico`, confira `validade` antes de usar
+cada linha. Na tela Oportunidades, **Exportar esta busca em CSV** inclui todas as páginas dos
+resultados dos filtros aplicados.
 
 ## Scheduler
 
@@ -195,3 +233,14 @@ O mesmo modo pode recuperar documentos desativados pela suspensão de um fato:
 exige estado oficial aceito como ativo, resposta completa, identidade e hash
 inalterados e verificação do arquivo armazenado. Membros de ZIP exigem também
 o contêiner original completo e inalterado. Não há download ou reextração.
+## Auditoria do fluxo e vínculos
+
+`python -m app.cli reconcile-data --flow-integrity` gera diagnóstico a partir de
+respostas, arquivos e extrações armazenados. Não coleta, baixa, executa OCR ou IA.
+Verifica atos de minutas/legendas, marcadores sem homologação e vínculos derivados
+das identidades oficiais aceitas. Ausência de prova e conflitos exigem revisão.
+
+A aplicação é separada: acrescente `--apply --backup-dir CAMINHO`. Exige manutenção
+exclusiva e backup verificado; `--resume ID` retoma uma execução da mesma versão.
+Notas, revisões e rascunhos históricos são preservados. Confirme o banco efetivo
+pelo launcher antes de usar qualquer comando diretamente neste workspace.

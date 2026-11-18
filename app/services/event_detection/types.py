@@ -73,6 +73,7 @@ class DocumentEvidence:
     published_at: datetime | None = None
     start_offset: int | None = None
     end_offset: int | None = None
+    document_title: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

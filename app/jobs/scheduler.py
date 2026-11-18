@@ -22,6 +22,7 @@ from app.logging import configure_logging
 from app.models import Procurement, ProcurementPhase, ProcurementSource
 from app.repositories.crawls import JobLeaseRepository
 from app.repositories.procurements import _status_category_condition
+from app.runtime_control import RuntimeChannel, shutdown_requested
 from app.services.ingestion import IngestionPipeline, PipelineRequest
 from app.services.ingestion.collection_rechecks import recheck_compras
 from app.services.ingestion.contacts import ContactEnrichmentService
@@ -34,6 +35,7 @@ from app.services.ingestion.scheduled_collections import run_scheduled_collectio
 from app.services.price_registry_scopes import known_price_registry_scopes
 from app.services.scheduler_control import (
     clear_scheduler_heartbeat,
+    component_paused,
     scheduler_paused,
     write_scheduler_heartbeat,
 )
@@ -56,10 +58,13 @@ class _ScheduledPipeline:
 
 
 JobCallable = Callable[[], Awaitable[object]]
+_active_jobs: set[asyncio.Task[Any]] = set()
 
 
 async def _leased(name: str, callback: JobCallable, *, minutes: int = 55) -> None:
-    if scheduler_paused():
+    if shutdown_requested():
+        return
+    if component_paused("llm") if name == "process_llm_queue" else scheduler_paused():
         logger.info(
             "scheduled job skipped because automatic collections are paused",
             extra={"job": name},
@@ -78,11 +83,16 @@ async def _leased(name: str, callback: JobCallable, *, minutes: int = 55) -> Non
         logger.info("scheduled job skipped because its database lease is held", extra={"job": name})
         return
     lease_name = f"scheduler:{name}"
+    worker = asyncio.current_task()
+    if worker:
+        _active_jobs.add(worker)
     heartbeat = asyncio.create_task(
         _renew_scheduler_lease(lease_name, owner, minutes=minutes, worker=asyncio.current_task()),
         name=f"lease-heartbeat:{name}",
     )
     try:
+        if shutdown_requested():
+            return
         await callback()
     except Exception:
         logger.exception("scheduled job failed", extra={"job": name})
@@ -92,6 +102,8 @@ async def _leased(name: str, callback: JobCallable, *, minutes: int = 55) -> Non
             await heartbeat
         async with write_session(async_session_factory) as session:
             await JobLeaseRepository(session).release(name=lease_name, owner_id=owner)
+        if worker:
+            _active_jobs.discard(worker)
 
 
 async def _renew_scheduler_lease(
@@ -165,9 +177,9 @@ async def refresh_active_procurements() -> None:
         )
     )
 
-    # Publication windows cannot find older processes whose details changed.
-    # Rotate oldest observations so bounded jobs eventually revisit every
-    # active process, including one published outside the discovery window.
+    # Rotate direct lookups of active processes, including those outside the
+    # discovery window. The pipeline still reads the official header; an
+    # unchanged, fully verified version can reuse the already collected details.
     now = datetime.now(UTC)
     for source in ("pncp",):
         async with write_session(async_session_factory) as session:
@@ -214,7 +226,6 @@ async def refresh_active_procurements() -> None:
                         connector=source,
                         uf=settings.default_uf,
                         external_ids=identifiers,
-                        force_refresh=True,
                         process_documents=False,
                     )
                 )
@@ -454,7 +465,21 @@ async def serve() -> None:
     heartbeat = asyncio.create_task(_heartbeat_loop(), name="scheduler-heartbeat")
     logger.info("separate scheduler started", extra={"jobs": len(scheduler.get_jobs())})
     try:
-        await asyncio.Event().wait()
+        channel = RuntimeChannel.from_environment()
+        if channel is None:
+            await asyncio.Event().wait()
+        else:
+            while not channel.requested:  # noqa: ASYNC110 - cross-process file notification
+                await asyncio.sleep(0.2)
+            scheduler.pause()
+            jobs = list(_active_jobs)
+            for job in jobs:
+                job.cancel()
+            await asyncio.gather(*jobs, return_exceptions=True)
+            from app.database import dispose_database
+
+            await dispose_database()
+            await asyncio.to_thread(channel.write, "scheduler", {"phase": "drained"})
     finally:
         heartbeat.cancel()
         with suppress(asyncio.CancelledError, Exception):

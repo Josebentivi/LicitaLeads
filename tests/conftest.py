@@ -24,6 +24,9 @@ _TEST_DIRECTORY = tempfile.TemporaryDirectory(
 )
 _TEST_ROOT = Path(_TEST_DIRECTORY.name)
 _ISOLATED_ENVIRONMENT = {
+    "LICITA_CONTROL_DIRECTORY": "",
+    "LICITA_CONTROL_INSTANCE": "",
+    "LICITA_CONTROL_ROLE": "",
     "APP_ENV": "test",
     "DATABASE_URL": f"sqlite:///{(_TEST_ROOT / 'global.sqlite3').as_posix()}",
     "DOCUMENT_STORAGE_PATH": str(_TEST_ROOT / "documents"),

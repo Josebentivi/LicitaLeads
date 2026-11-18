@@ -218,6 +218,8 @@ async def test_procurement_evidence_and_web_pages(
     api_client: httpx.AsyncClient,
     database: DatabaseContext,
 ) -> None:
+    from bs4 import BeautifulSoup
+
     ids = await _full_graph(database)
 
     responses = [
@@ -291,9 +293,14 @@ async def test_procurement_evidence_and_web_pages(
     dashboard_page = responses[9].text
     assert "Adicionado em" in dashboard_page
     assert expected_created in dashboard_page
-    assert '<select name="uf">' in dashboard_page
-    assert '<option value="MA" selected>MA · Maranhão</option>' in dashboard_page
-    assert '<input name="uf"' not in dashboard_page
+    scope_link = BeautifulSoup(dashboard_page, "html.parser").select_one('a[href="/crawls#escopo"]')
+    assert scope_link is not None
+    scope_page = await api_client.get(scope_link["href"])
+    assert scope_page.status_code == 200
+    scope = BeautifulSoup(scope_page.text, "html.parser").select_one("#escopo")
+    assert scope.select_one('select[name="uf"] option[selected]')["value"] == "MA"
+    assert "Maranhão" in scope.select_one('select[name="uf"] option[selected]').get_text()
+    assert not scope.select_one('input[name="uf"]')
 
     procurements_page = responses[10].text
     assert '<select name="uf">' in procurements_page

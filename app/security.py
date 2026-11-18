@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from urllib.parse import urlsplit
 
 from starlette.datastructures import Headers, MutableHeaders
@@ -11,6 +12,42 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 _UNSAFE_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
 _SAFE_FETCH_SITES = frozenset({"same-origin", "none"})
 _LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
+
+
+class ShutdownAdmissionMiddleware:
+    """Close admission, while allowing status requests and cancellation cleanup."""
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if (
+            scope["type"] != "http"
+            or scope.get("method") not in _UNSAFE_METHODS
+            or scope.get("path")
+            in {
+                "/api/application/shutdown",
+                "/application/shutdown",
+            }
+        ):
+            await self.app(scope, receive, send)
+            return
+        from app.runtime_control import shutdown_requested
+        from app.services.application_shutdown import track_mutation
+
+        if shutdown_requested():
+            await PlainTextResponse("Aplicação em encerramento", status_code=503)(
+                scope, receive, send
+            )
+            return
+        task = asyncio.current_task()
+        if task:
+            track_mutation(task)
+        try:
+            await self.app(scope, receive, send)
+        finally:
+            if task:
+                track_mutation(task, remove=True)
 
 
 def _normalized_origin(value: str) -> tuple[str, str, int] | None:

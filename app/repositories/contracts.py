@@ -4,14 +4,18 @@ from __future__ import annotations
 
 from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
+from typing import Any
 from uuid import UUID
+from zoneinfo import ZoneInfo
 
-from sqlalchemy import Select, func, or_, select
+from sqlalchemy import Select, and_, case, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app.models import Contract, Payment
+from app.models import Company, Contract, ContractTerm, Payment
+from app.models.entities import MunicipalBudgetEntry
 from app.repositories.base import BaseRepository, Page
+from app.services.municipal_budget import budget_function_label, public_budget_values
 
 _PAYMENT_PHASES = ("pagamento", "pago", "pago_agregado", "3")
 
@@ -36,6 +40,13 @@ def _actual_payment_phase():
     return or_(
         phase.in_(_PAYMENT_PHASES),
         phase.like("pagamento%"),
+    )
+
+
+def published_term_dates(contract: Contract) -> list[ContractTerm]:
+    return sorted(
+        (term for term in contract.terms if term.new_valid_until is not None),
+        key=lambda term: (term.new_valid_until, term.id),
     )
 
 
@@ -68,10 +79,19 @@ class ContractRepository(BaseRepository[Contract]):
         supplier_cnpj: str | None = None,
         contract_number: str | None = None,
         valid_on: date | None = None,
+        expiring_within_days: int | None = None,
         status: str | None = None,
         source: str | None = None,
     ) -> Page[Contract]:
-        statement: Select[tuple[Contract]] = select(Contract)
+        statement = select(Contract).options(
+            selectinload(Contract.terms).load_only(
+                ContractTerm.term_number,
+                ContractTerm.new_valid_until,
+                ContractTerm.status,
+                ContractTerm.source_record_id,
+                ContractTerm.source_url,
+            )
+        )
         if search:
             term = f"%{search}%"
             statement = statement.where(
@@ -102,6 +122,31 @@ class ContractRepository(BaseRepository[Contract]):
                 Contract.valid_from <= day_end,
                 Contract.valid_until >= day_start,
             )
+        if expiring_within_days is not None:
+            timezone = ZoneInfo("America/Sao_Paulo")
+            today = datetime.now(timezone).date()
+            start = datetime.combine(today, time.min, timezone)
+            stop = datetime.combine(
+                today + timedelta(days=expiring_within_days + 1), time.min, timezone
+            )
+            dates = (
+                select(Contract.id.label("contract_id"), Contract.valid_until.label("expiry"))
+                .where(Contract.valid_until >= start, Contract.valid_until < stop)
+                .union_all(
+                    select(ContractTerm.contract_id, ContractTerm.new_valid_until).where(
+                        ContractTerm.new_valid_until >= start, ContractTerm.new_valid_until < stop
+                    )
+                )
+                .subquery()
+            )
+            upcoming = (
+                select(dates.c.contract_id, func.min(dates.c.expiry).label("first_date"))
+                .group_by(dates.c.contract_id)
+                .subquery()
+            )
+            statement = statement.join(upcoming, upcoming.c.contract_id == Contract.id).order_by(
+                upcoming.c.first_date
+            )
         statement = statement.order_by(
             Contract.published_at.desc().nullslast(),
             Contract.signed_at.desc().nullslast(),
@@ -109,58 +154,50 @@ class ContractRepository(BaseRepository[Contract]):
         )
         return await self.page(statement, page=page, page_size=page_size)
 
-    async def payment_total(self, contract_id: UUID) -> Decimal:
-        """Sum only documents that represent an actual payment.
-
-        The federal connector can also import commitments (empenho) and
-        liquidations for the same contract.  Adding those rows to ``PAGO``
-        would turn budget execution into payment evidence.
-        """
-
-        value = await self.session.scalar(
-            select(func.coalesce(func.sum(Payment.amount), 0)).where(
+    async def _payment_totals(self, contract_id: UUID) -> tuple[int, int, Decimal | None]:
+        row = await self.session.execute(
+            select(
+                func.count(Payment.id), func.count(Payment.amount), func.sum(Payment.amount)
+            ).where(
                 Payment.contract_id == contract_id,
                 Payment.is_current.is_(True),
                 _actual_payment_phase(),
             )
         )
-        return Decimal(value or 0)
+        count, valued_count, total = row.one()
+        return count, valued_count, total
+
+    async def payment_total(self, contract_id: UUID) -> Decimal:
+        """Sum published amounts for current payments, excluding other financial phases."""
+        _, _, total = await self._payment_totals(contract_id)
+        return total if total is not None else Decimal(0)
 
     async def payment_summary(
         self, contract: Contract, *, grace_days: int = 60
     ) -> dict[str, object]:
-        """Summarize located payments without asserting default.
-
-        "sem_pagamento_localizado" only appears after the grace window; a young
-        contract or a missing contract value is "nao_avaliado".
-        """
-
-        paid = await self.payment_total(contract.id)
+        """Compare published amounts only for payment records linked in the local collection."""
+        count, valued_count, subtotal = await self._payment_totals(contract.id)
+        paid = subtotal if count == valued_count else None
         contracted = contract_value(contract)
-        if contracted is None:
-            status = "nao_avaliado"
-            balance = None
-        else:
-            balance = contracted - paid
-            if paid >= contracted:
-                status = "pago"
-            elif paid > 0:
-                status = "parcial"
-            else:
+        balance = contracted - paid if contracted is not None and paid is not None else None
+        status = "nao_avaliado"
+        if contracted is not None and contracted > 0:
+            if paid is not None and paid > 0:
+                status = "pago" if paid >= contracted else "parcial"
+            elif count == 0:
                 start = contract.signed_at or contract.published_at or contract.valid_from
                 if start is not None and datetime.now(UTC) - start >= timedelta(days=grace_days):
                     status = "sem_pagamento_localizado"
-                else:
-                    status = "nao_avaliado"
         return {
-            "paid_value": float(paid),
+            "payment_count": count,
+            "paid_value": float(paid) if paid is not None else None,
             "contracted_value": float(contracted) if contracted is not None else None,
             "balance": float(balance) if balance is not None else None,
             "status": status,
             "grace_days": grace_days,
             "disclaimer": (
-                "Pagamento nao localizado na fonte consultada nao prova inadimplencia; "
-                "confirme a execucao financeira antes de qualquer cobranca."
+                "Resumo dos registros de pagamento vigentes vinculados ao contrato no acervo. "
+                "A cobertura das fontes pode ser parcial. Confirme a execução na fonte oficial."
             ),
         }
 
@@ -169,20 +206,69 @@ class PaymentRepository(BaseRepository[Payment]):
     def __init__(self, session: AsyncSession) -> None:
         super().__init__(session, Payment)
 
-    async def list_filtered(
-        self,
+    @staticmethod
+    def _classification_join():
+        entry = MunicipalBudgetEntry
+        aggregate = Payment.status == "agregado_por_empenho"
+        # Older aggregates may only carry the structured external ID from the adapter.
+        identity = case(
+            (
+                aggregate & Payment.external_id.endswith(":agregado"),
+                func.substr(Payment.external_id, 1, func.length(Payment.external_id) - 9),
+            ),
+            (Payment.status == "detalhe_empenho", Payment.commitment_external_id),
+        )
+        return and_(
+            Payment.source_record_id == entry.source_record_id,
+            Payment.source == "municipal:" + entry.municipality,
+            identity == entry.commitment_identity,
+            or_(
+                Payment.commitment_external_id.is_(None),
+                Payment.commitment_external_id == entry.commitment_identity,
+            ),
+        )
+
+    async def budget_entries(self, payments: list[Payment]) -> dict[UUID, dict[str, Any]]:
+        if not payments:
+            return {}
+        rows = await self.session.execute(
+            select(Payment.id, MunicipalBudgetEntry)
+            .join(MunicipalBudgetEntry, self._classification_join())
+            .where(Payment.id.in_([payment.id for payment in payments]))
+        )
+        return {payment_id: public_budget_values(entry) for payment_id, entry in rows}
+
+    async def budget_options(self) -> tuple[list[str], list[int]]:
+        entry = MunicipalBudgetEntry
+        rows = (
+            await self.session.execute(
+                select(entry.function_name, entry.fiscal_year)
+                .select_from(Payment)
+                .join(entry, self._classification_join())
+                .where(Payment.is_current.is_(True))
+                .distinct()
+            )
+        ).all()
+        return sorted({name for raw, _ in rows if (name := budget_function_label(raw))}), sorted(
+            {year for _, year in rows}, reverse=True
+        )
+
+    @classmethod
+    def filtered_query(
+        cls,
         *,
-        page: int = 1,
-        page_size: int = 50,
         supplier_cnpj: str | None = None,
         agency_cnpj: str | None = None,
         contract_id: UUID | None = None,
         phase: str | None = None,
         match_status: str | None = None,
         source: str | None = None,
+        municipality: str | None = None,
+        budget_function: str | None = None,
+        fiscal_year: int | None = None,
         date_from: datetime | None = None,
         date_to: datetime | None = None,
-    ) -> Page[Payment]:
+    ) -> Select[Any]:
         statement = (
             select(Payment)
             .where(Payment.is_current.is_(True))
@@ -192,6 +278,19 @@ class PaymentRepository(BaseRepository[Payment]):
             statement = statement.where(Payment.supplier_cnpj == supplier_cnpj)
         if source:
             statement = statement.where(Payment.source == source)
+        if municipality:
+            statement = statement.where(
+                Payment.source.like("municipal:%")
+                if municipality == "all"
+                else Payment.source == f"municipal:{municipality}"
+            )
+        if budget_function or fiscal_year is not None:
+            entry = MunicipalBudgetEntry
+            statement = statement.join(entry, cls._classification_join())
+            if budget_function:
+                statement = statement.where(entry.function_name == budget_function)
+            if fiscal_year is not None:
+                statement = statement.where(entry.fiscal_year == fiscal_year)
         if agency_cnpj:
             statement = statement.where(Payment.agency_cnpj == agency_cnpj)
         if contract_id:
@@ -199,12 +298,55 @@ class PaymentRepository(BaseRepository[Payment]):
         if phase:
             statement = statement.where(Payment.phase == phase)
         if match_status:
-            statement = statement.where(Payment.match_status == match_status)
+            statement = statement.where(
+                Payment.requires_manual_review.is_(True)
+                if match_status == "review"
+                else Payment.match_status == match_status
+            )
         if date_from:
             statement = statement.where(Payment.payment_date >= date_from)
         if date_to:
             statement = statement.where(Payment.payment_date <= date_to)
-        statement = statement.order_by(
+        return statement.order_by(
             Payment.payment_date.desc().nullslast(), Payment.created_at.desc(), Payment.id
         )
-        return await self.page(statement, page=page, page_size=page_size)
+
+    async def list_filtered(
+        self, *, page: int = 1, page_size: int = 50, **filters: Any
+    ) -> Page[Payment]:
+        return await self.page(self.filtered_query(**filters), page=page, page_size=page_size)
+
+    async def suppliers_in_scope(
+        self, scope: Select[Any], page: int | None, page_size: int = 50
+    ) -> tuple[int, list[dict[str, Any]]]:
+        # The stored CNPJ and the linked company's identity must agree.
+        statement = (
+            scope.order_by(None)
+            .join(
+                Company,
+                and_(Company.id == Payment.company_id, Company.cnpj == Payment.supplier_cnpj),
+            )
+            .where(func.length(Company.cnpj) == 14)
+        )
+        count = int(
+            await self.session.scalar(
+                statement.with_only_columns(
+                    func.count(func.distinct(Company.cnpj)), maintain_column_froms=True
+                )
+            )
+            or 0
+        )
+        if page is None:
+            return count, []
+        records = func.count(Payment.id)
+        label = func.coalesce(Company.legal_name, Company.normalized_name, Company.cnpj)
+        grouped = statement.with_only_columns(
+            Company.cnpj, label, records, maintain_column_froms=True
+        )
+        rows = await self.session.execute(
+            grouped.group_by(Company.cnpj, label)
+            .order_by(records.desc(), label, Company.cnpj)
+            .offset((page - 1) * page_size)
+            .limit(page_size)
+        )
+        return count, [dict(cnpj=cnpj, name=name, records=n) for cnpj, name, n in rows]

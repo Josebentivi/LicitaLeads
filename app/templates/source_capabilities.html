@@ -2,5 +2,11 @@
 {% block title %}Fontes · LicitaLead Monitor{% endblock %}
 {% block content %}<div class="page-heading"><div><p class="eyebrow">Auditoria</p><h1>Capacidades das fontes</h1></div></div>
 {% for source in capabilities %}<section class="panel"><h2>{{ source.name }}</h2><p><a href="{{ source.documentation_url }}" target="_blank" rel="noopener">Documentação oficial</a></p><div class="table-wrap"><table><thead><tr><th>Capacidade</th><th>Disponibilidade</th><th>Observação</th></tr></thead><tbody>{% for capability in source.capabilities %}<tr><td>{{ capability.name }}</td><td><span class="badge {{ capability.availability }}">{{ capability.availability }}</span></td><td>{{ capability.notes }}</td></tr>{% endfor %}</tbody></table></div></section>{% endfor %}
+<section class="panel">
+  <h2>TCE-MA · SINC-Contrata</h2>
+  <p>A coleta cruza pregões eletrônicos da Prefeitura de São Luís (UASG 980921) com o PNCP pelo número de controle oficial, conferindo órgão, número, ano e modalidade. Os procedimentos, resultados, contratos, licitantes pessoa jurídica e links publicados ficam na seção <strong>TCE-MA · dados complementares</strong> do pregão quando existe vínculo confirmado.</p>
+  <p>Quando o controle coincide, mas a identificação diverge, a seção exibe o registro para revisão.</p>
+  <p><a href="https://tce-api.apps.tcema.tc.br/swagger-ui/index.html" target="_blank" rel="noopener noreferrer">Documentação oficial</a></p>
+</section>
 {% endblock %}
 

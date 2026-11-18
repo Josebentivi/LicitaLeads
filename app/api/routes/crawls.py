@@ -19,6 +19,13 @@ from app.models import CrawlRun, CrawlRunStatus, JobLease
 from app.repositories.crawls import JobLeaseRepository
 from app.schemas import CrawlRunRequest
 from app.services.ingestion import IngestionPipeline, PipelineRequest
+from app.services.ingestion.complete_collection import (
+    COMPLETE_COLLECTION_LEASE,
+    COMPLETE_COLLECTION_MODE,
+    CollectionScope,
+    CollectionTicket,
+    CompleteCollection,
+)
 from app.services.ingestion.continuation import (
     ContinuationBusy,
     create_continuation,
@@ -72,8 +79,20 @@ def launch_crawl(run_id: UUID, request: PipelineRequest) -> None:
     task.add_done_callback(_discard)
 
 
+def launch_complete_collection(
+    service: CompleteCollection, ticket: CollectionTicket, scope: CollectionScope
+) -> None:
+    if ticket.generation is None:
+        return
+    task = asyncio.create_task(service.run(ticket, scope), name=f"complete:{ticket.run_id}")
+    _running_tasks[ticket.run_id] = task
+    task.add_done_callback(lambda _task: _running_tasks.pop(ticket.run_id, None))
+
+
 def _crawl_lease_names(run: CrawlRun) -> list[str]:
     filters = run.filters if isinstance(run.filters, dict) else {}
+    if filters.get("mode") == COMPLETE_COLLECTION_MODE:
+        return [COMPLETE_COLLECTION_LEASE]
     payment_lease = filters.get("lease_name")
     if (
         filters.get("mode") in {"payments", "payment_import"}
@@ -134,6 +153,8 @@ async def cancel_crawl(run_id: UUID, db: AsyncSession) -> bool:
     await cancel_for_run(db, run_id)
     task = _running_tasks.get(run_id)
     if task is not None and not task.done():
+        if run.connector == COMPLETE_COLLECTION_MODE and run.status is CrawlRunStatus.PENDING:
+            await finalize_cancelled_run(db, run)
         await db.commit()
         task.cancel()
         return True

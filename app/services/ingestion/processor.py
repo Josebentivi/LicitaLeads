@@ -53,6 +53,7 @@ from app.models import (
 from app.models import (
     DocumentChunk as StoredDocumentChunk,
 )
+from app.repositories.crawls import JobLeaseRepository
 from app.services.contacts.domains import (
     EmailCandidate,
     context_window,
@@ -344,6 +345,21 @@ async def suspend_document_derivatives(session: AsyncSession, document_id: UUID)
                 identifiers.add(child_id)
                 pending.append(child_id)
     evidence_ids = select(Evidence.id).where(Evidence.document_id.in_(identifiers))
+    from sqlalchemy import update
+
+    from app.models import LLMWorkItem
+    from app.models.llm_review import LLMSuggestion
+
+    await session.execute(
+        update(LLMSuggestion)
+        .where(LLMSuggestion.document_id.in_(identifiers), LLMSuggestion.status == "pending")
+        .values(status="obsolete")
+    )
+    await session.execute(
+        update(LLMWorkItem)
+        .where(LLMWorkItem.document_id.in_(identifiers), LLMWorkItem.status == "pending")
+        .values(status="obsolete")
+    )
     events = list(
         (
             await session.scalars(
@@ -1422,6 +1438,7 @@ class DocumentProcessingService:
                 page_number=chunk.page_number,
                 locator=chunk.locator,
                 document_type=document.document_type,
+                document_title=document.title,
                 published_at=document.published_at,
                 start_offset=chunk.start_offset,
                 end_offset=chunk.end_offset,
@@ -1491,7 +1508,7 @@ class DocumentProcessingService:
                 )
                 event_count += int(created)
                 if event.company_id is None:
-                    await self._auto_link_single_winner(session, procurement, event)
+                    await self._suggest_single_winner(session, procurement, event)
                 await refresh_procurement_phase(session, procurement)
                 if event.company_id:
                     pending_evaluations[event.id] = event
@@ -1624,6 +1641,7 @@ class DocumentProcessingService:
         chunk: StoredDocumentChunk,
         *,
         analyses: list[LLMEventAnalysis],
+        context_chunk_ids: list[UUID] | None = None,
     ) -> tuple[int, int]:
         """Run the evidence-bound LLM analyzer on one chunk and persist findings.
 
@@ -1631,11 +1649,128 @@ class DocumentProcessingService:
         response never blocks deterministic detection or the document.
         """
 
+        from app.models.llm_review import LLMEventCitation, LLMSuggestion
+        from app.services.event_detection.authority import assertion_diagnostic
+        from app.services.event_detection.detector import _EVENT_PATTERNS
+        from app.services.llm.analyzer import attribution_status
+        from app.services.llm.queue import digest, document_snapshot
+
         event_count = lead_count = 0
+        context_chunks = list(
+            (
+                await session.scalars(
+                    select(StoredDocumentChunk).where(
+                        StoredDocumentChunk.document_id == document.id,
+                        StoredDocumentChunk.id.in_(context_chunk_ids or [chunk.id]),
+                    )
+                )
+            ).all()
+        )
         for analysis in analyses:
             if not analysis.evidence_quotes:
                 continue
-            quote = analysis.evidence_quotes[0]
+            status = attribution_status(analysis)
+            known_party_id = None
+            if analysis.company_name and not analysis.company_cnpj:
+                party_ids = list(
+                    (
+                        await session.scalars(
+                            select(Company.id)
+                            .join(Participant)
+                            .where(
+                                Participant.procurement_id == procurement.id,
+                                participant_current(),
+                                Company.normalized_name
+                                == normalize_company_name(analysis.company_name),
+                            )
+                            .distinct()
+                            .limit(2)
+                        )
+                    ).all()
+                )
+                if len(party_ids) == 1:
+                    known_party_id = str(party_ids[0])
+                else:
+                    status = "review"
+            if status == "contradictory" or any(
+                assertion_diagnostic(q.text, document.title) for q in analysis.evidence_quotes
+            ):
+                continue
+            citations = []
+            located = []
+            for quote in analysis.evidence_quotes:
+                pattern = re.compile(r"\s+".join(re.escape(v) for v in quote.text.split()), re.I)
+                match = None
+                member = None
+                for candidate in context_chunks:
+                    found = pattern.search(candidate.text)
+                    if found and (quote.page is None or quote.page == candidate.page_number):
+                        member, match = candidate, found
+                        break
+                if member is None or match is None:
+                    raise ValueError("Citação fora do contexto documental verificado")
+                local = DocumentEvidence(
+                    text=match.group(),
+                    source_url=document.resolved_url or document.original_url,
+                    page_number=member.page_number,
+                    locator=member.locator,
+                    document_type=document.document_type,
+                    document_title=document.title,
+                    published_at=document.published_at,
+                    start_offset=(member.start_offset or 0) + match.start(),
+                    end_offset=(member.start_offset or 0) + match.end(),
+                )
+                citations.append(
+                    await self._evidence(session, procurement, document, member, local)
+                )
+                located.append((quote, member))
+            if status == "review":
+                fingerprint = digest(
+                    [
+                        "llm-suggestion-v1",
+                        str(document.id),
+                        document.file_hash,
+                        analysis.model_dump(mode="json"),
+                    ]
+                )
+                exists = await session.scalar(
+                    select(LLMSuggestion.id).where(LLMSuggestion.fingerprint == fingerprint)
+                )
+                if exists is None:
+                    company = (
+                        await session.scalar(
+                            select(Company).where(Company.cnpj == analysis.company_cnpj)
+                        )
+                        if analysis.company_cnpj
+                        else None
+                    )
+                    session.add(
+                        LLMSuggestion(
+                            fingerprint=fingerprint,
+                            procurement_id=procurement.id,
+                            document_id=document.id,
+                            chunk_id=chunk.id,
+                            company_id=company.id if company else None,
+                            analysis=analysis.model_dump(mode="json"),
+                            snapshot=await document_snapshot(session, document) or {},
+                            evidence_ids=[str(e.id) for e in citations],
+                            reason="party_not_proven",
+                            status="pending",
+                        )
+                    )
+                    await session.flush()
+                continue
+            quote, chunk = next(
+                (
+                    (q, c)
+                    for q, c in located
+                    if any(
+                        kind == analysis.event_type and pattern.search(q.text)
+                        for kind, pattern in _EVENT_PATTERNS
+                    )
+                ),
+                located[0],
+            )
             quote_start = chunk.start_offset
             quote_end = chunk.end_offset
             if chunk.text:
@@ -1667,17 +1802,24 @@ class DocumentProcessingService:
                 requires_manual_review=True,
                 company_name=analysis.company_name,
                 company_cnpj=analysis.company_cnpj,
+                company_external_id=known_party_id,
                 item_number=analysis.item_number,
                 occurred_at=analysis.event_date or document.published_at,
             )
-            if await self._event_already_exists(session, procurement, detected):
+            if await self._event_already_exists(session, procurement, detected, document=document):
                 continue
             event, created = await self._persist_event(
                 session, procurement, document, chunk, detected, source="llm"
             )
             event_count += int(created)
-            if event.company_id is None:
-                await self._auto_link_single_winner(session, procurement, event)
+            for citation in citations:
+                if not await session.scalar(
+                    select(LLMEventCitation.id).where(
+                        LLMEventCitation.event_id == event.id,
+                        LLMEventCitation.evidence_id == citation.id,
+                    )
+                ):
+                    session.add(LLMEventCitation(event_id=event.id, evidence_id=citation.id))
             await refresh_procurement_phase(session, procurement)
             if event.company_id:
                 lead_count += int(await self._deadline_and_lead(session, procurement, event))
@@ -1688,6 +1830,8 @@ class DocumentProcessingService:
         session: AsyncSession,
         procurement: Procurement,
         detected: DetectedEvent,
+        *,
+        document: Document | None = None,
     ) -> bool:
         """Skip an LLM finding equivalent to an event already stored for the process."""
 
@@ -1696,6 +1840,8 @@ class DocumentProcessingService:
             session, procurement.id, detected.item_number, context=detected.evidence.text
         )
         conditions = [
+            event_verified(),
+            Evidence.text_excerpt == detected.evidence.text,
             ProcurementEvent.procurement_id == procurement.id,
             ProcurementEvent.event_type == ProcurementEventType(detected.event_type.value),
             (
@@ -1709,22 +1855,28 @@ class DocumentProcessingService:
                 else ProcurementEvent.item_id.is_(None)
             ),
         ]
-        existing = await session.scalar(select(ProcurementEvent.id).where(*conditions).limit(1))
+        if document is not None:
+            conditions.extend(
+                [
+                    Evidence.document_id == document.id,
+                    ProcurementEvent.occurred_at == detected.occurred_at,
+                ]
+            )
+        existing = await session.scalar(
+            select(ProcurementEvent.id)
+            .join(Evidence, Evidence.id == ProcurementEvent.evidence_id)
+            .where(*conditions)
+            .limit(1)
+        )
         return existing is not None
 
-    async def _auto_link_single_winner(
+    async def _suggest_single_winner(
         self,
         session: AsyncSession,
         procurement: Procurement,
         event: ProcurementEvent,
     ) -> bool:
-        """Attribute an unattributed winner event when only one company won.
-
-        This is deliberately conservative: it only applies to winner-side event
-        types and only when the procurement has exactly one adjudicated company
-        across all its items. The link stays flagged for human review and is
-        recorded as an inference, never as a confirmed source fact.
-        """
+        """Offer a candidate without assigning the event or creating its lead."""
 
         if event.company_id is not None or event.event_type not in _AUTO_LINK_EVENT_TYPES:
             return False
@@ -1741,6 +1893,7 @@ class DocumentProcessingService:
                     select(Participant.company_id)
                     .where(
                         Participant.procurement_id == procurement.id,
+                        participant_current(),
                         Participant.participation_role.in_(
                             [ParticipantRole.AWARDED, ParticipantRole.WINNER]
                         ),
@@ -1758,19 +1911,53 @@ class DocumentProcessingService:
         if len(company_ids) != 1:
             return False
         company_id = company_ids[0]
-        event.company_id = company_id
-        event.requires_manual_review = True
-        if event.confidence > Decimal("0.60"):
-            event.confidence = Decimal("0.60")
-        await self._record_link_observation(
-            session,
-            event,
-            company_id,
-            source="inferred_single_winner",
-            confidence=Decimal("0.60"),
+        from app.models.llm_review import LLMSuggestion
+        from app.services.llm.queue import digest, document_snapshot
+
+        proof = await session.get(Evidence, event.evidence_id) if event.evidence_id else None
+        doc = (
+            await session.get(Document, proof.document_id) if proof and proof.document_id else None
+        )
+        company = await session.get(Company, company_id)
+        if not doc or not proof or not company:
+            return False
+        from app.services.participation_integrity import is_procurement_buyer
+
+        if is_procurement_buyer(company.cnpj, procurement):
+            return False
+        snapshot = await document_snapshot(session, doc)
+        if not snapshot:
+            return False
+        key = digest(["single-winner-candidate-1", str(event.id), str(company.id), snapshot])
+        if await session.scalar(select(LLMSuggestion.id).where(LLMSuggestion.fingerprint == key)):
+            return False
+        session.add(
+            LLMSuggestion(
+                fingerprint=key,
+                procurement_id=procurement.id,
+                document_id=doc.id,
+                chunk_id=proof.document_chunk_id,
+                event_id=event.id,
+                company_id=company.id,
+                analysis={
+                    "event_type": event.event_type.value,
+                    "company_name": company.legal_name,
+                    "company_cnpj": company.cnpj,
+                    "confidence": 0.6,
+                    "requires_manual_review": True,
+                    "reason_category": event.reason_category.value
+                    if event.reason_category
+                    else "UNKNOWN",
+                    "evidence_quotes": [{"text": proof.text_excerpt, "page": proof.page_number}],
+                },
+                evidence_ids=[str(proof.id)],
+                snapshot=snapshot,
+                reason="single_official_winner",
+                status="pending",
+            )
         )
         await session.flush()
-        return True
+        return False
 
     async def _record_link_observation(
         self,
@@ -1865,6 +2052,7 @@ class DocumentProcessingService:
         note: str | None,
         expected_procurement_id: UUID | None,
     ) -> bool:
+        await JobLeaseRepository(session).assert_writes_allowed(now=datetime.now(UTC))
         event = await session.get(ProcurementEvent, event_id)
         if event is None:
             raise LookupError("event not found")
@@ -1876,11 +2064,24 @@ class DocumentProcessingService:
         company = await session.get(Company, company_id)
         if company is None:
             raise LookupError("company not found")
+        from app.repositories.current_evidence import evidence_current
+        from app.services.participation_integrity import is_procurement_buyer
+
+        if event.company_id is not None and event.company_id != company_id:
+            raise ValueError("O evento já possui outra atribuição; preserve a revisão anterior")
+        if is_procurement_buyer(company.cnpj, procurement) or not await session.scalar(
+            select(ProcurementEvent.id).where(
+                ProcurementEvent.id == event.id,
+                evidence_current(ProcurementEvent.evidence_id),
+            )
+        ):
+            raise ValueError("Identidade ou evidência incompatível com a atribuição")
         participates = await session.scalar(
             select(Participant.id)
             .where(
                 Participant.procurement_id == procurement.id,
                 Participant.company_id == company_id,
+                participant_current(),
             )
             .limit(1)
         )
@@ -2157,6 +2358,9 @@ class DocumentProcessingService:
         fingerprint = stable_fingerprint(
             "event",
             procurement.id,
+            document.id,
+            document.file_hash,
+            detected.occurred_at,
             event_type.value,
             company.id if company else None,
             item.id if item else None,
@@ -2165,6 +2369,24 @@ class DocumentProcessingService:
         event = await session.scalar(
             select(ProcurementEvent).where(ProcurementEvent.fingerprint == fingerprint)
         )
+        if event is None:
+            # Preserve legacy IDs when the exact act and its documentary
+            # provenance already exist; a different date/version remains distinct.
+            event = await session.scalar(
+                select(ProcurementEvent)
+                .join(Evidence, Evidence.id == ProcurementEvent.evidence_id)
+                .where(
+                    ProcurementEvent.procurement_id == procurement.id,
+                    ProcurementEvent.event_type == event_type,
+                    ProcurementEvent.company_id == (company.id if company else None),
+                    ProcurementEvent.item_id == (item.id if item else None),
+                    ProcurementEvent.occurred_at == detected.occurred_at,
+                    Evidence.document_id == document.id,
+                    Evidence.text_excerpt == detected.evidence.text,
+                    event_verified(),
+                )
+                .limit(1)
+            )
         if event is not None:
             event.evidence_id = evidence.id
             event.raw_description = detected.raw_description

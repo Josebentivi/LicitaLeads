@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+{% block title %}Corrigir coleta · LicitaLead Monitor{% endblock %}
+{% block content %}
+<h1>Confira os dados da coleta</h1><p class="alert error" role="alert">{{ message }}</p><p>Os campos informados foram mantidos. Corrija-os e tente novamente.</p>
+{% if action == '/crawls/collect' %}
+<section class="panel"><div class="filters">
+<label>UF <select name="uf" form="complete-collection-form">{% for code,name in ufs %}<option value="{{ code }}"{% if values.get('uf', 'MA')|upper == code %} selected{% endif %}>{{ code }} · {{ name }}</option>{% endfor %}</select></label>
+<label>De <input type="date" name="start_date" value="{{ values.get('start_date', '') }}" form="complete-collection-form"></label>
+<label>Até <input type="date" name="end_date" value="{{ values.get('end_date', '') }}" form="complete-collection-form"></label>
+<label class="checkbox"><input type="checkbox" name="force_refresh" value="true" form="complete-collection-form"{% if values.get('force_refresh') == 'true' %} checked{% endif %}> Reconsultar detalhes já verificados</label>
+</div><p>Depois de corrigir as datas, use <strong>Coletar dados</strong> no topo.</p><a href="{{ back }}">Voltar a Coletas</a></section>
+{% else %}
+<form method="post" action="{{ action }}" class="panel" data-submit-once><div class="filters">
+<label>Fonte <select name="connector">{% for value,label in [('all','Todas as fontes disponíveis'),('pncp','PNCP'),('compras_gov','Compras.gov.br')] %}<option value="{{ value }}"{% if values.get('connector', 'all') == value %} selected{% endif %}>{{ label }}</option>{% endfor %}</select></label>
+{% if action != '/contratos/collect' %}<label>UF <select name="uf">{% for code,name in ufs %}<option value="{{ code }}"{% if values.get('uf', 'MA')|upper == code %} selected{% endif %}>{{ code }} · {{ name }}</option>{% endfor %}</select></label>{% else %}<label>CNPJ do órgão <input name="agency_cnpj" value="{{ values.get('agency_cnpj', '') }}" required maxlength="30"></label>{% endif %}
+<label>De <input type="date" name="start_date" value="{{ values.get('start_date', '') }}"></label><label>Até <input type="date" name="end_date" value="{{ values.get('end_date', '') }}"></label>
+{% if 'days' in values %}<label>Dias (usado somente sem datas) <input type="number" name="days" min="1" max="3650" value="{{ values['days'] }}"></label>{% endif %}
+{% if action == '/atas/collect' %}<input type="hidden" name="registry_scope" value="{{ values.get('registry_scope', '') }}"><p>O órgão/unidade selecionado foi preservado. Para mudar a unidade, <a href="/atas">volte à seleção de atas</a>.</p>{% endif %}
+{% if action == '/crawls/run' %}<label>Documentos por lote <input name="batch_size" type="number" min="1" max="500" value="{{ values.get('batch_size', '30') }}"></label><label class="checkbox"><input type="checkbox" name="process_documents" value="true"{% if values.get('process_documents') == 'true' %} checked{% endif %}> Baixar/processar documentos</label>{% endif %}
+<label class="checkbox"><input type="checkbox" name="force_refresh" value="true"{% if values.get('force_refresh') == 'true' %} checked{% endif %}> Reconsultar detalhes já verificados</label>
+</div><button type="submit" data-busy-label="Iniciando…">Tentar iniciar coleta</button> <a href="{{ back }}">Voltar à página de coleta</a></form>
+{% endif %}
+{% endblock %}

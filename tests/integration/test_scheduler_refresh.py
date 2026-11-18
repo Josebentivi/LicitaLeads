@@ -59,6 +59,7 @@ async def test_refresh_rotates_oldest_active_source_ids(database, monkeypatch):
     assert len(direct) == 1
     assert direct[0].connector == "pncp"
     assert direct[0].external_ids == ("old-active",)
+    assert not direct[0].force_refresh
     # A failed lookup must not pin the oldest process at the front forever.
     # The fake pipeline deliberately never updates collected_at on success.
     await scheduler.refresh_active_procurements()

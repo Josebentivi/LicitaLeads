@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.serialization import model_dict
 from app.config import get_settings
 from app.dependencies import get_db
-from app.repositories.contracts import ContractRepository
+from app.repositories.contracts import ContractRepository, published_term_dates
 
 router = APIRouter(prefix="/contracts", tags=["contracts"])
 
@@ -26,6 +26,7 @@ async def list_contracts(
     supplier_cnpj: str | None = None,
     contract_number: str | None = None,
     valid_on: date | None = None,
+    expiring_within_days: int | None = Query(None, ge=1, le=365),
     status: str | None = Query(None, alias="status"),
     source: str | None = None,
     db: AsyncSession = Depends(get_db),
@@ -41,11 +42,31 @@ async def list_contracts(
         supplier_cnpj=supplier_cnpj,
         contract_number=contract_number,
         valid_on=valid_on,
+        expiring_within_days=expiring_within_days,
         status=status,
         source=source,
     )
     return {
-        "items": [model_dict(row) for row in result.items],
+        "items": [
+            {
+                **model_dict(row),
+                "term_expirations": [
+                    model_dict(
+                        term,
+                        include={
+                            "id",
+                            "term_number",
+                            "new_valid_until",
+                            "status",
+                            "source_url",
+                            "source_record_id",
+                        },
+                    )
+                    for term in published_term_dates(row)
+                ],
+            }
+            for row in result.items
+        ],
         "page": result.page,
         "page_size": result.page_size,
         "total": result.total,

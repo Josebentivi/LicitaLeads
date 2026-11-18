@@ -20,7 +20,37 @@ from app.connectors.http import AsyncHTTPClient, ConnectorDecodeError, Connector
 from app.services.event_detection.types import EventType, ReasonCategory
 
 logger = logging.getLogger(__name__)
-PROMPT_VERSION = "evidence-bound-2"
+PROMPT_VERSION = "evidence-bound-3-party-context"
+
+
+def response_schema() -> dict[str, Any]:
+    from app.services.llm.analyzer import LLMEventAnalysis
+
+    schema = LLMEventAnalysis.model_json_schema()
+    definitions = schema.pop("$defs", {})
+
+    def strict(node: Any) -> None:
+        if isinstance(node, dict):
+            node.pop("default", None)
+            if node.get("type") == "object":
+                node["additionalProperties"] = False
+                node["required"] = list(node.get("properties", {}))
+            for value in node.values():
+                strict(value)
+        elif isinstance(node, list):
+            for value in node:
+                strict(value)
+
+    root = {
+        "type": "object",
+        "properties": {"analyses": {"type": "array", "items": schema}},
+        "$defs": definitions,
+    }
+    strict(root)
+    return {
+        "type": "json_schema",
+        "json_schema": {"name": "procurement_acts", "strict": True, "schema": root},
+    }
 
 
 @dataclass(frozen=True)
@@ -59,6 +89,9 @@ Analise o TEXTO fornecido e devolva SOMENTE um objeto JSON válido no formato:
 
 Regras obrigatórias:
 - Extraia apenas fatos explicitamente presentes no texto. Nunca invente nada.
+- Não extraia atos de minutas, legendas, regras futuras, alegações ou outros processos.
+- Cite o ato e a identidade de quem o sofreu. Empresas citadas em outros atos não são o sujeito.
+- Inclua todas as citações necessárias, com a página fornecida. Identidade ambígua exige revisão.
 - event_type deve ser um destes valores: {_EVENT_TYPES}.
 - reason_category deve ser um destes valores: {_REASON_CATEGORIES}.
 - evidence_quotes.text deve ser um trecho LITERAL copiado do texto (sem reescrever).
@@ -107,7 +140,7 @@ class OpenAIChatLLMProvider:
         return reply.analyses
 
     async def request(self, text: str, pages: dict[int, str] | None = None) -> LLMReply:
-        page = next(iter(pages)) if pages else None
+        page = next(iter(pages)) if pages and len(pages) == 1 else None
         body: dict[str, Any] = {
             "model": self.settings.llm_model,
             "messages": [
@@ -115,7 +148,7 @@ class OpenAIChatLLMProvider:
                 {"role": "user", "content": _user_prompt(text, page)},
             ],
             "max_completion_tokens": self.settings.llm_max_output_tokens,
-            "response_format": {"type": "json_object"},
+            "response_format": response_schema(),
         }
         try:
             response = await self._client.request_json(
@@ -181,6 +214,11 @@ class OpenAIChatLLMProvider:
         try:
             choices = payload.get("choices")
             choice = choices[0] if isinstance(choices, list) and choices else {}
+            message = choice.get("message", {}) if isinstance(choice, dict) else {}
+            if isinstance(message, dict) and message.get("refusal"):
+                return LLMReply(
+                    **metadata, diagnostic={**diagnostic, "error": True, "code": "model_refusal"}
+                )
             if not isinstance(choice, dict) or choice.get("finish_reason") not in {"stop"}:
                 reason = choice.get("finish_reason") if isinstance(choice, dict) else None
                 return LLMReply(

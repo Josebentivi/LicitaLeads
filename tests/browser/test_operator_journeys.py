@@ -8,34 +8,22 @@ import pytest
 pytestmark = pytest.mark.browser
 
 
-def test_registry_selector_collect_and_htmx_progress(browser, runtime):
+def test_complete_collection_updates_registry_catalog(browser, runtime):
     from selenium.webdriver.common.by import By
-    from selenium.webdriver.support import expected_conditions as EC
-    from selenium.webdriver.support.ui import Select, WebDriverWait
+    from selenium.webdriver.support.ui import WebDriverWait
 
     (runtime.root / "registries").touch()
     browser.get(runtime.url + "/atas")
+    assert len(browser.find_elements(By.CSS_SELECTOR, "#complete-collection-form button")) == 1
+    assert not browser.find_elements(By.CSS_SELECTOR, "form[action='/atas/collect']")
+    browser.get(runtime.url + "/crawls")
+    browser.execute_script(
+        "document.querySelector('#escopo [name=start_date]').value='2026-01-01';"
+        "document.querySelector('#escopo [name=end_date]').value='2026-12-31';"
+    )
+    browser.find_element(By.CSS_SELECTOR, "#complete-collection-form button").click()
     wait = WebDriverWait(browser, 35)
-    Select(browser.find_element(By.ID, "ata-collection-uf")).select_by_value("PI")
-    wait.until(lambda d: "Nenhum" in d.find_element(By.ID, "ata-scope-status").text)
-    assert not browser.find_element(By.CSS_SELECTOR, "[data-registry-submit]").is_enabled()
-    Select(browser.find_element(By.ID, "ata-collection-uf")).select_by_value("MA")
-    wait.until(lambda d: len(Select(d.find_element(By.ID, "ata-collection-scope")).options) > 1)
-    Select(browser.find_element(By.ID, "ata-collection-scope")).select_by_value(
-        "MA:00000000000191:980921"
-    )
-    Select(browser.find_element(By.ID, "ata-collection-source")).select_by_value("pncp")
-    form = browser.find_element(By.CSS_SELECTOR, "form[data-registry-collection]")
-    form.find_element(By.NAME, "days").clear()
-    form.find_element(By.NAME, "days").send_keys("7")
-    form.find_element(By.CSS_SELECTOR, "button[type=submit]").click()
-    wait.until(EC.url_contains("/crawls"))
-    wait.until(
-        lambda d: (
-            "Ata" in d.find_element(By.TAG_NAME, "body").text
-            or "Atas" in d.find_element(By.TAG_NAME, "body").text
-        )
-    )
+    wait.until(lambda d: "#coleta-" in d.current_url)
     from tests.support.processes import wait_for
 
     def persisted():
@@ -45,9 +33,17 @@ def test_registry_selector_collect_and_htmx_progress(browser, runtime):
     wait_for(persisted)
     with sqlite3.connect(runtime.root / "suite.sqlite3") as db:
         filters = db.execute(
-            "select filters from crawl_runs order by created_at desc limit 1"
+            "select filters from crawl_runs where json_extract(filters,'$.mode')='price_registries'"
         ).fetchone()[0]
-    assert '"days": 7' in filters and "980921" in filters and "pncp" in filters
+    assert (
+        '"start_date":' in filters
+        and '"end_date":' in filters
+        and "980921" in filters
+        and "pncp" in filters
+    )
+    wait.until(
+        lambda d: d.find_element(By.CSS_SELECTOR, ".complete-progress a[href^='/leads?run=']")
+    )
     browser.get(runtime.url + "/atas")
     assert "0001" in browser.find_element(By.TAG_NAME, "body").text
 
@@ -60,19 +56,21 @@ def test_crawl_cancel_continue_history_and_evidence(browser, runtime):
     wait = WebDriverWait(browser, 35)
     (runtime.root / "hold").touch()
     browser.get(runtime.url + "/dashboard")
-    form = browser.find_element(By.CSS_SELECTOR, "form[action='/crawls/run']")
-    form.find_element(By.NAME, "process_documents").click()
-    form.find_element(By.CSS_SELECTOR, "button[type=submit]").click()
-    wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "form[action$='/cancel'] button")))
+    browser.find_element(By.CSS_SELECTOR, "#complete-collection-form button").click()
+    cancel = (By.CSS_SELECTOR, ".complete-progress form[action$='/cancel'] button")
+    wait.until(EC.presence_of_element_located(cancel))
     wait.until(lambda d: d.find_element(By.CSS_SELECTOR, "[hx-get='/crawls/table']"))
-    browser.find_element(By.CSS_SELECTOR, "form[action$='/cancel'] button").click()
+    browser.find_element(*cancel).click()
     wait.until(EC.alert_is_present()).accept()
     wait.until(lambda d: "Cancelada" in d.find_element(By.TAG_NAME, "body").text)
     (runtime.root / "hold").unlink()
-    browser.get(runtime.url + "/dashboard")
-    form = browser.find_element(By.CSS_SELECTOR, "form[action='/crawls/run']")
-    form.find_element(By.NAME, "process_documents").click()
-    form.find_element(By.CSS_SELECTOR, "button[type=submit]").click()
+    response = httpx.post(
+        runtime.url + "/crawls/run",
+        headers={"Origin": runtime.url},
+        data={"uf": "MA", "connector": "pncp", "days": "7"},
+    )
+    assert response.status_code == 303
+    browser.get(runtime.url + "/crawls")
     from tests.support.processes import wait_for
 
     def limited_run():

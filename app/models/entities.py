@@ -1040,6 +1040,7 @@ class Payment(UUIDPrimaryKeyMixin, TimestampMixin, FingerprintMixin, Base):
         GUID(), ForeignKey("source_records.id", ondelete="SET NULL"), index=True
     )
     contract_number: Mapped[str | None] = mapped_column(String(100), index=True)
+    contract_control_number: Mapped[str | None] = mapped_column(String(100), index=True)
     procurement_control_number: Mapped[str | None] = mapped_column(String(100), index=True)
     agency_name: Mapped[str | None] = mapped_column(String(500), index=True)
     agency_cnpj: Mapped[str | None] = mapped_column(String(14), index=True)
@@ -1065,6 +1066,30 @@ class Payment(UUIDPrimaryKeyMixin, TimestampMixin, FingerprintMixin, Base):
     procurement: Mapped[Procurement | None] = relationship()
     company: Mapped[Company | None] = relationship()
     source_record: Mapped[SourceRecord | None] = relationship(foreign_keys=[source_record_id])
+
+
+class MunicipalBudgetEntry(Base):
+    """Public budget dimensions of one SCPI commitment in a specific official response."""
+
+    __tablename__ = "municipal_budget_entries"
+    __table_args__ = (
+        Index("ix_municipal_budget_search", "municipality", "fiscal_year", "function_name"),
+        Index("ix_municipal_budget_function", "function_name", "fiscal_year"),
+    )
+
+    source_record_id: Mapped[UUID] = mapped_column(
+        GUID(), ForeignKey("source_records.id", ondelete="CASCADE"), primary_key=True
+    )
+    commitment_identity: Mapped[str] = mapped_column(String(255), primary_key=True)
+    classification_record_id: Mapped[UUID] = mapped_column(
+        GUID(), ForeignKey("source_records.id", ondelete="CASCADE"), nullable=False
+    )
+    municipality: Mapped[str] = mapped_column(String(50), nullable=False)
+    fiscal_year: Mapped[int] = mapped_column(Integer, nullable=False)
+    function_name: Mapped[str | None] = mapped_column(String(120))
+    function_code: Mapped[str | None] = mapped_column(String(3))
+    portal_process: Mapped[str | None] = mapped_column(String(80))
+    portal_bid: Mapped[str | None] = mapped_column(String(80))
 
 
 class ContractItem(UUIDPrimaryKeyMixin, FingerprintMixin, Base):

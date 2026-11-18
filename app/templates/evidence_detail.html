@@ -1,0 +1,13 @@
+{% extends "base.html" %}
+{% block title %}Evidência · LicitaLead Monitor{% endblock %}
+{% block content %}
+<p><a href="/procurements/{{ evidence.procurement_id }}">← Ver contratação de origem</a></p>
+<div class="page-heading"><div><p class="eyebrow">Conferência documental</p><h1>{{ title or 'Documento sem título' }}</h1></div><span class="badge">{{ 'No acervo atual' if current else 'Histórica ou desativada' }}</span></div>
+{% if not current %}<p class="alert warning" role="status">Esta evidência é histórica ou foi desativada. Consulte a versão atual antes de tomar uma decisão.</p>{% endif %}
+<section class="panel"><h2>Trecho que fundamenta o registro</h2><article class="evidence"><blockquote>{{ evidence.text_excerpt }}</blockquote></article>
+<dl class="facts"><div><dt>Página</dt><dd>{{ evidence.page_number or 'Não identificada' }}</dd></div><div><dt>Coletado em</dt><dd>{{ collected_at }}</dd></div><div><dt>Contratação</dt><dd>{{ evidence.procurement.title or evidence.procurement.purchase_number or 'Identificação não publicada' }}</dd></div></dl>
+<div class="action-row">{% if document_url %}<a class="button" href="{{ document_url }}" target="_blank" rel="noopener">Abrir documento armazenado</a>{% endif %}{% if official_url %}<a class="button secondary" href="{{ official_url }}" target="_blank" rel="noopener noreferrer">Abrir fonte oficial</a>{% endif %}</div>
+{% if not document_url %}<p class="hint">O arquivo não está disponível localmente. O trecho e a origem registrados foram preservados.</p>{% endif %}
+</section>
+<details class="panel"><summary>Detalhes de rastreabilidade</summary><p>Localizador: {{ evidence.locator or 'Não informado' }}</p><p>Identificador: <code>{{ evidence.id }}</code></p><a href="/api/evidence/{{ evidence.id }}">Consultar metadados na API</a></details>
+{% endblock %}

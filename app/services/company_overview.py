@@ -109,7 +109,7 @@ def event_current():
     )
 
 
-def supplier_identity(model, company: Company):
+def supplier_identity(model, company: Company | type[Company]):
     """A contradictory supplier CNPJ or company FK cannot grant membership."""
     return or_(
         and_(
@@ -240,15 +240,20 @@ class CompanyOverviewService:
             if status:
                 from app.models import ParticipantStatus
 
-                if status not in {item.value for item in ParticipantStatus}:
+                if status != "documented" and status not in {
+                    item.value for item in ParticipantStatus
+                }:
                     raise HTTPException(422, "Situação do participante inválida")
+                required_status = (
+                    [] if status == "documented" else [Participant.status_code == status]
+                )
                 condition = and_(
                     condition,
                     exists(
                         select(Participant.id).where(
                             Participant.company_id == company.id,
                             Participant.procurement_id == Procurement.id,
-                            Participant.status_code == status,
+                            *required_status,
                             participant_current(),
                         )
                     ),
@@ -359,6 +364,7 @@ class CompanyOverviewService:
             .where(
                 Lead.company_id == self.company.id,
                 Lead.lead_status.in_(["pending_review", "needs_changes"]),
+                lead_current(),
             )
             .scalar_subquery()
         )
@@ -552,7 +558,9 @@ class CompanyOverviewService:
                     ContractTerm.contract_id == entity.id
                 ),
                 "Execução financeira": select(Payment).where(
-                    Payment.contract_id == entity.id, supplier_identity(Payment, company)
+                    Payment.contract_id == entity.id,
+                    Payment.is_current.is_(True),
+                    supplier_identity(Payment, company),
                 ),
             }
         elif section == "documents":

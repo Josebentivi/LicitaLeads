@@ -1,0 +1,32 @@
+{% extends "base.html" %}
+{% block title %}Alterações do acervo · LicitaLead Monitor{% endblock %}
+{% block content %}
+<h1>Alterações do acervo</h1>
+<p>Vigências, valores e situações que mudaram após o primeiro registro de cada campo.</p>
+<nav class="filter-tabs" aria-label="Período das alterações">
+  <a href="/alteracoes"{% if not all_changes %} aria-current="page"{% endif %}>Desde minha última consulta</a>
+  <a href="/alteracoes?todas=true"{% if all_changes %} aria-current="page"{% endif %}>Todas as alterações</a>
+</nav>
+<p role="status">{{ history.total }} alteração(ões) registrada(s){% if after %} depois de {{ after }}{% endif %} até {{ cutoff_label }}.</p>
+<div class="panel table-wrap"><table>
+  <thead><tr><th>Registro</th><th>Campo</th><th>Anterior</th><th>Recebido</th><th>Fonte e datas</th></tr></thead>
+  <tbody>{% for row in history['items'] %}<tr>
+    <td><a href="/history/{{ row.parent_type }}/{{ row.parent_id }}">{{ {'procurement':'Contratação','price_registry':'Ata','contract':'Contrato','payment':'Registro financeiro'}[row.parent_type] }} {{ row.parent_label }}</a></td>
+    <td>{{ row.field_label }}<small>{{ row.decision_label }}</small></td>
+    <td>{{ row.previous_display if row.previous_display is not none else 'Sem valor anterior' }}</td>
+    <td>{{ row.received_display if row.received_display is not none else 'Removido explicitamente' }}</td>
+    <td>{{ row.source }}{% if row.source_url %} · <a href="{{ row.source_url }}" rel="noopener noreferrer" target="_blank">Fonte oficial</a>{% endif %}
+      {% if row.evidence_id %} · <a href="/evidencias/{{ row.evidence_id }}">Conferir evidência</a>{% endif %}
+      <small>Observado em {{ row.observed_at }} · Registrado em {{ row.recorded_at }}</small>
+      {% if row.source_record_id %}<small>Origem {{ row.source_record_id }}</small>{% endif %}</td>
+  </tr>{% else %}<tr><td colspan="5">Nenhuma alteração de vigência, valor ou situação neste período.</td></tr>{% endfor %}</tbody>
+</table></div>
+<nav class="pagination" aria-label="Páginas de alterações">
+  {% if history.page > 1 %}<a href="{{ request.url.include_query_params(page=history.page-1, ate=cutoff) }}">Anterior</a>{% endif %}
+  {% if history.page * history.page_size < history.total %}<a href="{{ request.url.include_query_params(page=history.page+1, ate=cutoff) }}">Próxima</a>{% endif %}
+</nav>
+{% if not all_changes and history.page * history.page_size >= history.total %}
+<form method="post" action="/alteracoes/revisar"><input type="hidden" name="ate" value="{{ cutoff }}"><button type="submit">Marcar como consultado até {{ cutoff_label }}</button>
+  <p class="hint">A data da consulta fica guardada neste navegador.</p>
+</form>{% endif %}
+{% endblock %}

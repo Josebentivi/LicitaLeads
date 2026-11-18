@@ -1,4 +1,32 @@
 (function () {
+  const shutdown = document.querySelector("[data-application-shutdown]");
+  if (shutdown && !["running", "unmanaged"].includes(shutdown.dataset.phase)) {
+    const title = shutdown.querySelector("[data-shutdown-title]");
+    const status = shutdown.querySelector("[data-shutdown-status]");
+    async function pollShutdown() {
+      try {
+        const reply = await fetch("/api/application/shutdown", { cache: "no-store" });
+        if (!reply.ok) throw new Error("status unavailable");
+        const state = await reply.json();
+        if (["complete", "exit"].includes(state.phase)) {
+          title.textContent = "Aplicação encerrada";
+          status.textContent = state.forced && state.forced.length
+            ? "Encerramento concluído com finalização forçada de: " + state.forced.join(", ") + "."
+            : "Trabalhos cancelados. Os serviços foram finalizados; a interface está sendo fechada.";
+          window.close();
+          return;
+        }
+        status.textContent = state.phase === "forcing"
+          ? "O prazo de encerramento terminou. O launcher está finalizando os processos restantes."
+          : state.detail || "Aguardando o cancelamento dos trabalhos e o encerramento dos serviços.";
+        window.setTimeout(pollShutdown, 500);
+      } catch (_) {
+        title.textContent = "Comunicação encerrada";
+        status.textContent = "A interface saiu do ar antes da confirmação final. Consulte o log do launcher para verificar se houve encerramento forçado. Coletas automáticas e IA permanecerão pausadas.";
+      }
+    }
+    pollShutdown();
+  }
   document.addEventListener("click", function (event) {
     const link = event.target.closest(".company-section-nav a");
     if (!link) return;
@@ -121,67 +149,6 @@
 
   syncSidebarA11y();
 
-  document.querySelectorAll("[data-registry-collection]").forEach(function (form) {
-    const uf = form.querySelector("[name=uf]");
-    const scope = form.querySelector("[name=registry_scope]");
-    const source = form.querySelector("[name=connector]");
-    const submit = form.querySelector("[data-registry-submit]");
-    const status = document.getElementById("ata-scope-status");
-    let sequence = 0;
-
-    function syncSources() {
-      const option = scope.selectedOptions[0];
-      const choices = scope.value === "all" ? Array.from(scope.options) : [option];
-      const available = choices.flatMap(function (item) {
-        return item && item.dataset.sources ? item.dataset.sources.split(",") : [];
-      });
-      Array.from(source.options).forEach(function (item) {
-        item.disabled = item.value !== "all" && !available.includes(item.value);
-      });
-      if (source.selectedOptions[0].disabled) source.value = "all";
-      submit.disabled = !scope.value;
-      const count = Array.from(scope.options).filter(function (item) { return item.dataset.sources; }).length;
-      if (scope.value === "all") {
-        status.textContent = "Serão consultados " + count + " órgão(s)/unidade(s) conhecidos nesta UF, nas fontes disponíveis.";
-      } else if (scope.value) {
-        status.textContent = "Selecionado: " + option.textContent;
-      } else if (!scope.disabled) {
-        status.textContent = count
-          ? count + " órgão(s)/unidade(s) conhecido(s) nesta UF. Selecione uma opção para coletar."
-          : "Nenhum órgão/unidade conhecido nesta UF. Faça uma coleta geral de contratações para preencher a lista.";
-      }
-    }
-
-    scope.addEventListener("change", syncSources);
-    uf.addEventListener("change", async function () {
-      const ticket = ++sequence;
-      scope.replaceChildren(new Option("Selecione um órgão/unidade", ""));
-      scope.disabled = true;
-      syncSources();
-      status.textContent = "Carregando órgãos/unidades…";
-      try {
-        const response = await fetch("/atas/collection-scopes?uf=" + encodeURIComponent(uf.value), {
-          headers: { "Accept": "application/json" }
-        });
-        if (!response.ok) throw new Error("scope lookup failed");
-        const result = await response.json();
-        if (ticket !== sequence) return;
-        if (result.scopes.length) scope.add(new Option("Todos os órgãos/unidades conhecidos", "all"));
-        result.scopes.forEach(function (item) {
-          const option = new Option(item.label, item.key);
-          option.dataset.sources = item.sources.join(",");
-          scope.add(option);
-        });
-        scope.disabled = false;
-        syncSources();
-      } catch (_) {
-        if (ticket !== sequence) return;
-        status.textContent = "Não foi possível carregar os órgãos/unidades. Selecione a UF novamente para tentar.";
-      }
-    });
-    syncSources();
-  });
-
   // Keep user interaction stable while HTMX replaces the progress fragment.
   let crawlStates = new Map();
   let expandedCrawls = new Set();
@@ -229,5 +196,136 @@
     if (event.target.matches("[data-crawl-cancel]") && !window.confirm("Encerrar esta coleta em andamento?")) {
       event.preventDefault();
     }
+  });
+})();
+document.addEventListener("htmx:responseError", function (event) {
+  if (event.detail && event.detail.target && event.detail.target.id === "ai-content") {
+    const alert = document.getElementById("ai-update-error");
+    if (alert) alert.hidden = false;
+  }
+});
+document.addEventListener("htmx:sendError", function (event) {
+  if (event.detail && event.detail.target && event.detail.target.id === "ai-content") {
+    const alert = document.getElementById("ai-update-error");
+    if (alert) alert.hidden = false;
+  }
+});
+
+(function () {
+  function revealAnchor() {
+    const section = document.getElementById(window.location.hash.slice(1));
+    if (section && section.tagName === "DETAILS") section.open = true;
+  }
+  window.addEventListener("hashchange", revealAnchor);
+  revealAnchor();
+  document.addEventListener("invalid", function (event) {
+    let parent = event.target.parentElement;
+    while (parent) {
+      if (parent.tagName === "DETAILS") parent.open = true;
+      parent = parent.parentElement;
+    }
+  }, true);
+
+  document.querySelectorAll("[data-period-shortcuts]").forEach(function (shortcuts) {
+    const scope = shortcuts.closest("[data-collection-period], form");
+    const start = scope && scope.querySelector("[name=start_date]");
+    const end = scope && scope.querySelector("[name=end_date]");
+    if (!start || !end) return;
+    function describe() {
+      end.setCustomValidity(start.value && end.value && start.value > end.value
+        ? "A data final deve ser igual ou posterior à inicial." : "");
+      const days = Math.round((Date.parse(end.value) - Date.parse(start.value)) / 86400000) + 1;
+      shortcuts.querySelector("[data-period-summary]").textContent = Number.isFinite(days) && days > 0
+        ? days + " dia(s), incluindo as duas datas." : "Informe um período válido.";
+    }
+    shortcuts.addEventListener("click", function (event) {
+      const button = event.target.closest("[data-period]");
+      if (!button) return;
+      if (button.dataset.period === "custom") { start.focus(); return; }
+      const today = new Date(shortcuts.dataset.today + "T12:00:00Z");
+      end.value = shortcuts.dataset.today;
+      if (button.dataset.period === "month") today.setUTCDate(1);
+      else today.setUTCDate(today.getUTCDate() - Number(button.dataset.period) + 1);
+      start.value = today.toISOString().slice(0, 10);
+      describe();
+    });
+    start.addEventListener("input", describe);
+    end.addEventListener("input", describe);
+    describe();
+  });
+
+  document.querySelectorAll("[data-reviewer-preference]").forEach(function (input) {
+    try { if (!input.value) input.value = localStorage.getItem("licitalead:reviewer") || ""; }
+    catch (_) { /* Preferences are optional; the form works without storage. */ }
+  });
+  document.addEventListener("submit", function (event) {
+    const form = event.target;
+    if (event.defaultPrevented || !form.matches("[data-submit-once]")) return;
+    if (form.dataset.submitting === "true") { event.preventDefault(); return; }
+    form.dataset.submitting = "true";
+    const reviewer = form.querySelector("[data-reviewer-preference]");
+    try { if (reviewer) localStorage.setItem("licitalead:reviewer", reviewer.value.trim().slice(0, 255)); }
+    catch (_) { /* Storage is not required for a review. */ }
+    // Defer disabling so the clicked submitter's name/value remains in the POST.
+    window.setTimeout(function () {
+      form.querySelectorAll("button[type=submit]").forEach(function (button) {
+        button.dataset.idleLabel = button.textContent;
+        button.dataset.busyDisabled = "true";
+        button.disabled = true;
+        button.setAttribute("aria-busy", "true");
+        button.textContent = button.dataset.busyLabel || "Salvando…";
+      });
+    }, 0);
+  });
+  window.addEventListener("pageshow", function () {
+    document.querySelectorAll("[data-submit-once]").forEach(function (form) {
+      delete form.dataset.submitting;
+      form.querySelectorAll("[data-busy-disabled]").forEach(function (button) {
+        button.disabled = false;
+        button.textContent = button.dataset.idleLabel;
+        button.removeAttribute("aria-busy");
+        delete button.dataset.busyDisabled;
+      });
+    });
+  });
+
+  document.addEventListener("click", async function (event) {
+    const button = event.target.closest("[data-copy-target]");
+    if (!button) return;
+    const text = document.getElementById(button.dataset.copyTarget);
+    const feedback = button.parentElement.querySelector("[data-copy-feedback]");
+    try {
+      await navigator.clipboard.writeText(text.textContent);
+      feedback.textContent = " Rascunho copiado.";
+    } catch (_) {
+      const range = document.createRange();
+      range.selectNodeContents(text);
+      const selection = window.getSelection();
+      selection.removeAllRanges(); selection.addRange(range);
+      feedback.textContent = " Texto selecionado. Use Ctrl+C (ou Copiar) para concluir.";
+    }
+  });
+
+  document.querySelectorAll("[data-save-search]").forEach(function (link) {
+    const feedback = document.querySelector("[data-saved-search]");
+    const key = "licitalead:search:" + window.location.pathname;
+    function showSaved() {
+      try {
+        const saved = localStorage.getItem(key);
+        if (!saved) return;
+        const url = new URL(saved, window.location.origin);
+        if (url.origin !== window.location.origin || url.pathname !== window.location.pathname) return;
+        const open = document.createElement("a");
+        open.href = url.pathname + url.search;
+        open.textContent = "Abrir busca guardada neste navegador";
+        feedback.replaceChildren(open);
+      } catch (_) { /* A search remains usable through its URL. */ }
+    }
+    link.addEventListener("click", function (event) {
+      event.preventDefault();
+      try { localStorage.setItem(key, link.getAttribute("href")); showSaved(); }
+      catch (_) { feedback.textContent = "Não foi possível guardar. Você pode adicionar esta página aos favoritos."; }
+    });
+    showSaved();
   });
 })();

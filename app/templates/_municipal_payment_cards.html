@@ -1,5 +1,5 @@
-<section class="panel" id="portais"{% if municipal_has_active %} hx-get="/pagamentos/portais" hx-trigger="every 2s" hx-swap="outerHTML"{% endif %}>
-  <div class="section-heading"><div><h2>Portais municipais do Maranhão</h2><p class="hint">As fontes abaixo são independentes. Coletas sem CNPJ ficam como não conciliadas e exigem revisão humana; um erro não interrompe as demais fontes.</p></div></div>
+<details class="panel" id="portais"{% if municipal_has_active %} hx-get="/pagamentos/portais" hx-trigger="every 2s" hx-swap="outerHTML"{% endif %}{% if municipal_has_active or municipal_busy or municipal_started %} open{% endif %}>
+  <summary>Portais municipais do Maranhão</summary>
   {% if municipal_busy %}
   <div class="alert warning"><strong>Já existe uma coleta em andamento para este portal.</strong> Acompanhe o progresso abaixo antes de iniciar outra.</div>
   {% elif municipal_started %}
@@ -11,7 +11,18 @@
       <h3>{{ source.name }} <span class="badge">{{ source.mode }}</span></h3>
       <p class="hint">{{ source.note }}</p>
       <p class="hint">Fonte: {{ source.id }} &middot; {{ source.last_status_label }}{% if source.last_run_at %} em {{ source.last_run_at }}{% endif %}</p>
-      {% if source.last_found is not none %}<p class="hint">{{ source.last_found }} registro(s) na última coleta; {{ source.last_created }} criado(s).</p>{% endif %}
+      {% if source.last_found is not none %}
+      <p class="hint">
+        {{ source.last_found }} registro(s) encontrado(s)
+        {% if not source.active %}
+          {% if source.municipal_write and source.progress_total %}
+          · {{ source.progress_processed }} de {{ source.progress_total }} registros gravados nesta execução
+          {% else %}
+          · {{ source.last_written }} registro(s) gravado(s)
+          {% endif %}
+        {% endif %}
+      </p>
+      {% endif %}
       {% if source.last_diagnostic %}<p class="hint">{{ source.last_diagnostic }}</p>{% endif %}
       {% if source.active %}
       <div class="collection-progress" role="status" aria-live="polite">
@@ -21,25 +32,17 @@
         </div>
         <strong>{{ source.progress_message }}</strong>
         {% if source.stage_label and source.stage_label != source.progress_message %}<small>Etapa: {{ source.stage_label }}</small>{% endif %}
-        {% if source.progress_total %}
-        <progress value="{{ source.progress_processed }}" max="{{ source.progress_total }}" aria-label="Pagamentos gravados"></progress>
-        <small>{{ source.progress_processed }} de {{ source.progress_total }} pagamento(s) processado(s)</small>
+        {% if source.progress_total and source.stage != 'preparing' %}
+        <progress value="{{ source.progress_processed }}" max="{{ source.progress_total }}" aria-label="Registros gravados"></progress>
+        <small>{{ source.progress_processed }} de {{ source.progress_total }} {% if source.municipal_write %}registros gravados nesta execução{% else %}pagamento(s) processado(s){% endif %}</small>
         {% else %}
         <progress aria-label="Coleta em andamento"></progress>
-        <small>Consultando o portal oficial; isso pode levar alguns minutos.</small>
+        {% if source.stage == 'preparing' %}<small>Organizando os registros recebidos.</small>{% endif %}
         {% endif %}
         <small>Atualização automática a cada 2 segundos.</small>
       </div>
-      <button type="button" class="button secondary" disabled>Coletando...</button>
-      {% else %}
-      <form method="post" action="/pagamentos/municipal" class="filters">
-        <input type="hidden" name="source" value="{{ source.id }}">
-        <label>Ano <input type="number" name="year" value="{{ current_year }}" min="2000" max="2100" required></label>
-        {% if source.supports_details %}<label class="checkbox"><input type="checkbox" name="include_details" value="true"> Detalhar por empenho</label>{% endif %}
-        <button type="submit">Coletar {{ source.name }}</button>
-      </form>
       {% endif %}
     </article>
     {% endfor %}
   </div>
-</section>
+</details>

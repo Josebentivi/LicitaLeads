@@ -1,6 +1,6 @@
 """ARP collection is automatic and accessible without JSON or a terminal."""
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from types import SimpleNamespace
 from uuid import uuid4
 
@@ -134,17 +134,17 @@ async def test_atas_form_starts_scoped_arp_asynchronously_with_selected_window(
     page = await api_client.get("/atas")
     assert page.status_code == 200
     assert created == []
-    form = BeautifulSoup(page.text, "html.parser").find("form", action="/atas/collect")
-    assert form is not None and form["method"] == "post"
-    assert form.find("input", {"name": "days"})["value"] == "7"
-    assert form.find("button", {"type": "submit"}).has_attr("disabled")
+    soup = BeautifulSoup(page.text, "html.parser")
+    assert not soup.select("form[action='/atas/collect']")
+    assert len(soup.select("form[action='/crawls/collect']")) == 1
 
     response = await api_client.post(
-        form["action"],
+        "/atas/collect",
         data={
             "uf": "PI",
             "registry_scope": "PI:00000000000191:980921",
-            "days": "14",
+            "start_date": "2026-01-01",
+            "end_date": "2026-01-31",
             "connector": "all",
         },
         follow_redirects=False,
@@ -157,7 +157,9 @@ async def test_atas_form_starts_scoped_arp_asynchronously_with_selected_window(
     assert request.mode == "price_registries"
     assert request.connector == "all"
     assert request.uf == "PI"
-    assert request.days == 14
+    assert request.start_date == date(2026, 1, 1)
+    assert request.end_date == date(2026, 1, 31)
+    assert request.days is None
     assert request.agency_cnpj == "00000000000191"
     assert request.unit_code == "980921"
     assert request.process_documents is False

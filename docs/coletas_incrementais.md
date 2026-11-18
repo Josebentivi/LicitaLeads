@@ -34,6 +34,17 @@ não há uma consulta inicial de detalhe duplicada para cada registro descoberto
 no feed com versão global. Versão ausente, anterior, divergente, evidência removida ou
 adaptador alterado exige nova consulta.
 
+Quando a resposta HTTP já foi guardada para permitir a continuação do lote,
+a validação atualiza a classificação daquele `SourceRecord`. A referência,
+o corpo, o hash e o horário da resposta são preservados. Assim, a validação
+não grava uma segunda cópia do mesmo corpo.
+
+Na rotação automática dos processos ativos, o PNCP é consultado por número
+de controle. A resposta atual permite reaproveitar itens, arquivos e resultados
+quando `dataAtualizacaoGlobal`, o cabeçalho e a comprovação anterior conferem.
+Uma versão alterada ou sem comprovação completa exige a consulta dos detalhes.
+A rechecagem dos documentos de sessão continua independente.
+
 Datas apenas de cabeçalho de atas, contratos e Compras.gov.br não dispensam
 itens, termos, saldos, empenhos ou adesões. Quando a fonte fornece validadores
 HTTP, uma resposta `304` pode confirmar o reaproveitamento da resposta completa
@@ -170,6 +181,28 @@ o sistema finaliza o grupo em uma transação, revisitando também as linhas já
 preparadas. Empenhos diferentes continuam separados pela identidade oficial.
 Um agregado continua sem data de pagamento, e não é somado aos seus detalhes.
 
+## Consultar despesas municipais por função
+
+Em **Pagamentos**, selecione o município de origem, a função orçamentária e o exercício do empenho.
+**Fornecedores do recorte** agrupa os registros financeiros vigentes pelo CNPJ confirmado da empresa.
+O número de registros de cada fornecedor abre a lista correspondente. O nome abre o dossiê.
+Quando o portal publica somente o nome, a lista financeira, a API e o histórico preservam a
+denominação de origem para conferência manual. A lista agrupada e o acesso ao dossiê exigem
+um CNPJ confirmado. A coincidência entre nomes não cria vínculos.
+
+A migração `0028_municipal_spending` lê as respostas Fiorilli/SCPI já arquivadas e cria um índice
+local. Novas coletas alimentam o mesmo índice. A consulta combina a resposta de origem com
+município, entidade, exercício e identificador oficial do empenho (PKEMP). A função guarda o
+código e a descrição publicados. Um detalhe pode utilizar a classificação do empenho quando a
+resposta do detalhe contém a chave e a resposta da mesma execução confirma o empenho.
+Identidades ambíguas ficam sem classificação. Outros portais continuam pesquisáveis pela origem.
+
+Abra **Conferir origem** para ver a identidade, o registro de fonte, o hash e o portal oficial.
+As referências estruturadas PROC e NUMLICIT identificam o que o portal publicou. A conciliação
+com processos e contratos segue as regras de identidade próprias. Agregados por empenho
+preservam a fase e a ausência de data individual. A classificação não altera registros de
+pagamento, vínculos, documentos ou histórico de auditoria.
+
 ## Identidade nos arquivos de pagamentos
 
 CSV/JSON aceita `external_id`, `id_pagamento` ou `identificador_oficial`.
@@ -188,7 +221,8 @@ continuam sem conciliação e exigem revisão; sem CNPJ nem fornecedor, são rej
 ## Atas automáticas: período, escopo e orçamento
 
 Sem `PRICE_REGISTRY_LOOKBACK_DAYS`, a janela inicial e a revisão semanal seguem
-`DEFAULT_LOOKBACK_DAYS` (30 dias por padrão). O período manual não altera essa configuração.
+`DEFAULT_LOOKBACK_DAYS` (30 dias por padrão). O período manual De/Até não altera
+essa configuração.
 As unidades conhecidas da UF e as fontes elegíveis são congeladas no lote. Sem unidades,
 o scheduler registra o motivo e não consulta nacionalmente. Uma mudança no período ou no
 conjunto de unidades cria outra cobertura; lotes nacionais antigos permanecem no histórico

@@ -1,0 +1,17 @@
+<ol class="complete-stage-list" aria-label="Etapas da coleta">
+  {% set labels = {'pending':'Aguardando','running':'Em andamento','completed':'Concluída','partial':'Com pendências','failed':'Falhou','skipped':'Não consultada','cancelled':'Interrompida','not_started':'Não iniciada'} %}
+  {% for step in run.complete_stages %}
+  {% set status = 'not_started' if step.status == 'cancelled' and not step.started_at and not step.run_ids else step.status %}
+  <li>
+    <div><strong>{{ step.label }}</strong>{% if step.note %}<small>{{ step.note }}</small>{% endif %}
+    {% if step.run_ids|length == 1 %}
+      <small><a href="/crawls?run={{ step.run_ids[0] }}#execucao-{{ step.run_ids[0] }}">Ver execução e detalhes</a></small>
+    {% elif step.run_ids|length > 1 %}
+      <details><summary>Ver {{ step.run_ids|length }} execuções desta etapa</summary><ol>
+        {% for child in step.run_ids %}<li><a href="/crawls?run={{ child }}#execucao-{{ child }}">Execução {{ loop.index }} · {{ child|string|truncate(13, True, '…') }}</a></li>{% endfor %}
+      </ol></details>
+    {% endif %}</div>
+    <span class="badge status-{{ status }}">{{ labels.get(status, status) }}</span>
+  </li>
+  {% endfor %}
+</ol>

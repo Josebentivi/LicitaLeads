@@ -112,7 +112,7 @@ segundos, sem ocupar capacidade de rede.
 | `MUNICIPAL_PAYMENT_MAX_RECORDS` | `10000` | Limite de pagamentos municipais por coleta |
 | `ALLOW_INSECURE_HTTP_SOURCES` | `false` | Opt-in explícito para fontes municipais que só publicam HTTP; HTTPS continua preferido |
 | `SAO_LUIS_PAYMENTS_URL` | Dados Abertos | URL do CSV/pagina de Sao Luis; util quando o Cloudflare bloqueia |
-| `PAYMENT_GRACE_DAYS` | `60` | Janela minima antes de exibir "sem pagamento localizado" |
+| `PAYMENT_GRACE_DAYS` | `60` | Janela mínima para a API indicar `sem_pagamento_localizado` em contrato com valor de referência positivo e nenhum pagamento vinculado no acervo. A cobertura das fontes pode ser parcial. |
 | `PAYMENT_POLL_CNPJS` | vazio | CNPJs consultados pelo scheduler |
 | `CONTRACT_AGENCY_CNPJS` | vazio | Orgaos consultados pelo crawl diario de contratos |
 | `SCHEDULER_CONTRACT_HOURS` | `24` | Intervalo do crawl de contratos |
@@ -202,7 +202,7 @@ qualquer citação, CNPJ ou nome não existir no documento.
 | `SCHEDULER_ENABLED` | `true` | Liga o processo separado do scheduler |
 | `SCHEDULER_DISCOVERY_HOURS` | `6` | Descoberta de novas contratações |
 | `SCHEDULER_PRICE_REGISTRY_HOURS` | `24` | Coleta de atas nas duas fontes, também executada ao iniciar o scheduler; respeita a pausa geral |
-| `PRICE_REGISTRY_LOOKBACK_DAYS` | herda `DEFAULT_LOOKBACK_DAYS` | Override opcional da janela inicial e da revisão semanal de atas (1–3650). Sem override, são 30 dias no padrão geral. A automática consulta somente órgãos/unidades conhecidos da UF e das respectivas fontes; sem unidades não há consulta nacional nem cobertura confirmada. PNCP usa vigência na carga inicial e atualização nas incrementais; Compras.gov.br usa início da vigência. O formulário manual permite escolher os dias apenas daquela execução e começa com o menor valor entre 7 e a janela automática. |
+| `PRICE_REGISTRY_LOOKBACK_DAYS` | herda `DEFAULT_LOOKBACK_DAYS` | Override opcional da janela inicial e da revisão semanal de atas (1–3650). Sem override, são 30 dias no padrão geral. A automática consulta somente órgãos/unidades conhecidos da UF e das respectivas fontes; sem unidades não há consulta nacional nem cobertura confirmada. PNCP usa vigência na carga inicial e atualização nas incrementais; Compras.gov.br usa início da vigência. O formulário manual permite escolher um período De/Até inclusivo apenas daquela execução, começando com o menor valor entre 7 dias e a janela automática. |
 | `SCHEDULER_ACTIVE_REFRESH_MINUTES` | `60` | Atualização de contratações ativas |
 | `SCHEDULER_DOCUMENTS_HOURS` | `2` | Download/extração/detecção |
 | `SCHEDULER_DEADLINES_MINUTES` | `30` | Prazos e leads |

@@ -1184,6 +1184,9 @@ class ApplicationTestService:
 
     def _pytest_environment(self, temp: Path) -> dict[str, str]:
         environment = os.environ.copy()
+        for key in list(environment):
+            if key.startswith("LICITA_CONTROL_"):
+                environment.pop(key)
         environment.update(
             {
                 "APP_ENV": "test",

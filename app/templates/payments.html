@@ -2,11 +2,53 @@
 {% from "_macros.html" import pagination_nav %}
 {% block title %}Pagamentos - LicitaLead Monitor{% endblock %}
 {% block content %}
-<div class="page-heading"><div><p class="eyebrow">Execucao financeira</p><h1>Pagamentos</h1></div></div>
+<div class="page-heading"><div><p class="eyebrow">Execução financeira</p><h1>Pagamentos</h1></div></div>
 {% if import_result %}<p class="hint">Importacao concluida: {{ import_result.created }} criado(s), {{ import_result.updated }} atualizado(s), {{ import_result.errors }} erro(s).</p>{% endif %}
 {% if municipal_result %}<p class="hint">Coleta municipal concluida em {{ municipal_result.source }}: {{ municipal_result.created }} criado(s), {{ municipal_result.updated }} atualizado(s), {{ municipal_result.linked }} conciliado(s), {{ municipal_result.unlinked }} nao conciliado(s).{% if municipal_result.diagnostic %} {{ municipal_result.diagnostic }}{% endif %}</p>{% endif %}
+<form method="get" action="/pagamentos" class="filters" data-filter-form>
+  {% if supplier_view %}<input type="hidden" name="view" value="suppliers">{% endif %}
+  <label>CNPJ do fornecedor <input name="supplier_cnpj" value="{{ filters.supplier_cnpj or '' }}"></label>
+  <label>Município de origem <select name="municipality"><option value="">Todas as origens</option><option value="all"{% if filters.municipality == 'all' %} selected{% endif %}>Todos os portais municipais</option>{% for city in municipalities %}<option value="{{ city.id }}"{% if filters.municipality == city.id %} selected{% endif %}>{{ city.municipality }}</option>{% endfor %}</select></label>
+  <label>Função orçamentária <select name="budget_function"><option value="">Todas</option>{% for name in budget_functions %}<option{% if filters.budget_function == name %} selected{% endif %}>{{ name }}</option>{% endfor %}{% if filters.budget_function and filters.budget_function not in budget_functions %}<option selected>{{ filters.budget_function }}</option>{% endif %}</select></label>
+  <label>Exercício do empenho <input name="fiscal_year" type="text" inputmode="numeric" placeholder="Ano" list="budget-years" value="{{ filters.fiscal_year or '' }}"><datalist id="budget-years">{% for year in budget_years %}<option value="{{ year }}"></option>{% endfor %}</datalist></label>
+  <label>Conciliação <select name="match_status"><option value="">Todas</option>{% for value,label in match_options.items() %}<option value="{{ value }}"{% if filters.match_status == value %} selected{% endif %}>{{ label }}</option>{% endfor %}</select></label>
+  <label>Fase <select name="phase"><option value="">Todas</option>{% for value,label in phase_options %}<option value="{{ value }}"{% if filters.phase == value %} selected{% endif %}>{{ label }}</option>{% endfor %}{% if filters.phase and filters.phase not in dict(phase_options) %}<option value="{{ filters.phase }}" selected>{{ filters.phase }}</option>{% endif %}</select></label>
+  <label>Fonte <select name="source"><option value="">Todas</option>{% for value,label in source_options %}<option value="{{ value }}"{% if filters.source == value %} selected{% endif %}>{{ label }}</option>{% endfor %}{% if filters.source and filters.source not in dict(source_options) %}<option value="{{ filters.source }}" selected>{{ filters.source }}</option>{% endif %}</select></label>
+  <button type="submit">Filtrar</button>
+  <a href="/pagamentos">Limpar filtros</a>
+</form>
+{% if filter_error %}<p class="alert error" role="alert">{{ filter_error }}</p>{% endif %}
+<p role="status">{{ pagination.total }} registro(s) financeiro(s) · {{ supplier_count }} fornecedor(es) com CNPJ confirmado · {{ active_filter_count }} filtro(s) ativo(s)</p>{% include "_active_filters.html" %}
+{% if filters.municipality or filters.budget_function or filters.fiscal_year %}<p class="hint">Função e exercício dependem da identificação do empenho na resposta oficial. Um agregado reúne os valores pagos publicados para o empenho e pode não informar a data de cada pagamento.</p>{% endif %}
+<nav class="filter-tabs" aria-label="Visualização do recorte">
+  <a href="{{ request.url.remove_query_params(['page', 'view']) }}"{% if not supplier_view %} aria-current="page"{% endif %}>Registros financeiros</a>
+  <a href="{{ request.url.remove_query_params('page').include_query_params(view='suppliers') }}"{% if supplier_view %} aria-current="page"{% endif %}>Fornecedores do recorte</a>
+</nav>
+{% if supplier_view %}
+<p class="hint">O nome abre os pagamentos da empresa em todo o acervo. A contagem abre os registros da empresa com os filtros desta consulta.</p>
+<section class="panel table-wrap"><table><thead><tr><th>Fornecedor</th><th>CNPJ confirmado</th><th>Registros neste recorte</th></tr></thead><tbody>
+{% for supplier in suppliers %}<tr><td><a href="/empresas/{{ supplier.cnpj }}?section=payments&amp;return_to={{ list_url | urlencode }}">{{ supplier.name }}</a></td>
+  <td>{{ supplier.cnpj }}</td><td><a href="{{ request.url.remove_query_params(['page', 'view']).include_query_params(supplier_cnpj=supplier.cnpj) }}">{{ supplier.records }} registro(s)</a></td></tr>
+{% else %}<tr><td colspan="3">Nenhum fornecedor com CNPJ confirmado neste recorte.</td></tr>{% endfor %}
+</tbody></table></section>
+{% elif payments %}
+<section class="panel table-wrap">
+<table><thead><tr><th>Data do pagamento</th><th>Fornecedor</th><th>Órgão</th><th>Valor</th><th>Fase</th><th>Função / exercício</th><th>Documento</th><th>Vínculo</th><th>Conciliação</th><th>Fonte</th></tr></thead>
+<tbody>{% for item in payments %}<tr>
+  <td>{{ 'Sem data individual' if item.aggregate else item.date }}</td>
+  <td>{% if item.supplier_cnpj %}<a href="/empresas/{{ item.supplier_cnpj }}?return_to={{ list_url | urlencode }}">{{ item.supplier }}</a>{% else %}{{ item.supplier }}{% endif %}</td>
+  <td>{{ item.agency }}</td><td>{{ item.amount }}</td><td>{{ item.phase }}</td>
+  <td>{% if item.budget %}{{ item.budget.function_name or 'Função não informada' }}{% if item.budget.function_code %} ({{ item.budget.function_code }}){% endif %}<small>{{ item.budget.fiscal_year }}</small>{% else %}Não identificado{% endif %}</td>
+  <td>{{ item.document_number }}</td>
+  <td>{% if item.contract_id %}<a href="/contratos/{{ item.contract_id }}">Ver contrato</a>{% endif %}{% if item.procurement_id %}<a href="/procurements/{{ item.procurement_id }}">Ver processo</a>{% endif %}{% if not item.contract_id and not item.procurement_id %}Sem vínculo exato{% endif %}</td>
+  <td>{{ item.match_status }}</td><td>{{ item.source }}{% if item.source_url %}<details><summary>Conferir origem</summary><a href="{{ item.source_url }}" rel="noopener noreferrer" target="_blank">Portal oficial</a>{% if item.record_id %}<small>Registro de origem: {{ item.record_id }}</small>{% if item.receipt %}<small>Coletado em {{ item.receipt[1] }}</small><small>Hash da resposta: <code>{{ item.receipt[0] }}</code></small>{% endif %}{% endif %}{% if item.budget %}<small>Identidade do empenho: {{ item.budget.commitment_identity }}</small>{% if item.budget.classification_record_id != item.record_id %}<small>Origem da classificação: {{ item.budget.classification_record_id }}</small>{% endif %}{% if item.budget.portal_process %}<small>Referência de processo no portal (PROC): {{ item.budget.portal_process }}</small>{% endif %}{% if item.budget.portal_bid %}<small>Referência de licitação no portal (NUMLICIT): {{ item.budget.portal_bid }}</small>{% endif %}{% endif %}</details>{% endif %}<details><summary hx-get="/history/payment/{{ item.id }}" hx-target="#payment-history-{{ item.id }}" hx-trigger="click once">Histórico de alterações</summary><div id="payment-history-{{ item.id }}"></div></details></td>
+</tr>{% endfor %}</tbody></table>
+</section>
+{% else %}<div class="panel empty">Nenhum pagamento encontrado. <a href="/pagamentos">Limpe os filtros</a>, acompanhe a atualização em <a href="/crawls">Coletas</a> ou importe um arquivo oficial abaixo.</div>{% endif %}
+<p class="hint">A ausencia de pagamento na base consultada nao prova inadimplencia. Confirme a fonte financeira e o contrato antes de qualquer cobranca.</p>
+{{ pagination_nav(request, pagination.page, pagination.page_size, supplier_count if supplier_view else pagination.total) }}
 {% include "_municipal_payment_cards.html" %}
-<section class="panel" id="importar">
+<details class="panel" id="importar"><summary>Importar exportação do portal</summary>
   <div class="section-heading"><div><h2>Importar exportação do portal</h2><p class="hint">Baixe o arquivo no portal oficial e importe CSV ou JSON em UTF-8. O arquivo original fica registrado como fonte; linhas inválidas são listadas e ignoradas.</p></div></div>
   <div class="import-guide">
     <div>
@@ -57,23 +99,5 @@
     <label>Arquivo <input type="file" name="file" accept=".csv,.json,text/csv,application/json" required></label>
     <button type="submit">Importar</button>
   </form>
-</section>
-<form method="get" class="filters">
-  <label>CNPJ do fornecedor <input name="supplier_cnpj" value="{{ filters.supplier_cnpj or '' }}"></label>
-  <label>Fase <input name="phase" value="{{ filters.phase or '' }}"></label>
-  <label>Fonte <input name="source" value="{{ filters.source or '' }}" placeholder="municipal:imperatriz"></label>
-  <button type="submit">Filtrar</button>
-</form>
-<section class="panel table-wrap">
-<table><thead><tr><th>Data</th><th>Fornecedor</th><th>Orgao</th><th>Valor</th><th>Fase</th><th>Documento</th><th>Contrato</th><th>Conciliacao</th><th>Fonte</th></tr></thead>
-<tbody>{% for item in payments %}<tr>
-  <td>{{ item.date }}</td>
-  <td>{% if item.supplier_cnpj %}<a href="/empresas/{{ item.supplier_cnpj }}">{{ item.supplier }}</a>{% else %}{{ item.supplier }}{% endif %}</td>
-  <td>{{ item.agency }}</td><td>{{ item.amount }}</td><td>{{ item.phase }}</td><td>{{ item.document_number }}</td>
-  <td>{% if item.contract_id %}<a href="/contratos/{{ item.contract_id }}">Ver contrato</a>{% else %}Nao conciliado{% endif %}</td>
-  <td>{{ item.match_status }}</td><td>{{ item.source }}<details><summary hx-get="/history/payment/{{ item.id }}" hx-target="#payment-history-{{ item.id }}" hx-trigger="click once">Histórico de alterações</summary><div id="payment-history-{{ item.id }}"></div></details></td>
-</tr>{% else %}<tr><td colspan="9" class="empty">Nenhum pagamento coletado.</td></tr>{% endfor %}</tbody></table>
-</section>
-<p class="hint">A ausencia de pagamento na base consultada nao prova inadimplencia. Confirme a fonte financeira e o contrato antes de qualquer cobranca.</p>
-{{ pagination_nav(request, pagination.page, pagination.page_size, pagination.total) }}
+</details>
 {% endblock %}

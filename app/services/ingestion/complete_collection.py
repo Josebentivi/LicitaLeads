@@ -1,0 +1,513 @@
+"""Run the manual collection in one auditable sequence using the existing collectors."""
+
+from __future__ import annotations
+
+import asyncio
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager, suppress
+from dataclasses import dataclass, field, replace
+from datetime import UTC, date, datetime, timedelta
+from typing import Any
+from uuid import UUID, uuid4
+
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+from app.config import Settings, get_settings
+from app.connectors.municipal_payments.sources import (
+    list_municipal_sources,
+    selected_municipal_sources,
+)
+from app.database import async_session_factory, write_session
+from app.models import CrawlRun, CrawlRunStatus, JobLease, Procurement
+from app.repositories.crawls import JobLeaseRepository
+from app.services.identifiers import is_valid_cnpj
+from app.services.ingestion.municipal_payments import MunicipalPaymentIngestionService
+from app.services.ingestion.payments import PaymentIngestionService
+from app.services.ingestion.pipeline import IngestionPipeline, PipelineRequest, PipelineSummary
+from app.services.price_registry_scopes import known_price_registry_scopes
+
+COMPLETE_COLLECTION_LEASE = "complete-collection"
+COMPLETE_COLLECTION_MODE = "complete"
+
+
+def close_collection_stages(stages: list[Any], terminal: str) -> list[Any]:
+    """Record which stages were running when the collection ended."""
+
+    result = []
+    for stage in stages:
+        if isinstance(stage, dict):
+            status = stage.get("status")
+            if status == "pending":
+                stage = {**stage, "status": "not_started"}
+            elif status == "running":
+                stage = {**stage, "status": terminal}
+        result.append(stage)
+    return result
+
+
+COLLECTION_STAGES = (
+    ("procurements", "Contratações e documentos"),
+    ("tce_ma", "TCE-MA · São Luís"),
+    ("price_registries", "Atas de registro de preços"),
+    ("contracts", "Contratos"),
+    ("municipal", "Pagamentos municipais"),
+    ("federal", "Pagamentos federais"),
+)
+_ACTIVE = {CrawlRunStatus.PENDING, CrawlRunStatus.RUNNING}
+
+
+@dataclass(frozen=True, slots=True)
+class CollectionScope:
+    uf: str
+    start_date: date
+    end_date: date
+    force_refresh: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class CollectionTicket:
+    run_id: UUID
+    generation: int | None
+
+    @property
+    def owner(self) -> str:
+        return f"complete:{self.run_id}"
+
+
+@dataclass(slots=True)
+class StepResult:
+    status: str
+    note: str = ""
+    run_ids: list[UUID] = field(default_factory=list)
+
+
+class _CollectionStopped(RuntimeError):
+    pass
+
+
+def _combined_status(statuses: list[str]) -> str:
+    executed = [status for status in statuses if status != "skipped"]
+    if executed and all(status == "failed" for status in executed):
+        return "failed"
+    if any(status in {"failed", "partial"} for status in statuses):
+        return "partial"
+    return "completed"
+
+
+class CompleteCollection:
+    def __init__(
+        self,
+        settings: Settings | None = None,
+        *,
+        sessions: async_sessionmaker[AsyncSession] | None = None,
+    ) -> None:
+        self.settings = settings or get_settings()
+        self.sessions = sessions or async_session_factory
+        self.pipeline = IngestionPipeline(self.settings, session_factory=self.sessions)
+
+    async def enqueue(self, scope: CollectionScope) -> CollectionTicket:
+        """Reserve a single manual collection and reuse it on duplicate submission."""
+        now = datetime.now(UTC)
+        ticket = CollectionTicket(uuid4(), None)
+        async with write_session(self.sessions) as db:
+            leases = JobLeaseRepository(db)
+            await leases.assert_writes_allowed(now=now)
+            acquired = await leases.acquire(
+                name=COMPLETE_COLLECTION_LEASE,
+                owner_id=ticket.owner,
+                now=now,
+                expires_at=now + timedelta(hours=2),
+            )
+            lease = await db.get(JobLease, COMPLETE_COLLECTION_LEASE, populate_existing=True)
+            if not acquired:
+                if lease is not None and lease.owner_id.startswith("complete:"):
+                    previous = await db.get(
+                        CrawlRun, UUID(lease.owner_id.removeprefix("complete:"))
+                    )
+                    if previous is not None and previous.status in _ACTIVE:
+                        return CollectionTicket(previous.id, None)
+                raise RuntimeError("A coleta completa já está reservada")
+            assert lease is not None
+            db.add(
+                CrawlRun(
+                    id=ticket.run_id,
+                    connector=COMPLETE_COLLECTION_MODE,
+                    status=CrawlRunStatus.PENDING,
+                    filters={
+                        "connector": COMPLETE_COLLECTION_MODE,
+                        "mode": COMPLETE_COLLECTION_MODE,
+                        "uf": scope.uf,
+                        "start_date": scope.start_date.isoformat(),
+                        "end_date": scope.end_date.isoformat(),
+                        "force_refresh": scope.force_refresh,
+                    },
+                    cursor={
+                        "progress": {"stage": "queued", "updated_at": now.isoformat()},
+                        "complete_stages": [
+                            {"key": key, "label": label, "status": "pending", "run_ids": []}
+                            for key, label in COLLECTION_STAGES
+                        ],
+                    },
+                )
+            )
+            return CollectionTicket(ticket.run_id, lease.version)
+
+    @asynccontextmanager
+    async def _locked(
+        self, ticket: CollectionTicket, *, finishing: bool = False
+    ) -> AsyncIterator[tuple[AsyncSession, CrawlRun]]:
+        assert ticket.generation is not None
+        now = datetime.now(UTC)
+        async with write_session(self.sessions) as db:
+            if not await JobLeaseRepository(db).fence(
+                name=COMPLETE_COLLECTION_LEASE,
+                owner_id=ticket.owner,
+                generation=ticket.generation,
+                now=now,
+            ):
+                raise _CollectionStopped("Autorização de execução perdida")
+            run = await db.get(CrawlRun, ticket.run_id)
+            if run is None or run.status not in _ACTIVE or (run.cancel_requested and not finishing):
+                raise _CollectionStopped("Coleta encerrada")
+            yield db, run
+
+    async def _heartbeat(self, ticket: CollectionTicket, worker: asyncio.Task[Any]) -> None:
+        try:
+            while True:
+                await asyncio.sleep(30)
+                async with self._locked(ticket) as (db, run):
+                    now = datetime.now(UTC)
+                    if not await JobLeaseRepository(db).renew(
+                        name=COMPLETE_COLLECTION_LEASE,
+                        owner_id=ticket.owner,
+                        generation=ticket.generation,
+                        now=now,
+                        expires_at=now + timedelta(hours=2),
+                    ):
+                        raise _CollectionStopped("Autorização de execução perdida")
+                    run.heartbeat_at = now
+        except Exception:
+            worker.cancel()
+            raise
+
+    async def _stage(self, ticket: CollectionTicket, key: str, result: StepResult) -> None:
+        async with self._locked(ticket) as (_, run):
+            now = datetime.now(UTC)
+            run.status = CrawlRunStatus.RUNNING
+            run.started_at = run.started_at or now
+            run.heartbeat_at = now
+            cursor = dict(run.cursor or {})
+            stages = [dict(stage) for stage in cursor["complete_stages"]]
+            stage = next(stage for stage in stages if stage["key"] == key)
+            stage.update(
+                status=result.status,
+                note=result.note,
+                run_ids=[str(item) for item in result.run_ids],
+            )
+            if result.status == "running":
+                stage.setdefault("started_at", now.isoformat())
+            else:
+                stage["finished_at"] = now.isoformat()
+            cursor["complete_stages"] = stages
+            cursor["progress"] = {
+                "stage": "complete",
+                "updated_at": now.isoformat(),
+                "message": stage["label"],
+                "processed": sum(item["status"] not in {"pending", "running"} for item in stages),
+                "total": len(stages),
+            }
+            run.cursor = cursor
+
+    async def _finish(self, ticket: CollectionTicket, status: CrawlRunStatus) -> None:
+        try:
+            async with self._locked(ticket, finishing=True) as (db, run):
+                if run.cancel_requested:
+                    status = CrawlRunStatus.CANCELLED
+                now = datetime.now(UTC)
+                cursor = dict(run.cursor or {})
+                cursor["complete_stages"] = close_collection_stages(
+                    cursor["complete_stages"], status.value
+                )
+                cursor["progress"] = {"stage": status.value, "updated_at": now.isoformat()}
+                run.cursor = cursor
+                run.status = status
+                run.finished_at = now
+                if status is CrawlRunStatus.CANCELLED:
+                    run.cancel_requested = True
+                    # The procurement child may already have queued analyses before cancellation.
+                    from app.services.llm.queue import cancel_for_run
+
+                    children = await db.scalars(
+                        select(CrawlRun.id).where(
+                            CrawlRun.filters["parent_run_id"].as_string() == str(ticket.run_id)
+                        )
+                    )
+                    for child in children.all():
+                        await cancel_for_run(db, child)
+                await JobLeaseRepository(db).release(
+                    name=COMPLETE_COLLECTION_LEASE,
+                    owner_id=ticket.owner,
+                    generation=ticket.generation,
+                )
+        except _CollectionStopped:
+            # Recovery or another worker owns the terminal state.
+            return
+
+    async def run(self, ticket: CollectionTicket, scope: CollectionScope) -> None:
+        if ticket.generation is None:
+            return
+        worker = asyncio.current_task()
+        assert worker is not None
+        heartbeat = asyncio.create_task(self._heartbeat(ticket, worker))
+        stages = {
+            "procurements": self._procurements,
+            "price_registries": self._registries,
+            "contracts": self._contracts,
+            "municipal": self._municipal,
+            "federal": self._federal,
+            "tce_ma": self._tce,
+        }
+        results: list[str] = []
+        status = CrawlRunStatus.FAILED
+
+        async def chain(keys: tuple[str, ...]) -> None:
+            for key in keys:
+                await self._stage(ticket, key, StepResult("running"))
+                try:
+                    outcome = await stages[key](ticket, scope)
+                except _CollectionStopped:
+                    raise
+                except Exception as exc:
+                    outcome = StepResult("failed", f"Falha nesta etapa ({type(exc).__name__})")
+                await self._stage(ticket, key, outcome)
+                results.append(outcome.status)
+
+        financial = asyncio.create_task(chain(("municipal", "federal")))
+        procurement = asyncio.create_task(
+            chain(("procurements", "tce_ma", "price_registries", "contracts"))
+        )
+        try:
+            await asyncio.gather(procurement, financial)
+            status = CrawlRunStatus(_combined_status(results))
+        except _CollectionStopped:
+            status = CrawlRunStatus.CANCELLED
+        except asyncio.CancelledError:
+            status = CrawlRunStatus.CANCELLED
+            raise
+        finally:
+
+            async def finalize() -> None:
+                for task in (procurement, financial):
+                    # Cancellation of the gather has already reached these
+                    # tasks. A second cancellation can interrupt their rollback.
+                    if not task.done() and not task.cancelling():
+                        task.cancel()
+                await asyncio.gather(procurement, financial, return_exceptions=True)
+                heartbeat.cancel()
+                with suppress(asyncio.CancelledError, Exception):
+                    await heartbeat
+                await self._finish(ticket, status)
+
+            cleanup = asyncio.create_task(finalize())
+            try:
+                await asyncio.shield(cleanup)
+            except asyncio.CancelledError:
+                await asyncio.shield(cleanup)
+                raise
+
+    def _request(self, scope: CollectionScope, **kwargs: Any) -> PipelineRequest:
+        return PipelineRequest(
+            connector="all",
+            uf=scope.uf,
+            days=None,
+            start_date=scope.start_date,
+            end_date=scope.end_date,
+            modalities=tuple(self.settings.default_modalities),
+            force_refresh=scope.force_refresh,
+            **kwargs,
+        )
+
+    async def _collect_pipeline(
+        self, ticket: CollectionTicket, request: PipelineRequest
+    ) -> PipelineSummary:
+        lease_names = self.pipeline._lease_names(request)
+        waiting = False
+        while True:
+            async with self.sessions() as db:
+                busy = await db.scalar(
+                    select(JobLease.name)
+                    .where(JobLease.name.in_(lease_names), JobLease.expires_at > datetime.now(UTC))
+                    .limit(1)
+                )
+            if not busy:
+                break
+            if not waiting:
+                await self._stage(
+                    ticket,
+                    request.mode,
+                    StepResult("running", "Aguardando a coleta que já usa a fonte"),
+                )
+                waiting = True
+            await asyncio.sleep(3)
+        if waiting:
+            await self._stage(ticket, request.mode, StepResult("running"))
+        async with self._locked(ticket):
+            pass
+        summary = await self.pipeline.run(replace(request, parent_run_id=ticket.run_id))
+        if summary.status is CrawlRunStatus.CANCELLED:
+            raise _CollectionStopped("Etapa cancelada")
+        return summary
+
+    async def _procurements(self, ticket: CollectionTicket, scope: CollectionScope) -> StepResult:
+        summary = await self._collect_pipeline(ticket, self._request(scope, process_documents=True))
+        docs = summary.source_results.get("documents", {})
+        return StepResult(
+            summary.status.value,
+            f"{summary.records_created} contratações novas · "
+            f"{docs.get('documents_processed', 0)} documentos analisados · "
+            f"{docs.get('leads_created', 0)} oportunidades geradas",
+            [summary.run_id],
+        )
+
+    async def _registries(self, ticket: CollectionTicket, scope: CollectionScope) -> StepResult:
+        async with self.sessions() as db:
+            scopes = tuple(await known_price_registry_scopes(db, scope.uf))
+        if not scopes:
+            return StepResult("skipped", "Nenhuma unidade conhecida nesta UF")
+        summary = await self._collect_pipeline(
+            ticket,
+            self._request(
+                scope,
+                mode="price_registries",
+                process_documents=False,
+                price_registry_scopes=scopes,
+            ),
+        )
+        return StepResult(
+            summary.status.value,
+            f"{summary.records_created} atas novas · {len(scopes)} unidades",
+            [summary.run_id],
+        )
+
+    async def _contracts(self, ticket: CollectionTicket, scope: CollectionScope) -> StepResult:
+        agencies = self.settings.contract_agency_cnpjs
+        if not agencies:
+            async with self.sessions() as db:
+                agencies = sorted(
+                    {
+                        cnpj
+                        for cnpj in (
+                            await db.scalars(
+                                select(Procurement.agency_cnpj)
+                                .where(
+                                    Procurement.uf == scope.uf,
+                                    Procurement.agency_cnpj.is_not(None),
+                                )
+                                .distinct()
+                            )
+                        ).all()
+                        if cnpj and is_valid_cnpj(cnpj)
+                    }
+                )
+        if not agencies:
+            return StepResult("skipped", "Nenhum órgão conhecido nesta UF")
+        summaries = []
+        for agency in dict.fromkeys(agencies):
+            summaries.append(
+                await self._collect_pipeline(
+                    ticket,
+                    self._request(
+                        scope,
+                        mode="contracts",
+                        process_documents=False,
+                        agency_cnpj=agency,
+                    ),
+                )
+            )
+        return StepResult(
+            _combined_status([summary.status.value for summary in summaries]),
+            f"{sum(item.records_created for item in summaries)} contratos novos · {len(summaries)} órgãos",
+            [summary.run_id for summary in summaries],
+        )
+
+    async def _payment_step(self, run_ids: list[UUID], missing: bool, label: str) -> StepResult:
+        async with self.sessions() as db:
+            runs = (await db.scalars(select(CrawlRun).where(CrawlRun.id.in_(run_ids)))).all()
+        statuses = [run.status.value for run in runs]
+        if missing:
+            statuses.append("failed")
+        return StepResult(
+            _combined_status(statuses),
+            f"{sum(run.records_created for run in runs)} registros novos · {label}",
+            run_ids,
+        )
+
+    async def _municipal(self, ticket: CollectionTicket, scope: CollectionScope) -> StepResult:
+        sources = selected_municipal_sources(self.settings) or list_municipal_sources(self.settings)
+        sources = [source for source in sources if source.uf == scope.uf]
+        if not sources:
+            return StepResult("skipped", "Nenhum portal municipal integrado nesta UF")
+        ids, issues = [], []
+        missing = False
+        for year in range(scope.start_date.year, scope.end_date.year + 1):
+            for source in sources:
+                async with self._locked(ticket):
+                    pass
+                service = MunicipalPaymentIngestionService(
+                    self.settings, session_factory=self.sessions
+                )
+                try:
+                    summary = await service.run(source.id, year=year)
+                    if summary.crawl_run_id:
+                        ids.append(summary.crawl_run_id)
+                    else:
+                        missing = True
+                    if summary.availability.value not in {"available", "empty"}:
+                        issues.append(source.name)
+                except Exception:
+                    missing = True
+                    issues.append(source.name)
+                finally:
+                    await service.aclose()
+        note = f"{len(sources)} portais consultados por exercício"
+        if issues:
+            note += " · verificar " + ", ".join(dict.fromkeys(issues))
+        return await self._payment_step(ids, missing, note)
+
+    async def _federal(self, ticket: CollectionTicket, scope: CollectionScope) -> StepResult:
+        if (
+            "transparencia" not in self.settings.payment_sources
+            or not self.settings.transparencia_api_key
+            or not self.settings.payment_poll_cnpjs
+        ):
+            return StepResult(
+                "skipped",
+                "Disponível com chave do Portal da Transparência e CNPJs de favorecidos configurados",
+            )
+        ids = []
+        missing = False
+        service = PaymentIngestionService(self.settings, session_factory=self.sessions)
+        try:
+            for year in range(scope.start_date.year, scope.end_date.year + 1):
+                for cnpj in self.settings.payment_poll_cnpjs:
+                    async with self._locked(ticket):
+                        pass
+                    try:
+                        summary = await service.run(company_cnpj=cnpj, year=year)
+                        if summary.crawl_run_id:
+                            ids.append(summary.crawl_run_id)
+                        else:
+                            missing = True
+                    except Exception:
+                        missing = True
+        finally:
+            await service.aclose()
+        return await self._payment_step(
+            ids, missing, f"{len(self.settings.payment_poll_cnpjs)} favorecidos por exercício"
+        )
+
+    async def _tce(self, ticket: CollectionTicket, scope: CollectionScope) -> StepResult:
+        from app.services.ingestion.tce_ma_observations import collect_tce_observations
+
+        return await collect_tce_observations(self, ticket, scope)

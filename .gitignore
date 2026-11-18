@@ -29,3 +29,5 @@ data/test-report-history/
 
 # Backups locais de reconciliação
 data/backups/
+data/scheduler.controls*
+data/application.shutdown.json

@@ -470,12 +470,13 @@ async def test_payments_page_shows_live_municipal_progress(
                 connector="municipal:imperatriz",
                 status=CrawlRunStatus.RUNNING,
                 started_at=now - timedelta(seconds=12),
+                records_found=100,
+                records_created=10,
                 filters={"connector": "municipal:imperatriz", "year": 2026},
                 cursor={
                     "stage": "persisting",
                     "message": "Gravando pagamentos: 10 de 100",
-                    "processed": 10,
-                    "total": 100,
+                    "municipal_write": {"processed": 10, "total": 100},
                 },
             )
         )
@@ -487,8 +488,8 @@ async def test_payments_page_shows_live_municipal_progress(
     assert partial.status_code == 200
     assert 'hx-get="/pagamentos/portais"' in page.text
     assert "Gravando pagamentos: 10 de 100" in page.text
-    assert "10 de 100 pagamento(s) processado(s)" in page.text
-    assert "Coletando..." in page.text
+    assert "10 de 100 registros gravados nesta execução" in page.text
+    assert "Em andamento" in page.text
     assert 'hx-get="/pagamentos/portais"' in partial.text
 
 
@@ -506,6 +507,7 @@ async def test_payments_page_stops_polling_after_municipal_completion(
                 started_at=now - timedelta(minutes=2),
                 finished_at=now,
                 records_found=1,
+                records_created=1,
                 filters={"connector": "municipal:imperatriz", "year": 2026},
                 cursor={
                     "stage": "completed",
@@ -520,7 +522,7 @@ async def test_payments_page_stops_polling_after_municipal_completion(
 
     assert page.status_code == 200
     assert 'hx-get="/pagamentos/portais"' not in page.text
-    assert "Coletar Imperatriz" in page.text
+    assert "1 registro(s) gravado(s)" in page.text
 
 
 @pytest.mark.asyncio

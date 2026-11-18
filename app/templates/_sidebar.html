@@ -59,6 +59,17 @@
     {% endfor %}
   </nav>
   <div class="sidebar-foot">
+    {% set can_shutdown = shutdown_available() if shutdown_available is defined else false %}
+    {% if can_shutdown %}
+    <a class="sidebar-shutdown" href="/application/shutdown" title="Encerrar a aplicação" aria-label="Encerrar a aplicação">
+    {% else %}
+    <button type="button" class="sidebar-shutdown" disabled title="Abra pelo iniciar.bat para habilitar o encerramento completo" aria-label="Encerrar a aplicação: disponível ao abrir pelo iniciar.bat">
+    {% endif %}
+      <svg class="sidebar-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v9M7 5a9 9 0 1 0 10 0"/></svg>
+      <span class="sidebar-label">Encerrar a aplicação</span>
+    {% if can_shutdown %}</a>{% else %}</button>{% endif %}
+  </div>
+  <div class="sidebar-foot sidebar-environment">
     <span class="sidebar-foot-mark">OK</span>
     <span class="sidebar-label">Ambiente local</span>
   </div>

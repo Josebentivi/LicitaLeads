@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+from datetime import datetime
 from typing import Literal
 from urllib.parse import urlsplit, urlunsplit
 from uuid import UUID
@@ -41,6 +43,10 @@ FIELD_LABELS = {
     "current_phase": "Fase estimada",
     "estimated_value": "Valor estimado",
     "global_value": "Valor global",
+    "new_valid_until": "Nova vigência no termo",
+    "estimated_unit_value": "Valor unitário estimado",
+    "estimated_total_value": "Valor total estimado",
+    "result_status": "Situação do resultado",
     "initial_value": "Valor inicial",
     "accumulated_value": "Valor acumulado",
     "total_value": "Valor total",
@@ -115,13 +121,102 @@ async def history_page(
             )
         ).all()
     )
+    items = await _history_items(db, rows)
+    return {
+        "items": items,
+        "page": page,
+        "page_size": page_size,
+        "total": total,
+    }
+
+
+async def relevant_changes(
+    db: AsyncSession,
+    after: datetime | None,
+    until: datetime,
+    page: int,
+    page_size: int = 50,
+):
+    """Changes to previously recorded dates, values or status, in local processing order."""
+    fields = {
+        "status",
+        "current_phase",
+        "valid_from",
+        "valid_until",
+        "new_valid_until",
+        "proposal_end_at",
+        "session_start_at",
+        "estimated_value",
+        "initial_value",
+        "global_value",
+        "accumulated_value",
+        "total_value",
+        "value_delta",
+        "amount",
+        "estimated_unit_value",
+        "estimated_total_value",
+        "result_status",
+    }
+    statement = select(FieldChange).where(
+        FieldChange.parent_type.in_(MODELS.keys()),
+        FieldChange.field_name.in_(fields),
+        FieldChange.applied.is_(True),
+        FieldChange.decision.in_(("updated", "conflict_applied", "derived_updated")),
+        FieldChange.recorded_at <= until,
+    )
+    if after:
+        statement = statement.where(FieldChange.recorded_at > after)
+    total = int(await db.scalar(select(func.count()).select_from(statement.subquery())) or 0)
+    rows = (
+        await db.scalars(
+            statement.order_by(FieldChange.recorded_at.desc(), FieldChange.id.desc())
+            .offset((page - 1) * page_size)
+            .limit(page_size)
+        )
+    ).all()
+    labels: dict[tuple[str, str], str] = {}
+    parent_numbers = {
+        "procurement": (
+            Procurement.id,
+            func.coalesce(
+                Procurement.pncp_control_number, Procurement.purchase_number, Procurement.title
+            ),
+        ),
+        "price_registry": (PriceRegistry.id, PriceRegistry.registry_number),
+        "contract": (Contract.id, Contract.contract_number),
+        "payment": (Payment.id, func.coalesce(Payment.document_number, Payment.commitment_number)),
+    }
+    for kind, (identifier, number) in parent_numbers.items():
+        ids = {row.parent_id for row in rows if row.parent_type == kind}
+        if ids:
+            for pk, label in await db.execute(
+                select(identifier, number).where(identifier.in_(ids))
+            ):
+                if label:
+                    labels[kind, str(pk)] = str(label)
+    items = await _history_items(db, rows)
+    for item in items:
+        item["parent_label"] = (
+            labels.get((item["parent_type"], item["parent_id"])) or item["parent_id"]
+        )
+    return {
+        "items": items,
+        "page": page,
+        "page_size": page_size,
+        "total": total,
+    }
+
+
+async def _history_items(db: AsyncSession, rows: Sequence[FieldChange]):
     source_ids = {row.source_record_id for row in rows if row.source_record_id}
     sources = (
         {
-            row.id: row
-            for row in (
-                await db.scalars(select(SourceRecord).where(SourceRecord.id.in_(source_ids)))
-            ).all()
+            identifier: endpoint
+            for identifier, endpoint in await db.execute(
+                select(SourceRecord.id, SourceRecord.endpoint).where(
+                    SourceRecord.id.in_(source_ids)
+                )
+            )
         }
         if source_ids
         else {}
@@ -145,8 +240,11 @@ async def history_page(
             else row.received_value
         )
         item["decision_label"] = DECISIONS.get(row.decision, row.decision)
-        source = sources.get(row.source_record_id) if row.source_record_id else None
-        parts = urlsplit(source.endpoint) if source else None
+        endpoint = sources.get(row.source_record_id) if row.source_record_id else None
+        try:
+            parts = urlsplit(endpoint) if endpoint else None
+        except ValueError:
+            parts = None
         item["source_url"] = (
             urlunsplit((parts.scheme, parts.netloc, parts.path, "", ""))
             if parts
@@ -156,7 +254,7 @@ async def history_page(
             else None
         )
         items.append(item)
-    return {"items": items, "page": page, "page_size": page_size, "total": total}
+    return items
 
 
 @router.get("/{entity_type}/{entity_id}")

@@ -2,7 +2,7 @@
 
 from uuid import UUID, uuid4
 
-from fastapi import APIRouter, Depends, Form, Query, Request
+from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request
 from fastapi.responses import RedirectResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -16,10 +16,12 @@ from app.services.company_overview import (
     Section,
     find_company,
 )
+from app.services.opportunity_workspace import safe_list_url
 
 router = APIRouter(include_in_schema=False)
 
 LABELS = {
+    "documented": "Participação documentada",
     "verification_status": "Verificação da atribuição",
     "verification_reason": "Motivo da verificação",
     "event_type": "Evento",
@@ -121,9 +123,19 @@ LABELS = {
 
 def label(value):
     from app.api.routes.history import FIELD_LABELS
-    from app.web import _EVENT_TYPE_LABELS, _PARTICIPANT_STATUS_LABELS, _REASON_CATEGORY_LABELS
+    from app.web import (
+        _DEADLINE_TYPE_LABELS,
+        _EVENT_TYPE_LABELS,
+        _PARTICIPANT_STATUS_LABELS,
+        _REASON_CATEGORY_LABELS,
+    )
 
-    for mapping in (_EVENT_TYPE_LABELS, _REASON_CATEGORY_LABELS, _PARTICIPANT_STATUS_LABELS):
+    for mapping in (
+        _EVENT_TYPE_LABELS,
+        _REASON_CATEGORY_LABELS,
+        _PARTICIPANT_STATUS_LABELS,
+        _DEADLINE_TYPE_LABELS,
+    ):
         if str(value) in mapping:
             return mapping[str(value)]
     return LABELS.get(str(value), FIELD_LABELS.get(str(value), str(value).replace("_", " ")))
@@ -273,7 +285,14 @@ async def company_page(
     company = await find_company(db, cnpj)
     service = CompanyOverviewService(db, company)
     overview = await service.overview()
-    initial = await service.page("leads")
+    section = request.query_params.get("section", "leads")
+    if section not in SECTION_LABELS:
+        raise HTTPException(422, "Seção inválida")
+    initial = await service.page(
+        section,
+        status=status if section == "procurements" else None,
+        active_only=active_only and section == "procurements",
+    )
     return render(
         request,
         "company_detail.html",
@@ -285,6 +304,12 @@ async def company_page(
             "status": status,
             "active_only": active_only,
             "request_id": str(uuid4()),
+            "return_to": safe_list_url(
+                request.query_params.get("return_to"),
+                path="/pagamentos"
+                if request.query_params.get("return_to", "").split("?")[0] == "/pagamentos"
+                else "/empresas",
+            ),
         },
     )
 

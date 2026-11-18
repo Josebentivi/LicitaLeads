@@ -12,6 +12,7 @@ from sqlalchemy.orm import selectinload
 
 from app.models import (
     Company,
+    CrawlRun,
     Evidence,
     Lead,
     Participant,
@@ -24,6 +25,7 @@ from app.models import (
 )
 from app.models.enums import ParticipantStatus, ProcurementEventType
 from app.repositories.base import BaseRepository, Page
+from app.repositories.company_origins import companies_with_activity, page_activity
 from app.services.identifiers import canonical_modality
 from app.services.procurement_status import (
     CANCELLED_TOKENS as _STATUS_CANCELLED_TOKENS,
@@ -50,12 +52,6 @@ def participant_evidence_is_current():
     from app.services.participation_integrity import participant_current
 
     return participant_current()
-
-
-def _evidence_is_current(evidence_id):
-    from app.repositories.current_evidence import evidence_current
-
-    return evidence_current(evidence_id)
 
 
 def company_cnpj_condition(company_cnpj: str):
@@ -242,6 +238,8 @@ class ProcurementRepository(BaseRepository[Procurement]):
         *,
         page: int = 1,
         page_size: int = 50,
+        query: str | None = None,
+        crawl_run_id: UUID | None = None,
         uf: str | None = None,
         municipality: str | None = None,
         agency: str | None = None,
@@ -261,6 +259,26 @@ class ProcurementRepository(BaseRepository[Procurement]):
         now: datetime | None = None,
     ) -> Page[Procurement]:
         statement: Select[tuple[Procurement]] = select(Procurement)
+        if query and query.strip():
+            term = query.strip()
+            statement = statement.where(
+                or_(
+                    Procurement.title.icontains(term, autoescape=True),
+                    Procurement.object_description.icontains(term, autoescape=True),
+                    Procurement.purchase_number.icontains(term, autoescape=True),
+                    Procurement.pncp_control_number.icontains(term, autoescape=True),
+                    Procurement.agency_name.icontains(term, autoescape=True),
+                )
+            )
+        if crawl_run_id:
+            from app.services.ingestion.document_retry import batch_document_ids
+            from app.services.opportunity_workspace import run_procurement_ids
+
+            run = await self.session.get(CrawlRun, crawl_run_id)
+            documents = tuple(batch_document_ids(run) or ()) if run else ()
+            statement = statement.where(
+                Procurement.id.in_(run_procurement_ids(crawl_run_id, documents))
+            )
         if uf:
             statement = statement.where(Procurement.uf == uf.upper())
         if municipality:
@@ -452,6 +470,8 @@ class CompanyRepository(BaseRepository[Company]):
         published_to: datetime | None = None,
         has_lead: bool = False,
         active_only: bool = False,
+        origin: str | None = None,
+        activity_location: str | None = None,
     ) -> Page[tuple[Company, dict[str, object]]]:
         stats = self._stats_subquery(
             published_from=published_from,
@@ -483,8 +503,14 @@ class CompanyRepository(BaseRepository[Company]):
         if uf:
             statement = statement.where(Company.uf == uf.upper())
         if has_lead:
+            from app.services.participation_integrity import lead_current
+
             statement = statement.where(
-                exists(select(Lead.id).where(Lead.company_id == Company.id))
+                exists(select(Lead.id).where(Lead.company_id == Company.id, lead_current()))
+            )
+        if origin or activity_location:
+            statement = statement.where(
+                Company.id.in_(companies_with_activity(origin, activity_location))
             )
         total = int(
             (
@@ -497,7 +523,8 @@ class CompanyRepository(BaseRepository[Company]):
         rows = (
             await self.session.execute(statement.offset((page - 1) * page_size).limit(page_size))
         ).all()
-        items = [(row[0], _stats_dict(row)) for row in rows]
+        activity = await page_activity(self.session, [row[0].id for row in rows])
+        items = [(row[0], {**_stats_dict(row), "activity": activity[row[0].id]}) for row in rows]
         return Page(items=items, page=page, page_size=page_size, total=total)
 
     async def stats_for_company(self, company_id: UUID | str) -> dict[str, object]:
@@ -514,50 +541,31 @@ class CompanyRepository(BaseRepository[Company]):
         the headline count is distinct by procurement, never a raw event count.
         """
 
-        failure_types = (
-            ProcurementEventType.DISQUALIFIED,
-            ProcurementEventType.INELIGIBLE,
+        from app.services.participation_integrity import event_verified
+
+        count = func.count(func.distinct(ProcurementEvent.procurement_id))
+        conditions = (
+            ProcurementEvent.company_id == company_id,
+            ProcurementEvent.event_type.in_(
+                [ProcurementEventType.DISQUALIFIED, ProcurementEventType.INELIGIBLE]
+            ),
+            event_verified(),
         )
-        rows = (
-            await self.session.execute(
-                select(
-                    ProcurementEvent.event_type,
-                    ProcurementEvent.reason_category,
-                    func.count(func.distinct(ProcurementEvent.procurement_id)),
-                )
-                .where(
-                    ProcurementEvent.company_id == company_id,
-                    ProcurementEvent.event_type.in_(failure_types),
-                    _evidence_is_current(ProcurementEvent.evidence_id),
-                )
-                .group_by(ProcurementEvent.event_type, ProcurementEvent.reason_category)
+
+        async def breakdown(column):
+            rows = await self.session.execute(
+                select(column.label("category"), count.label("total"))
+                .where(*conditions)
+                .group_by(column)
             )
-        ).all()
-        by_event: dict[str, int] = {}
-        by_reason: dict[str, int] = {}
-        for event_type, reason, count in rows:
-            event_key = (
-                event_type.value
-                if isinstance(event_type, ProcurementEventType)
-                else str(event_type)
-            )
-            reason_key = getattr(reason, "value", str(reason))
-            by_event[event_key] = by_event.get(event_key, 0) + int(count or 0)
-            by_reason[reason_key] = by_reason.get(reason_key, 0) + int(count or 0)
-        documented = int(
-            await self.session.scalar(
-                select(func.count(func.distinct(ProcurementEvent.procurement_id))).where(
-                    ProcurementEvent.company_id == company_id,
-                    ProcurementEvent.event_type.in_(failure_types),
-                    _evidence_is_current(ProcurementEvent.evidence_id),
-                )
-            )
-            or 0
-        )
+            return {str(row.category): row.total for row in rows}
+
         return {
-            "documented_losses": documented,
-            "by_event": by_event,
-            "by_reason": by_reason,
+            "documented_losses": int(
+                await self.session.scalar(select(count).where(*conditions)) or 0
+            ),
+            "by_event": await breakdown(ProcurementEvent.event_type),
+            "by_reason": await breakdown(ProcurementEvent.reason_category),
         }
 
 

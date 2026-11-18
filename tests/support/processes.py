@@ -89,6 +89,20 @@ class Runtime:
         self.logs.append(log)
         return child
 
+    def enable_managed(self):
+        """Replace the fixture API with a launcher-owned, fully isolated instance."""
+        self.stop(self.children[0])
+        child = self.start("managed")
+
+        def healthy():
+            try:
+                return httpx.get(self.url + "/health", timeout=1).status_code == 200
+            except httpx.HTTPError:
+                return False
+
+        wait_for(healthy)
+        return child
+
     def stop(self, child):
         if child.poll() is None:
             if os.name == "nt":

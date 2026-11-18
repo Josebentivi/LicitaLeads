@@ -332,8 +332,11 @@ class ParticipantDetector:
         *,
         known_companies: Iterable[CompanyReference] = (),
     ) -> list[DetectedParticipant]:
+        from app.services.event_detection.authority import assertion_diagnostic
         from app.services.event_detection.participation_values import reference_status
 
+        if assertion_diagnostic("", evidence.document_title):
+            return []
         base = _document_base_confidence(evidence.document_type)
         if base == 0:
             return []
@@ -447,6 +450,10 @@ class EventDetector:
         *,
         known_companies: Iterable[CompanyReference] = (),
     ) -> list[DetectedEvent]:
+        from app.services.event_detection.authority import assertion_diagnostic
+
+        if assertion_diagnostic("", evidence.document_title):
+            return []
         base = _document_base_confidence(evidence.document_type)
         if base == 0:
             return []
@@ -462,6 +469,8 @@ class EventDetector:
                 if _RULE_LANGUAGE.search(phrase) or _NEGATED_EVENT.search(prefix):
                     continue
                 context, start = _context(evidence.text, match.start(), match.end())
+                if assertion_diagnostic(context, evidence.document_title):
+                    continue
                 company, method, ambiguous = associate_company(context, companies)
                 category = self.classify_reason(context)
                 confidence = base

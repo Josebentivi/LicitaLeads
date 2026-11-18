@@ -1,10 +1,25 @@
 # Análise de IA em fila persistente
 
+A correção de resultados PNCP atualiza a versão do adaptador: comprovações
+anteriores não dispensam a próxima conferência das operações afetadas. Depois
+de confirmadas novamente, versões elegíveis voltam a ser reaproveitadas.
+Continuações com DTOs antigos também rejeitam marcadores sem homologação,
+preservando a resposta armazenada.
+
 A coleta confirma o conteúdo, os trechos extraídos e as regras determinísticas
 sem esperar pela IA. Quando `LLM_ENABLED=true`, uma solicitação de análise é
 gravada na mesma transação. O scheduler separado consome a fila a cada ciclo,
 com uma requisição por vez e lease exclusivo entre API, CLI e scheduler.
-A pausa do scheduler impede novos ciclos automáticos.
+A **Central de IA**, em `/ia` (Operação de dados), concentra a fila, documentos,
+sugestões, consumo e configuração efetiva. Coletas automáticas e IA têm pausas
+independentes. A pausa geral em Configurações atua sobre ambas; manutenção
+exclusiva impede novos trabalhos dos dois tipos. A chamada já iniciada pode
+terminar após uma pausa. Cancelamento continua interrompendo trabalho exclusivo
+do lote, preservando demandas compartilhadas e documentos já extraídos.
+
+Uma chave configurada não comprova conexão. Sem tentativas registradas, a central
+mostra **não verificada**. A página não faz chamadas pagas de teste. Configurações
+são somente para consulta; alterações no `.env` exigem reinício pelo launcher.
 
 ```dotenv
 LLM_MAX_REQUESTS_PER_HOUR=500
@@ -34,8 +49,8 @@ Respostas inválidas ou truncadas não são consideradas completas.
 Erros de autenticação, configuração, modelo ou quota bloqueiam novos envios
 daquela configuração. Falhas transitórias respeitam `Retry-After` e
 `LLM_MAX_RETRIES`; a fila controla as tentativas, sem multiplicá-las no HTTP.
-O painel `/crawls` apresenta a fila independentemente do status da coleta,
-incluindo bloqueios, próximas liberações e custos. “Tentar IA novamente”
+A central `/ia` apresenta bloqueios, próximas liberações e custos. `/crawls`
+conserva o resumo por execução e o acesso à central. “Tentar IA novamente”
 libera uma nova tentativa explícita; mudar a configuração exige reenfileirar
 com a configuração atual. Cancelar remove a solicitação daquela execução;
 outras solicitações do mesmo trabalho continuam válidas.
@@ -69,3 +84,26 @@ As tabelas `llm_batches`, `llm_demands`, `llm_work_items`, `llm_results`,
 `llm_attempts` e `llm_provider_states` são prospectivas (migração
 `0024_llm_queue`). Não se inferem análises, custos ou versões anteriores.
 Falhas da IA não alteram tentativas de download/OCR nem a revisão humana.
+## Evidência, contexto e revisão
+
+Os trechos são priorizados por relevância, com contexto adjacente limitado ao
+mesmo documento e localização indicada no envio. O limite configurado de trechos
+é preservado. A cobertura informa selecionados e omitidos: uma análise validada
+de trecho não significa que todo o documento foi analisado.
+
+O provedor usa Structured Outputs com esquema estrito. O validador local continua
+verificando citações, identidade e relação entre empresa e ato. Minutas, legendas,
+regras futuras e alegações não comprovam atos praticados. Todas as citações usadas
+em fatos validados ficam vinculadas às evidências. Conteúdo, localização, contexto
+e versões do seletor, prompt e validador participam do reaproveitamento.
+
+Uma identidade presente em outro trecho não autoriza atribuir o ato à empresa.
+Casos ambíguos aparecem em **Sugestões para revisão**, sem gerar novos fatos,
+leads ou prazos. A hipótese de único vencedor conhecido também exige confirmação.
+A revisão permite escolher uma participante comprovada da mesma contratação,
+registrando revisor, observação e evidências. Documentos alterados ou inativos
+impedem confirmação. Decisões anteriores não são sobrescritas.
+
+Documentos já extraídos podem ser enfileirados pela central, sem coleta, download
+ou OCR. Trabalhos antigos com configuração de validação diferente exigem tentativa
+explícita; a atualização não libera chamadas automaticamente.

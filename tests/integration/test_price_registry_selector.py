@@ -66,7 +66,7 @@ async def test_scope_options_deduplicate_exact_units_and_exclude_other_states_or
     assert scopes[0].sources == ("pncp", "compras_gov")
 
 
-async def test_scope_lookup_and_form_escape_names_and_explain_partial_coverage(
+async def test_scope_lookup_and_atlas_list_keeps_collection_action_centralized(
     api_client, database, monkeypatch
 ):
     monkeypatch.setattr(web, "get_settings", lambda: Settings(_env_file=None))
@@ -74,15 +74,9 @@ async def test_scope_lookup_and_form_escape_names_and_explain_partial_coverage(
     response = await api_client.get("/atas")
     assert response.status_code == 200
     assert '<script>alert("x")</script>' not in response.text
-    assert "&lt;script&gt;" in response.text
     soup = BeautifulSoup(response.text, "html.parser")
-    form = soup.find("form", {"data-registry-collection": True})
-    assert form.find("select", {"name": "uf"})
-    assert form.find("select", {"name": "registry_scope"})
-    assert form.find("select", {"name": "registry_scope"}).find("option", {"value": "all"})
-    assert "Todas as fontes disponíveis" in response.text
-    assert not form.find("input", {"name": "process_documents"})
-    assert "pode estar incompleta" in response.text
+    assert not soup.select("form[data-registry-collection]")
+    assert len(soup.select("form[action='/crawls/collect']")) == 1
     options = await api_client.get("/atas/collection-scopes", params={"uf": "ma"})
     assert options.status_code == 200
     assert options.json()["scopes"][0]["sources"] == ["pncp", "compras_gov"]

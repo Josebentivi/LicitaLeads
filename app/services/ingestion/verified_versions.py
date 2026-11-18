@@ -57,11 +57,14 @@ async def evidence_exists(session: AsyncSession, proof: VerifiedCollectionVersio
     if not proof.source_records:
         return False
     ids = [UUID(value) for value in proof.source_records]
-    records = list(
-        (await session.scalars(select(SourceRecord).where(SourceRecord.id.in_(ids)))).all()
-    )
+    records = (
+        await session.execute(
+            select(SourceRecord.id, SourceRecord.response_hash).where(SourceRecord.id.in_(ids))
+        )
+    ).all()
     return len(records) == len(ids) and all(
-        proof.source_records.get(str(record.id)) == record.response_hash for record in records
+        proof.source_records.get(str(record_id)) == response_hash
+        for record_id, response_hash in records
     )
 
 
@@ -177,7 +180,11 @@ async def record_verified(
                 )
             ).all()
         )
-    records = (await session.scalars(select(SourceRecord).where(SourceRecord.id.in_(ids)))).all()
+    records = (
+        await session.execute(
+            select(SourceRecord.id, SourceRecord.response_hash).where(SourceRecord.id.in_(ids))
+        )
+    ).all()
     if len(records) != len(ids):
         return
     session.add(
@@ -190,7 +197,7 @@ async def record_verified(
             source_updated_at=stamp,
             timestamp_origin=origin,
             operations=operations,
-            source_records={str(record.id): record.response_hash for record in records},
+            source_records={str(record_id): response_hash for record_id, response_hash in records},
             crawl_run_id=run_id,
             verified_at=datetime.now(UTC),
         )

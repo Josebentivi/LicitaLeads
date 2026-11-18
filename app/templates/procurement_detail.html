@@ -12,9 +12,20 @@
   </dl>
 </details>
 {% endmacro %}
+{% macro catalog_status(section) %}
+<ul class="hint" aria-label="Cobertura desta seção">{% for entry in catalogs[section] %}
+  <li><strong>{{ source_labels.get(entry.source, entry.source) }}</strong> · {{ entry.label }}
+    {% if entry.collected_at %} · {{ format_collection_time(entry.collected_at) }}{% endif %}
+    {% if entry.run_id %} · <a href="/crawls?run={{ entry.run_id }}#execucao-{{ entry.run_id }}">Consultar execução</a>{% endif %}
+    {% if entry.record_id %}<small>Registro de origem: <code>{{ entry.record_id }}</code></small>{% endif %}
+  </li>
+{% endfor %}</ul>
+{% endmacro %}
 {% block title %}{{ procurement.title }} · LicitaLead Monitor{% endblock %}
 {% block content %}
-<p><a href="/procurements">← Contratações</a></p>
+<p><a href="{{ return_to }}">← {{ 'Itens de compra' if return_to.partition('?')[0] == '/itens' else 'Contratações' }} · voltar aos filtros</a></p>
+<p><a href="/ia?tab=suggestions&amp;procurement={{ procurement.id }}">Sugestões de IA desta contratação</a> · <a href="/ia?tab=documents&amp;procurement={{ procurement.id }}">Documentos e análises de IA</a></p>
+<details class="panel"><summary>Sugestões de IA · confirmação humana necessária</summary><div id="procurement-ai-content"><a data-company-load href="/ia?tab=suggestions&amp;procurement={{ procurement.id }}" hx-get="/ia?tab=suggestions&amp;procurement={{ procurement.id }}" hx-target="#procurement-ai-content" hx-swap="innerHTML">Carregar sugestões para revisão</a></div></details>
 {% if link_feedback == 'ok' %}<p class="hint">Empresa vinculada ao evento e lead recalculado com a mesma trilha de evidência.</p>{% endif %}
 
 <header class="procurement-header">
@@ -26,6 +37,7 @@
   <div class="header-actions">
     <span class="badge">{{ procurement.status }}</span>
     {% if procurement.official_url %}<a class="button secondary" href="{{ procurement.official_url }}" target="_blank" rel="noopener">Abrir fonte oficial</a>{% endif %}
+    {% if origin_platform_url %}<a class="button secondary" href="{{ origin_platform_url }}" target="_blank" rel="noopener noreferrer">Plataforma de origem</a>{% endif %}
   </div>
 </header>
 
@@ -55,6 +67,40 @@
   {% endif %}
 </section>
 
+{% if tce_observations %}
+<section class="panel procurement-section tce-panel" aria-labelledby="tce-title">
+  <div class="section-heading">
+    <div><h2 id="tce-title">TCE-MA · dados complementares</h2><p class="hint">Vínculos confirmados e divergências de identificação para revisão.</p></div>
+    <a href="https://www.tcema.tc.br/servicos/servicos-murais/" target="_blank" rel="noopener noreferrer">Abrir mural</a>
+  </div>
+  <div class="table-wrap"><table class="detail-table">
+    <thead><tr><th>Registro</th><th>Informação da fonte</th><th>Origem</th></tr></thead>
+    <tbody>{% for observation in tce_observations %}
+    {% set value = observation.value %}
+    <tr>
+      <td>{{ {'tce_ma.procedimentolicitatorio':'Procedimento', 'tce_ma.licitante':'Licitante informado', 'tce_ma.resultado':'Resultado informado', 'tce_ma.contrato':'Contrato informado', 'tce_ma.identidade_para_revisao':'Identidade para revisão'}.get(observation.field_name, 'Registro do TCE-MA') }}</td>
+      <td>
+        {% if observation.field_name == 'tce_ma.contrato' %}{{ value.get('numeroContrato') or 'Sem número' }} / {{ value.get('anoContrato') or 'Ano não informado' }}
+        {% if value.get('anoContrato')|int and procurement.year|int and value.get('anoContrato')|int < procurement.year|int %}<small>Ano anterior ao do pregão · conferir na fonte</small>{% endif %}
+        {% elif observation.field_name == 'tce_ma.resultado' %}{{ value.get('nomeTipoResultado') or 'Tipo não informado' }}{% if value.get('dataResultado') %}<small>{{ value.get('dataResultado') }}</small>{% endif %}
+        {% elif observation.field_name == 'tce_ma.licitante' %}{{ value.get('licitante') }}
+        {% elif observation.field_name == 'tce_ma.identidade_para_revisao' %}Mesmo controle PNCP, identificação divergente
+        <small>CNPJ informado pelo TCE: {{ value.get('cnpjProcedimento') or 'Não informado' }} · Pregão: {{ value.get('numeroProcedimento') or '—' }}/{{ value.get('anoProcedimento') or '—' }}</small>
+        {% else %}{{ value.get('idProcedimento') }}{% endif %}
+      </td>
+      <td>
+        {% set document_url = value.get('link_documento') %}
+        {% if document_url is string and (document_url.startswith('https://drive.google.com/') or document_url.startswith('https://www.tcema.tc.br/')) %}
+        <a href="{{ document_url }}" target="_blank" rel="noopener noreferrer">Documento indicado pelo TCE</a>
+        {% endif %}
+        <details><summary>Rastreabilidade</summary><small>Procedimento: {{ value.get('idProcedimento') }}</small><small>Registro de origem: <code>{{ observation.source_record_id }}</code></small></details>
+      </td>
+    </tr>
+    {% endfor %}</tbody>
+  </table></div>
+</section>
+{% endif %}
+
 <section class="panel procurement-section">
   <div class="section-heading">
     <div><h2>Itens</h2><p class="hint">{{ item_count }} {{ 'item encontrado' if item_count == 1 else 'itens encontrados' }}.</p></div>
@@ -63,10 +109,11 @@
       <div><input id="item_query" name="item_query" value="{{ item_query }}" placeholder="Número ou descrição"><button type="submit">Buscar</button></div>
     </form>
   </div>
+  {{ catalog_status('items') }}
   {% if items %}
   <div class="table-wrap"><table class="detail-table item-table">
     <thead><tr><th>Nº</th><th>Descrição</th><th>Quantidade</th><th>Valor unitário</th><th>Valor total</th><th>Situação</th><th>Origem</th></tr></thead>
-    <tbody>{% for item in items %}<tr>
+    <tbody>{% for item in items %}<tr id="item-{{ item.id }}">
       <td class="item-number">{{ item.item_number }}</td>
       <td class="item-description">{% if item.description_is_long %}<details class="description-details"><summary>{{ item.description_summary }}</summary><p>{{ item.description }}</p></details>{% else %}{{ item.description }}{% endif %}</td>
       <td>{{ item.quantity }}</td><td>{{ item.unit_value }}</td><td>{{ item.total_value }}</td>
@@ -74,21 +121,23 @@
     </tr>{% endfor %}</tbody>
   </table></div>
   {% elif item_query %}<p class="empty">Nenhum item corresponde à busca “{{ item_query }}”.</p>
-  {% else %}<p class="empty">Nenhum item publicado.</p>{% endif %}
+  {% else %}<p class="empty">Nenhum item no acervo desta contratação.</p>{% endif %}
 </section>
 
 <section class="panel procurement-section">
   <h2>Documentos</h2>
+  {{ catalog_status('documents') }}
   {% if documents %}
   <div class="table-wrap"><table class="detail-table document-table">
-    <thead><tr><th>Documento</th><th>Tipo</th><th>Data</th><th>Extração</th><th>Link oficial</th><th>Origem</th></tr></thead>
+    <thead><tr><th>Documento</th><th>Tipo</th><th>Data</th><th>Extração</th><th>Consultar</th><th>Origem</th></tr></thead>
     <tbody>{% for document in documents %}<tr>
-      <td>{{ document.title }}</td><td>{{ document.document_type }}</td><td>{{ document.published_at }}</td>
+      <td>{{ document.title }}{% if not document.current %}<small>Documento histórico</small>{% endif %}</td><td>{{ document.document_type }}</td><td>{{ document.published_at }}</td>
       <td><span class="badge extraction-{{ document.extraction_state }}">{{ document.extraction_status }}</span></td>
-      <td><a href="{{ document.official_url }}" target="_blank" rel="noopener">Abrir documento</a></td><td>{{ origin_details(document.origin) }}</td>
+      <td>{% if document.stored_url %}<a href="{{ document.stored_url }}" target="_blank" rel="noopener">{{ document.copy_label }}</a>{% endif %}
+      {% if document.official_url %}<a href="{{ document.official_url }}" target="_blank" rel="noopener noreferrer">Abrir na fonte</a>{% elif not document.stored_url %}Sem link disponível{% endif %}</td><td>{{ origin_details(document.origin) }}</td>
     </tr>{% endfor %}</tbody>
   </table></div>
-  {% else %}<p class="empty">Nenhum documento publicado.</p>{% endif %}
+  {% else %}<p class="empty">Nenhum documento no acervo para esta seleção.</p>{% endif %}
 </section>
 
 <section class="panel procurement-section">

@@ -40,6 +40,8 @@ class LLMWorkItem(UUIDPrimaryKeyMixin, Base):
         GUID(), ForeignKey("document_chunks.id", ondelete="SET NULL")
     )
     snapshot: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    context: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    coverage: Mapped[dict[str, Any] | None] = mapped_column(JSON)
     status: Mapped[str] = mapped_column(String(20), default="pending", nullable=False, index=True)
     attempts: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     next_attempt_at: Mapped[datetime | None] = mapped_column(UTCDateTime())

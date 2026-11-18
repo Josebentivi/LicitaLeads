@@ -37,13 +37,22 @@ def test_alembic_upgrade_head_creates_integrity_columns(tmp_path: Path) -> None:
         monetary_columns = {
             row[1] for row in connection.execute("PRAGMA table_info(participant_values)")
         }
+        work_columns = {row[1] for row in connection.execute("PRAGMA table_info(llm_work_items)")}
+        review_tables = {
+            row[0]
+            for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        }
 
     assert {"is_active", "deactivated_at", "resolved_url"} <= document_columns
     assert "'cancelled'" in participant_sql
     assert "heartbeat_at" in crawl_columns
     assert {"commitment_external_id", "is_current"} <= payment_columns
     assert {"amount", "scope", "lot_number", "evidence_id", "document_hash"} <= monetary_columns
-    assert revision == "0026_participation_integrity"
+    assert {"context", "coverage"} <= work_columns
+    assert "contract_control_number" in payment_columns
+    assert {"llm_suggestions", "llm_event_citations"} <= review_tables
+    assert "municipal_budget_entries" in review_tables
+    assert revision == "0028_municipal_spending"
 
 
 def test_upgrade_legacy_schema_keeps_raw_sentinel_and_unknown_completeness(tmp_path):
@@ -102,6 +111,8 @@ def test_upgrade_legacy_schema_keeps_raw_sentinel_and_unknown_completeness(tmp_p
             "llm_results",
             "llm_attempts",
             "llm_provider_states",
+            "llm_suggestions",
+            "llm_event_citations",
             "fact_verifications",
             "participant_values",
             "document_identities",

@@ -15,6 +15,7 @@ from app.connectors.base import ConnectorResult, DataAvailability
 from app.database import async_session_factory
 from app.models import Document, Evidence, Procurement
 from app.services.application_tests import ApplicationTestService, TestResult
+from app.services.ingestion.complete_collection import CompleteCollection, StepResult
 from app.services.ingestion.pipeline import IngestionPipeline
 from tests.integration.test_collection_continuation import CountingConnector, records
 from tests.integration.test_price_registry_pipeline import PriceRegistryConnector, _registry
@@ -54,6 +55,11 @@ def install_sources():
         return [ControlledConnector(records())]
 
     IngestionPipeline._selected_connectors = selected
+
+    async def municipal(self, ticket, scope):
+        return StepResult("skipped", "Portais municipais simulados")
+
+    CompleteCollection._municipal = municipal
 
 
 class SmallTestService(ApplicationTestService):
@@ -154,6 +160,11 @@ async def scheduler():
 
 
 def main():
+    if os.environ.get("LICITA_RUNTIME_ROLE") == "managed":
+        from tests.support.shutdown_runtime import run_managed
+
+        run_managed()
+        return
     install_sources()
     if os.environ.get("LICITA_RUNTIME_ROLE") == "scheduler":
         asyncio.run(scheduler())
@@ -204,12 +215,31 @@ def main():
         from app.api.routes import crawls
 
         crawls.get_settings = controlled_settings
+        from app import ai_web
+        from app.api.routes import llm
+
+        ai_web.get_settings = controlled_settings
+        llm.get_settings = controlled_settings
 
         asyncio.run(seed())
+        if (ROOT / "force-shutdown-test").exists():
+            from app.services.application_shutdown import ApplicationShutdown
+
+            async def stuck_cleanup(self):
+                await asyncio.Event().wait()
+
+            ApplicationShutdown.finalize = stuck_cleanup
         web._application_tests = SmallTestService(report_path=ROOT / "test-report.json")
-        uvicorn.run(
-            app, host="127.0.0.1", port=int(os.environ["LICITA_RUNTIME_PORT"]), log_level="warning"
+        server = uvicorn.Server(
+            uvicorn.Config(
+                app,
+                host="127.0.0.1",
+                port=int(os.environ["LICITA_RUNTIME_PORT"]),
+                log_level="warning",
+            )
         )
+        app.state.request_server_exit = lambda: setattr(server, "should_exit", True)
+        server.run()
 
 
 if __name__ == "__main__":

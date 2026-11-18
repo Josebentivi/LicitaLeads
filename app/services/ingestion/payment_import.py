@@ -56,6 +56,12 @@ class PaymentImportErrorList(ValueError):
 
 
 _ALIASES = {
+    "contract_control_number": (
+        "contract_control_number",
+        "numero_controle_pncp_contrato",
+        "numero_controle_contrato_pncp",
+        "numerocontrolepncpcontrato",
+    ),
     "external_id": ("external_id", "id_pagamento", "identificador_oficial"),
     "source_updated_at": ("source_updated_at", "data_atualizacao", "ultima_atualizacao"),
     "supplier_cnpj": ("supplier_cnpj", "cnpj", "cnpj_fornecedor", "ni_fornecedor"),
@@ -284,6 +290,7 @@ class PaymentImportService:
                 raw_payload=row,
                 external_id=external_id,
                 contract_number=_pick(row, "contract_number"),
+                contract_control_number=_pick(row, "contract_control_number"),
                 agency_name=_pick(row, "agency_name"),
                 agency_cnpj=agency_cnpj,
                 process_number=_pick(row, "process_number"),

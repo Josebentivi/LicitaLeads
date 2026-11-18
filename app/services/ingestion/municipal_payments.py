@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from contextlib import suppress
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -24,7 +24,7 @@ from app.connectors.municipal_payments.sources import (
     selected_municipal_sources,
 )
 from app.connectors.progress import ProgressEvent
-from app.database import async_session_factory
+from app.database import async_session_factory, write_session
 from app.models import CollectionBatch, CrawlRun, CrawlRunStatus, JobLease, Payment, SourceRecord
 from app.models import DataAvailability as StoredAvailability
 from app.repositories.crawls import JobLeaseRepository
@@ -37,6 +37,24 @@ from app.services.ingestion.pipeline import stable_fingerprint
 MunicipalProgressCallback = Callable[[dict[str, Any]], None]
 
 _municipal_tasks: dict[UUID, asyncio.Task[None]] = {}
+_MUNICIPAL_WRITE_LIMIT = 50
+
+
+def _payment_blocks(payments: list[RawPayment], limit: int) -> Iterator[list[RawPayment]]:
+    """Bound write transactions without splitting the representation of a commitment."""
+    groups: dict[tuple[str, str] | int, list[RawPayment]] = {}
+    for index, row in enumerate(payments):
+        key = (row.source, row.commitment_external_id) if row.commitment_external_id else index
+        groups.setdefault(key, []).append(row)
+
+    block: list[RawPayment] = []
+    for group in groups.values():
+        if block and len(block) + len(group) > limit:
+            yield block
+            block = []
+        block.extend(group)
+    if block:
+        yield block
 
 
 def register_municipal_task(run_id: UUID, task: asyncio.Task[None]) -> None:
@@ -258,7 +276,10 @@ class MunicipalPaymentIngestionService:
             if hasattr(connector, "on_activity"):
                 connector.on_activity = self._report_activity
             await self._checkpoint()
-            result = await coordinator.pending_result(connector_name, RawPayment)
+            result = await coordinator.pending_result(
+                connector_name, RawPayment, include_raw_records=False
+            )
+            replaying = result is not None
             if result is None:
                 result = await connector.discover_payments(
                     year=year, company_cnpj=company_cnpj, include_details=include
@@ -274,26 +295,29 @@ class MunicipalPaymentIngestionService:
                 )
             await self._set_run_progress(
                 run_id,
-                stage="persisting",
-                message="Gravando pagamentos...",
+                stage="preparing",
+                message="Preparando registros recebidos...",
                 total=len(result.data),
                 progress_callback=progress_callback,
             )
             if await self._cancel_requested(run_id):
                 raise asyncio.CancelledError
-            source_record_ids = await self._persist_source_records(run_id, result)
-            attached = self._attach_source_records(
-                result.data, result.raw_records, source_record_ids
-            )
-            await coordinator.stage(
-                connector_name,
-                result.model_copy(update={"data": attached}),
-                {
-                    raw.record_key: value
-                    for raw, value in zip(result.raw_records, source_record_ids, strict=True)
-                },
-            )
-            pending_payments = await coordinator.select_records(connector_name, RawPayment)
+            if replaying:
+                pending_payments = result.data
+            else:
+                source_record_ids = await self._persist_source_records(run_id, result)
+                attached = self._attach_source_records(
+                    result.data, result.raw_records, source_record_ids
+                )
+                await coordinator.stage(
+                    connector_name,
+                    result.model_copy(update={"data": attached}),
+                    {
+                        raw.record_key: value
+                        for raw, value in zip(result.raw_records, source_record_ids, strict=True)
+                    },
+                )
+                pending_payments = await coordinator.select_records(connector_name, RawPayment)
             limit = self.settings.municipal_payment_max_records
             payments = await coordinator.payment_slice(connector_name, pending_payments, limit)
             if limit and len(pending_payments) > limit:
@@ -303,69 +327,28 @@ class MunicipalPaymentIngestionService:
                 )
                 result = result.model_copy(update={"partial": True})
 
-            def report_payments(processed: int, total: int) -> None:
-                if progress_callback is not None:
-                    progress_callback(
-                        {
-                            "stage": "persisting",
-                            "message": "Gravando lote — aguardando confirmação",
-                            "processed": 0,
-                            "total": total,
-                        }
-                    )
-
-            async with self.session_factory() as session, session.begin():
-                await self._assert_fence(session)
-                session.info["crawl_run_id"] = run_id
-                session.info["collection_coordinator"] = coordinator
-                payments = await self._supersede_aggregates(session, payments, year=year)
-                current_groups = {
-                    row.commitment_external_id
-                    for row in payments
-                    if getattr(row, "is_current", True)
-                }
-                if any(
-                    not getattr(row, "is_current", True)
-                    and (
-                        row.status == "detalhe_empenho"
-                        or row.commitment_external_id not in current_groups
-                    )
-                    for row in payments
-                ):
-                    result.partial = True
-                    summary.diagnostic = "; ".join(
-                        filter(
-                            None,
-                            (
-                                summary.diagnostic,
-                                "detalhes incompletos ou identidade legada ambígua; histórico preservado para revisão",
-                            ),
-                        )
-                    )
-                persisted = await self.payment_ingestion.persist_raw_payments(
-                    payments,
-                    source_record_id=None,
-                    progress_callback=report_payments,
-                    session=session,
-                    checkpoint=self._assert_fence,
+            await self._set_run_progress(
+                run_id,
+                stage="persisting",
+                message="Gravando pagamentos em blocos...",
+                total=len(payments),
+                progress_callback=progress_callback,
+            )
+            processed, needs_review = await self._write_payment_blocks(
+                run_id, coordinator, payments, year, progress_callback
+            )
+            if needs_review:
+                result.partial = True
+                review = "detalhes incompletos ou identidade legada ambígua; histórico preservado para revisão"
+                summary.diagnostic = (
+                    f"{summary.diagnostic}; {review}" if summary.diagnostic else review
                 )
-            summary.payments_created = persisted.payments_created
-            summary.payments_updated = persisted.payments_updated
-            for key in (
-                "payments_changed",
-                "payments_unchanged",
-                "payments_stale_ignored",
-                "payments_conflicted",
-            ):
-                setattr(summary, key, getattr(persisted, key))
-            summary.payments_linked = persisted.payments_linked
-            summary.payments_unlinked = persisted.payments_unlinked
             await self._set_run_progress(
                 run_id,
                 stage="finalizing",
                 message="Finalizando coleta...",
-                processed=summary.records_found,
-                total=summary.records_found,
+                processed=processed,
+                total=len(payments),
                 progress_callback=progress_callback,
             )
             status = (
@@ -381,30 +364,12 @@ class MunicipalPaymentIngestionService:
             await self._finish_run(run_id, summary, status)
         except asyncio.CancelledError:
             summary.diagnostic = "coleta cancelada pelo operador"
-            if progress_callback is not None:
-                progress_callback(
-                    {
-                        "stage": "cancelled",
-                        "message": summary.diagnostic,
-                        "processed": summary.records_found,
-                        "total": summary.records_found or None,
-                    }
-                )
-            await self._finish_run(run_id, summary, CrawlRunStatus.CANCELLED)
+            await self._finish_run(run_id, summary, CrawlRunStatus.CANCELLED, progress_callback)
             raise
         except Exception as exc:  # noqa: BLE001 - the run must record the failure
             summary.availability = DataAvailability.TEMPORARY_ERROR
             summary.diagnostic = f"{type(exc).__name__}: {exc}"
-            if progress_callback is not None:
-                progress_callback(
-                    {
-                        "stage": "failed",
-                        "message": summary.diagnostic,
-                        "processed": summary.records_found,
-                        "total": summary.records_found or None,
-                    }
-                )
-            await self._finish_run(run_id, summary, CrawlRunStatus.FAILED)
+            await self._finish_run(run_id, summary, CrawlRunStatus.FAILED, progress_callback)
         finally:
             recorder = self._execution().progress
             if recorder is not None:
@@ -492,6 +457,80 @@ class MunicipalPaymentIngestionService:
                 await session.scalar(select(CrawlRun.cancel_requested).where(CrawlRun.id == run_id))
             )
 
+    async def _write_payment_blocks(
+        self,
+        run_id: UUID,
+        coordinator: CollectionCoordinator,
+        payments: list[RawPayment],
+        year: int,
+        progress_callback: MunicipalProgressCallback | None,
+    ) -> tuple[int, bool]:
+        processed = 0
+        total = len(payments)
+        needs_review = False
+        limit = min(self.settings.payment_ingestion_batch_size, _MUNICIPAL_WRITE_LIMIT)
+        recorder = self._execution().progress
+        message = "Gravando pagamentos em blocos..."
+        for block in _payment_blocks(payments, limit):
+            async with write_session(self.session_factory) as session:
+                await self._assert_fence(session)
+                run = await session.get_one(CrawlRun, run_id)
+                records_found = run.records_found
+                session.info["crawl_run_id"] = run_id
+                session.info["collection_coordinator"] = coordinator
+                reconciled = await self._supersede_aggregates(session, block, year=year)
+                current_groups = {
+                    (row.source, row.commitment_external_id)
+                    for row in reconciled
+                    if getattr(row, "is_current", True)
+                }
+                needs_review = needs_review or any(
+                    not getattr(row, "is_current", True)
+                    and (
+                        row.status == "detalhe_empenho"
+                        or (row.source, row.commitment_external_id) not in current_groups
+                    )
+                    for row in reconciled
+                )
+                persisted = await self.payment_ingestion.persist_raw_payments(
+                    reconciled, session=session, checkpoint=self._assert_fence
+                )
+                now = datetime.now(UTC)
+                run.records_found = records_found
+                processed = run.records_created + run.records_updated
+                run.heartbeat_at = now
+                payload = {
+                    "stage": "persisting",
+                    "message": message,
+                    "processed": processed,
+                    "total": total,
+                    "updated_at": now.isoformat(),
+                }
+                cursor = dict(run.cursor or {})
+                cursor.update(payload)
+                cursor["municipal_write"] = {"processed": processed, "total": total}
+                cursor["progress"] = {**payload, "source": self._execution().lease}
+                cursor["payments_linked"] = (
+                    int(cursor.get("payments_linked") or 0) + persisted.payments_linked
+                )
+                cursor["payments_unlinked"] = (
+                    int(cursor.get("payments_unlinked") or 0) + persisted.payments_unlinked
+                )
+                run.cursor = cursor
+            if recorder is not None:
+                recorder.record(
+                    ProgressEvent(
+                        stage="persisting",
+                        source=self._execution().lease,
+                        message=message,
+                        processed=processed,
+                        total=total,
+                    )
+                )
+            if progress_callback is not None:
+                progress_callback(payload)
+        return processed, needs_review
+
     async def _set_run_progress(
         self,
         run_id: UUID,
@@ -508,10 +547,8 @@ class MunicipalPaymentIngestionService:
             recorder.record(
                 ProgressEvent(
                     stage=stage,
-                    source=f"municipal:{(self._execution().lease or '').removeprefix('municipal:')}",
-                    message="Gravando lote — aguardando confirmação"
-                    if stage == "persisting"
-                    else message,
+                    source=self._execution().lease,
+                    message=message,
                     processed=processed,
                     total=total,
                 )
@@ -523,21 +560,23 @@ class MunicipalPaymentIngestionService:
             "total": total,
             "updated_at": datetime.now(UTC).isoformat(),
         }
-        if progress_callback is not None:
-            progress_callback(payload)
-        async with self.session_factory() as session, session.begin():
+        async with write_session(self.session_factory) as session:
+            await self._assert_fence(session)
             run = await session.get(CrawlRun, run_id)
             if run is None:
                 return
-            await self._assert_fence(session)
             cursor = dict(run.cursor or {})
             cursor.update(payload)
+            if stage == "persisting":
+                cursor["municipal_write"] = {"processed": processed, "total": total}
             run.cursor = cursor
-            if stage == "persisting" and total is not None:
+            if stage == "preparing" and total is not None:
                 run.records_found = total
             if recorder is not None:
                 recorder.apply(run)
             run.heartbeat_at = datetime.now(UTC)
+        if progress_callback is not None:
+            progress_callback(payload)
 
     async def _report_activity(self, event: ProgressEvent) -> None:
         recorder = self._execution().progress
@@ -545,7 +584,7 @@ class MunicipalPaymentIngestionService:
             await recorder.observe(event, self._persist_activity)
 
     async def _persist_activity(self) -> None:
-        async with self.session_factory() as session, session.begin():
+        async with write_session(self.session_factory) as session:
             await self._assert_fence(session)
             run = await session.get(CrawlRun, self._execution().run_id)
             recorder = self._execution().progress
@@ -572,6 +611,43 @@ class MunicipalPaymentIngestionService:
         for item in payments:
             if item.commitment_external_id:
                 groups.setdefault((item.source, item.commitment_external_id), []).append(item)
+        identities: set[str] = set()
+        numbers_by_source: dict[str, set[str]] = {}
+        for (source, identity), rows in groups.items():
+            if not any(row.status in {"detalhe_empenho", "agregado_por_empenho"} for row in rows):
+                continue
+            identities.add(identity)
+            numbers_by_source.setdefault(source, set()).update(
+                row.commitment_number for row in rows if row.commitment_number
+            )
+        current_by_identity: dict[tuple[str, str], list[Payment]] = {}
+        legacy_by_number: dict[tuple[str, str], set[str]] = {}
+        # Read the affected commitments together. On SQLite, IS TRUE makes the
+        # planner prefer the low-selectivity is_current index over the PKEMP
+        # index. IS NOT FALSE is equivalent for this non-nullable column.
+        if identities:
+            for row in await session.scalars(
+                select(Payment).where(
+                    Payment.commitment_external_id.in_(identities),
+                    Payment.is_current.is_not(False),
+                )
+            ):
+                official_id = row.commitment_external_id
+                if official_id is not None and (key := (row.source, official_id)) in groups:
+                    current_by_identity.setdefault(key, []).append(row)
+        for source, source_numbers in numbers_by_source.items():
+            ordered_numbers = sorted(source_numbers)
+            for offset in range(0, len(ordered_numbers), 500):
+                for number, external_id in await session.execute(
+                    select(Payment.commitment_number, Payment.external_id).where(
+                        Payment.source == source,
+                        Payment.commitment_external_id.is_(None),
+                        Payment.commitment_number.in_(ordered_numbers[offset : offset + 500]),
+                        Payment.is_current.is_not(False),
+                    )
+                ):
+                    if number is not None:
+                        legacy_by_number.setdefault((source, number), set()).add(external_id)
         selected: dict[tuple[str, str], str] = {}
         for key, rows in groups.items():
             details = [row for row in rows if row.status == "detalhe_empenho"]
@@ -582,36 +658,14 @@ class MunicipalPaymentIngestionService:
             source, identity = key
             # Legacy rows lacking PKEMP cannot safely be retired by number alone.
             numbers = {row.commitment_number for row in rows if row.commitment_number}
-            legacy = (
-                await session.scalar(
-                    select(Payment.id)
-                    .where(
-                        Payment.source == source,
-                        Payment.commitment_external_id.is_(None),
-                        Payment.commitment_number.in_(numbers),
-                        Payment.external_id.not_in([row.external_id for row in rows]),
-                        Payment.is_current.is_(True),
-                    )
-                    .limit(1)
-                )
-                if numbers
-                else None
-            )
-            if legacy is not None:
+            incoming_ids = {row.external_id for row in rows}
+            if any(
+                legacy_by_number.get((source, number), set()) - incoming_ids for number in numbers
+            ):
                 continue
+            current_rows = current_by_identity.get((source, identity), [])
             if not complete:
-                existing_details = list(
-                    (
-                        await session.scalars(
-                            select(Payment).where(
-                                Payment.source == source,
-                                Payment.commitment_external_id == identity,
-                                Payment.status == "detalhe_empenho",
-                                Payment.is_current.is_(True),
-                            )
-                        )
-                    ).all()
-                )
+                existing_details = [row for row in current_rows if row.status == "detalhe_empenho"]
                 total = sum((row.amount or Decimal("0") for row in existing_details), Decimal("0"))
                 aggregate_amounts = {
                     row.amount for row in rows if row.status == "agregado_por_empenho"
@@ -620,16 +674,8 @@ class MunicipalPaymentIngestionService:
                     selected[key] = "detalhe_empenho"
                     continue
             selected[key] = "detalhe_empenho" if complete else "agregado_por_empenho"
-            for existing in (
-                await session.scalars(
-                    select(Payment).where(
-                        Payment.source == source,
-                        Payment.commitment_external_id == identity,
-                        Payment.is_current.is_(True),
-                    )
-                )
-            ).all():
-                incoming = {row.external_id for row in rows if row.status == selected[key]}
+            incoming = {row.external_id for row in rows if row.status == selected[key]}
+            for existing in current_rows:
                 if existing.status != selected[key] or existing.external_id not in incoming:
                     trigger = rows[0]
                     install_audit(
@@ -660,9 +706,12 @@ class MunicipalPaymentIngestionService:
     async def _persist_source_records(
         self, run_id: UUID, result: ConnectorResult[list[RawPayment]]
     ) -> list[UUID]:
+        from app.services.municipal_budget import BudgetResponse, projection_rows, store_projection
+
         identifiers: list[UUID] = []
         for raw in result.raw_records:
-            async with self.session_factory() as session, session.begin():
+            async with write_session(self.session_factory) as session:
+                await self._assert_fence(session)
                 entity = await self._source_record(
                     session,
                     run_id,
@@ -675,6 +724,18 @@ class MunicipalPaymentIngestionService:
                     else None,
                 )
                 identifiers.append(entity.id)
+        responses = [
+            BudgetResponse(
+                key, raw.source, raw.request_parameters, raw.raw_payload, raw.http_status
+            )
+            for key, raw in zip(identifiers, result.raw_records, strict=True)
+        ]
+        rows = await asyncio.to_thread(lambda: list(projection_rows(responses)))
+        if rows:
+            async with write_session(self.session_factory) as session:
+                await self._assert_fence(session)
+                connection = await session.connection()
+                await connection.run_sync(store_projection, rows)
         return identifiers
 
     async def _source_record(
@@ -728,8 +789,12 @@ class MunicipalPaymentIngestionService:
         run_id: UUID,
         summary: MunicipalPaymentSummary,
         status: CrawlRunStatus,
+        progress_callback: MunicipalProgressCallback | None = None,
     ) -> None:
-        async with self.session_factory() as session, session.begin():
+        recorder = self._execution().progress
+        if recorder is not None:
+            await recorder.aclose()
+        async with write_session(self.session_factory) as session:
             run = await session.get(CrawlRun, run_id)
             if run is None:
                 return
@@ -740,8 +805,26 @@ class MunicipalPaymentIngestionService:
             if coordinator := self._execution().coordinator:
                 await coordinator.finish_in_session(session, status)
                 batch = await session.get_one(CollectionBatch, coordinator.batch_id)
-                if batch.status == "limited" and status is CrawlRunStatus.COMPLETED:
+                if batch.status in {"limited", "failed"} and status is CrawlRunStatus.COMPLETED:
                     status = CrawlRunStatus.PARTIAL
+                    if batch.status == "failed" and summary.diagnostic is None:
+                        summary.diagnostic = "O lote ainda contém pendências da consulta original."
+            cursor = dict(run.cursor or {})
+            written = cursor.get("municipal_write")
+            if isinstance(written, dict):
+                summary.records_found = run.records_found
+                summary.payments_created = run.records_created
+                summary.payments_updated = run.records_updated
+                summary.payments_changed = run.records_changed or 0
+                summary.payments_unchanged = run.records_unchanged or 0
+                summary.payments_stale_ignored = run.records_stale_ignored or 0
+                summary.payments_conflicted = run.records_conflicted or 0
+                summary.payments_linked = int(cursor.get("payments_linked") or 0)
+                summary.payments_unlinked = int(cursor.get("payments_unlinked") or 0)
+                total = written.get("total")
+            else:
+                total = summary.records_found or None
+            processed = summary.payments_created + summary.payments_updated
             run.status = status
             run.finished_at = datetime.now(UTC)
             run.heartbeat_at = datetime.now(UTC)
@@ -755,33 +838,36 @@ class MunicipalPaymentIngestionService:
             run.records_conflicted = summary.payments_conflicted
             run.diagnostic = summary.diagnostic
             run.errors = [{"message": summary.diagnostic}] if summary.diagnostic else []
+            message = summary.diagnostic or STAGE_LABELS[status.value]
+            progress = {
+                "stage": status.value,
+                "message": message,
+                "processed": processed,
+                "total": total,
+                "updated_at": run.finished_at.isoformat(),
+            }
             run.cursor = {
-                **(run.cursor or {}),
+                **cursor,
+                **progress,
                 "source": summary.source_id,
-                "stage": (
-                    "completed"
-                    if status in {CrawlRunStatus.COMPLETED, CrawlRunStatus.PARTIAL}
-                    else ("cancelled" if status is CrawlRunStatus.CANCELLED else "failed")
-                ),
-                "message": summary.diagnostic
-                or (
-                    "Coleta cancelada" if status is CrawlRunStatus.CANCELLED else "Coleta concluída"
-                ),
-                "processed": summary.records_found,
-                "total": summary.records_found,
                 "availability": summary.availability.value,
                 "payments_created": summary.payments_created,
                 "payments_updated": summary.payments_updated,
                 "payments_linked": summary.payments_linked,
                 "payments_unlinked": summary.payments_unlinked,
-                "updated_at": datetime.now(UTC).isoformat(),
             }
-            recorder = self._execution().progress
             if recorder is not None:
                 recorder.record(
-                    ProgressEvent(stage=status.value, message=STAGE_LABELS.get(status.value))
+                    ProgressEvent(
+                        stage=status.value,
+                        message=message,
+                        processed=processed,
+                        total=total,
+                    )
                 )
                 recorder.apply(run)
+        if progress_callback is not None:
+            progress_callback(progress)
 
     @staticmethod
     def _lease_name(source_id: str) -> str:

@@ -27,7 +27,15 @@
             {% endif %}
           {% endfor %}
         </nav>
-        <div class="topbar-meta"><span class="badge">Dados oficiais · revisão humana</span></div>
+        <div class="topbar-actions">
+          <a class="topbar-opportunities" href="/leads"{% if request.url.path == '/leads' %} aria-current="page"{% endif %}>Oportunidades</a>
+          <form id="complete-collection-form" method="post" action="/crawls/collect" data-submit-once>
+            <button type="submit" data-busy-label="Iniciando…">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12m-5-5 5 5 5-5M4 16v4h16v-4"/></svg>
+              Coletar dados
+            </button>
+          </form>
+        </div>
       </header>
       <main class="container" id="conteudo">
         {% block content %}{% endblock %}

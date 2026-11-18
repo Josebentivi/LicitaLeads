@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models import CrawlRun, JobLease
 from app.models.enums import CrawlRunStatus
 from app.repositories.base import BaseRepository, Page
+from app.runtime_control import register_lease, shutdown_requested
 
 MAINTENANCE_LEASE = "maintenance:exclusive"
 
@@ -93,6 +94,10 @@ class JobLeaseRepository:
             )
 
     async def assert_writes_allowed(self, *, now: datetime) -> None:
+        if shutdown_requested():
+            raise MaintenanceInProgress(
+                "Aplicação em encerramento; novos trabalhos estão bloqueados"
+            )
         await self.lock_acquisitions()
         if await self.session.scalar(
             select(JobLease.name).where(
@@ -109,7 +114,11 @@ class JobLeaseRepository:
         now: datetime,
         expires_at: datetime,
     ) -> bool:
+        if shutdown_requested():
+            return False
         await self.lock_acquisitions()
+        if shutdown_requested():
+            return False
         if name == MAINTENANCE_LEASE:
             active = await self.session.scalar(
                 select(JobLease.name).where(JobLease.expires_at > now).limit(1)
@@ -143,9 +152,11 @@ class JobLeaseRepository:
                         )
                     )
                     await self.session.flush()
+                    register_lease(name, owner_id, 1)
                 return True
             except (IntegrityError, OperationalError):
                 return False
+        generation = lease.version + 1
         result = cast(
             CursorResult[Any],
             await self.session.execute(
@@ -167,6 +178,8 @@ class JobLeaseRepository:
                 )
             ),
         )
+        if result.rowcount:
+            register_lease(name, owner_id, generation)
         return bool(result.rowcount)
 
     async def renew(

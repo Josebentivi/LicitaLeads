@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from decimal import Decimal
+from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -66,6 +67,8 @@ async def list_companies(
     published_to: datetime | None = None,
     has_lead: bool = False,
     active_only: bool = False,
+    origin: Literal["contracts", "payments", "price_registries", "participations"] | None = None,
+    activity_location: str | None = Query(None, max_length=160),
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, object]:
     """List companies with auditable participation counters.
@@ -84,10 +87,17 @@ async def list_companies(
         published_to=published_to,
         has_lead=has_lead,
         active_only=active_only,
+        origin=origin,
+        activity_location=(activity_location or "").strip(),
     )
     return {
         "items": [
-            {"company": model_dict(company), "stats": stats} for company, stats in result.items
+            {
+                "company": model_dict(company),
+                "stats": {key: value for key, value in stats.items() if key != "activity"},
+                "activity": stats["activity"],
+            }
+            for company, stats in result.items
         ],
         "page": result.page,
         "page_size": result.page_size,

@@ -66,16 +66,16 @@ def test_document_retry_and_ai_cancel_retry_forms(browser, runtime):
             (str(deferred),),
         ).fetchone() == ("failed", 1)
     (runtime.root / "enable-ai-controls").touch()
-    browser.get(runtime.url + "/crawls")
+    browser.get(runtime.url + "/ia")
     wait = WebDriverWait(browser, 30)
     wait.until(
         EC.element_to_be_clickable(
-            (By.CSS_SELECTOR, "form[action*='/crawls/llm/'][action$='/cancel'] button")
+            (By.CSS_SELECTOR, "form[action*='/ia/batches/'][action$='/cancel'] button")
         )
     ).click()
     wait.until(
         EC.element_to_be_clickable(
-            (By.CSS_SELECTOR, "form[action*='/crawls/llm/'][action$='/retry'] button")
+            (By.CSS_SELECTOR, "form[action*='/ia/batches/'][action$='/retry'] button")
         )
     ).click()
 

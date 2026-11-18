@@ -1,0 +1,26 @@
+<article class="panel complete-progress" id="coleta-{{ run.id }}" data-crawl-id="{{ run.id }}" data-crawl-status="{{ run.status }}">
+  <header class="section-heading">
+    <div><h3>Coleta completa</h3><p class="hint">{{ run.query_start }} a {{ run.query_end }}</p></div>
+    <span class="badge status-{{ run.status }}">{{ run.status_label }}</span>
+  </header>
+  {% if run.active %}
+  <p role="status">{{ run.message }}</p>
+  <progress value="{{ run.processed }}" max="{{ run.total or run.complete_stages|length }}" aria-label="Etapas verificadas"></progress>
+  {% endif %}
+  {% include "_complete_collection_stages.html" %}
+  {% if run.active or run.has_linked_opportunities or (run.status == 'cancelled' and resumable_crawls) %}
+  <div class="action-row">
+    {% if run.active %}
+    <form method="post" action="/crawls/{{ run.id }}/cancel" data-crawl-cancel>
+      <button id="crawl-cancel-{{ run.id }}" class="button secondary compact" type="submit"{% if run.status_label == 'Cancelando' %} disabled{% endif %}>{{ 'Cancelamento solicitado' if run.status_label == 'Cancelando' else 'Encerrar coleta' }}</button>
+    </form>
+    {% endif %}
+    {% if run.has_linked_opportunities %}
+    <a class="button compact" href="{{ run.result_url }}">{{ run.result_label }}</a>
+    {% endif %}
+    {% if run.status == 'cancelled' and resumable_crawls %}
+    <a href="#lotes-para-continuar">Ver lotes para continuar</a>
+    {% endif %}
+  </div>
+  {% endif %}
+</article>

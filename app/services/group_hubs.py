@@ -19,10 +19,9 @@ from app.models import (
     Contract,
     CrawlRun,
     CrawlRunStatus,
-    Deadline,
-    DeadlineStatus,
     Lead,
     LeadStatus,
+    LLMWorkItem,
     Payment,
     PriceRegistry,
     Procurement,
@@ -81,7 +80,6 @@ class GroupHub:
     recent_title: str | None = None
     recent_rows: tuple[HubRow, ...] = ()
     recent_empty: str = "Nenhum registro recente."
-    show_crawl_form: bool = False
     selected_uf: str = "MA"
 
 
@@ -215,6 +213,12 @@ async def _build_compras(session: AsyncSession, group: NavigationGroup) -> Group
                 open_page.total,
             ),
             HubAction(
+                "Itens de compra",
+                "Buscar descrições, unidades e valores estimados por órgão.",
+                "/itens",
+                "Buscar itens",
+            ),
+            HubAction(
                 "Atas de registro de preços",
                 "Fornecedores, itens, saldos e adesões publicados.",
                 "/atas",
@@ -282,7 +286,9 @@ async def _build_financeiro(session: AsyncSession, group: NavigationGroup) -> Gr
                 if value
             ),
             meta=f"{_currency(payment.amount)} · {_local_datetime(payment.payment_date)}",
-            href="/pagamentos",
+            href=f"/pagamentos?match_status=review&supplier_cnpj={payment.supplier_cnpj}"
+            if payment.supplier_cnpj
+            else "/pagamentos?match_status=review",
             status="Não conciliado",
             status_class="status-partial",
         )
@@ -294,7 +300,7 @@ async def _build_financeiro(session: AsyncSession, group: NavigationGroup) -> Gr
             HubAlert(
                 title="Conciliação pendente",
                 message=f"{unlinked} pagamento(s) sem contrato conciliado.",
-                href="/pagamentos",
+                href="/pagamentos?match_status=review",
                 label="Revisar pagamentos",
                 severity="warning",
             )
@@ -325,6 +331,12 @@ async def _build_financeiro(session: AsyncSession, group: NavigationGroup) -> Gr
         ),
         actions=(
             HubAction(
+                "Despesas municipais por função",
+                "Consulte os empenhos do acervo por município, função orçamentária e exercício.",
+                "/pagamentos?municipality=all",
+                "Consultar despesas",
+            ),
+            HubAction(
                 "Importar exportação",
                 "CSV ou JSON do portal, com proveniência por linha.",
                 "/pagamentos#importar",
@@ -352,7 +364,9 @@ async def _build_financeiro(session: AsyncSession, group: NavigationGroup) -> Gr
 
 
 async def _build_oportunidades(session: AsyncSession, group: NavigationGroup) -> GroupHub:
-    from app.services.participation_integrity import deadline_current, lead_current
+    from app.services.opportunity_workspace import OpportunityFilters, opportunity_count
+    from app.services.participation_integrity import lead_current
+    from app.web import _lead_views
 
     leads_total = await _count(session, select(func.count(Lead.id)).where(lead_current()))
     pending = await _count(
@@ -362,11 +376,8 @@ async def _build_oportunidades(session: AsyncSession, group: NavigationGroup) ->
         ),
     )
     companies = await _count(session, select(func.count(Company.id)))
-    due_24h = await _count(
-        session,
-        select(func.count(Deadline.id)).where(
-            Deadline.status == DeadlineStatus.DUE_WITHIN_24H, deadline_current()
-        ),
+    due_24h = await opportunity_count(
+        session, OpportunityFilters(due="24h", timezone=get_settings().timezone)
     )
     recent = list(
         (
@@ -383,31 +394,24 @@ async def _build_oportunidades(session: AsyncSession, group: NavigationGroup) ->
             )
         ).all()
     )
+    lead_views = await _lead_views(session, recent)
     rows = tuple(
         HubRow(
-            title=lead.company.legal_name or lead.company.normalized_name,
-            subtitle=f"Score {lead.score} · {lead.lead_status.value}",
-            meta=(
-                f"Prazo: {lead.deadline.status.value}"
-                if lead.deadline is not None
-                else "Sem prazo vinculado"
-            ),
-            href=f"/leads/{lead.id}",
-            status=lead.triggering_event.event_type.value,
-            status_class=(
-                "status-partial"
-                if lead.triggering_event.requires_manual_review
-                else "status-completed"
-            ),
+            title=lead.company_name,
+            subtitle=f"Prioridade {lead.score}/100 · {lead.lead_status}",
+            meta=f"{lead.deadline.kind}: {lead.deadline.when}",
+            href=lead.href,
+            status=lead.event_type,
+            status_class=("status-partial" if lead.requires_manual_review else "status-completed"),
         )
-        for lead in recent
+        for lead in lead_views
     )
     alerts: list[HubAlert] = []
     if pending:
         alerts.append(
             HubAlert(
-                title="Leads aguardando revisão",
-                message=f"{pending} lead(s) precisam de decisão humana.",
+                title="Oportunidades aguardando revisão",
+                message=f"{pending} oportunidade(s) precisam de decisão humana.",
                 href="/leads?lead_status=pending_review",
                 label="Revisar fila",
                 severity="warning",
@@ -418,7 +422,7 @@ async def _build_oportunidades(session: AsyncSession, group: NavigationGroup) ->
             HubAlert(
                 title="Prazos em 24 horas",
                 message=f"{due_24h} prazo(s) vencem nas próximas 24 horas.",
-                href="/leads",
+                href="/leads?due=24h",
                 label="Ver leads",
                 severity="danger",
             )
@@ -455,7 +459,7 @@ async def _build_oportunidades(session: AsyncSession, group: NavigationGroup) ->
             HubAction(
                 "Prazos e revisão",
                 "Priorize o que vence e o que ainda precisa de decisão.",
-                "/leads?requires_review=true",
+                "/leads?lead_status=pending_review",
                 "Abrir pendências",
                 pending,
             ),
@@ -550,6 +554,24 @@ async def _build_operacao(session: AsyncSession, group: NavigationGroup) -> Grou
                 active,
             ),
             HubAction(
+                "Alterações do acervo",
+                "Conferir mudanças de vigência, valor e situação desde a última consulta.",
+                "/alteracoes",
+                "Ver alterações",
+            ),
+            HubAction(
+                "Central de IA",
+                "Fila, consumo, documentos e sugestões para revisão.",
+                "/ia",
+                "Abrir Central de IA",
+                await _count(
+                    session,
+                    select(func.count())
+                    .select_from(LLMWorkItem)
+                    .where(LLMWorkItem.status == "pending"),
+                ),
+            ),
+            HubAction(
                 "Fontes",
                 "Matriz de capacidades e limites de cada fonte.",
                 "/source-capabilities",
@@ -566,7 +588,6 @@ async def _build_operacao(session: AsyncSession, group: NavigationGroup) -> Grou
         recent_title="Coletas recentes",
         recent_rows=rows,
         recent_empty="Nenhuma coleta executada.",
-        show_crawl_form=True,
         selected_uf=get_settings().default_uf,
     )
 

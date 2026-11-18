@@ -20,6 +20,14 @@ def nonnegative_int(value: Any) -> int:
         return 0
 
 
+def municipal_write_progress(cursor: dict[str, Any]) -> tuple[int, int] | None:
+    """Read the counters committed together with municipal payment blocks."""
+    write = cursor.get("municipal_write")
+    if not isinstance(write, dict) or write.get("processed") is None or write.get("total") is None:
+        return None
+    return nonnegative_int(write["processed"]), nonnegative_int(write["total"])
+
+
 def seconds_label(value: Any) -> str:
     try:
         number = float(value)
@@ -91,9 +99,16 @@ def monitor_view(run: CrawlRun, base: SimpleNamespace, *, now: datetime) -> Simp
         )
     processed = nonnegative_int(progress.get("processed"))
     total = nonnegative_int(progress.get("total")) if progress.get("total") is not None else None
+    municipal = run.connector.startswith("municipal:")
+    write_progress = municipal_write_progress(cursor) if municipal else None
+    if municipal:
+        examined = nonnegative_int(run.records_created) + nonnegative_int(run.records_updated)
+        if write_progress is not None:
+            processed, total = write_progress
+            examined = processed
     percentage = min(100, int(100 * processed / total)) if total and base.active else None
-    atomic = stage == "persisting" and run.connector.startswith("municipal:")
-    if atomic:
+    atomic = municipal and stage == "persisting" and write_progress is None
+    if atomic or (municipal and stage == "preparing"):
         percentage = None
     heartbeat = timestamp(run.heartbeat_at) or timestamp(run.started_at or run.created_at)
     stale = base.active and heartbeat is not None and (now - heartbeat).total_seconds() > 150
@@ -192,6 +207,8 @@ def monitor_view(run: CrawlRun, base: SimpleNamespace, *, now: datetime) -> Simp
         last_activity=elapsed_label(progress.get("updated_at"), now),
         last_heartbeat=elapsed_label(run.heartbeat_at, now),
         stale=stale,
+        municipal=municipal,
+        municipal_write=write_progress,
         processed=processed,
         total=total,
         percentage=percentage,

@@ -1,42 +1,96 @@
 {% extends "base.html" %}
-{% block title %}Dashboard · LicitaLead Monitor{% endblock %}
+{% block title %}Minha agenda · LicitaLead Monitor{% endblock %}
 {% block content %}
-<div class="page-heading">
-  <div>
-    <p class="eyebrow">Visão geral</p>
-    <h1>Monitor de oportunidades</h1>
+<section class="agenda-header" id="atualizar-dados">
+  <div class="agenda-intro">
+    <h1>Minha agenda de análise</h1>
+    <p>Encontre oportunidades com fatos documentados, confira os prazos e decida o que analisar primeiro.</p>
+    <a class="button" href="/leads">Abrir oportunidades <span aria-hidden="true">→</span></a>
   </div>
-  <form method="post" action="/crawls/run" class="inline-form">
-    <input type="hidden" name="connector" value="all">
-    <label>UF <select name="uf">{% for code, name in ufs %}<option value="{{ code }}"{% if code == selected_uf %} selected{% endif %}>{{ code }} · {{ name }}</option>{% endfor %}</select></label>
-    <label>Dias <input name="days" type="number" min="1" max="365" value="7" size="4"></label>
-    <label>Documentos por lote <input name="batch_size" type="number" min="1" max="500" value="30" size="4"></label>
-    <label class="checkbox"><input type="checkbox" name="process_documents" value="true" checked> Baixar/processar documentos</label>
-    <button type="submit">Executar coleta</button>
-    {% include "_force_refresh_option.html" %}
-  </form>
-</div>
-<section class="metrics" aria-label="Indicadores">
-  {% for label, value in metrics.items() %}
-  <article class="metric">
-    <span>{{ label }}</span>
-    <strong>{{ value }}</strong>
-  </article>
+  <div class="agenda-source">
+    <p class="eyebrow">Atualização dos dados</p>
+    <p class="agenda-source-date">{{ last_collection }}</p>
+    <p class="hint">Última consulta bem-sucedida a uma fonte</p>
+    {% if scheduler.paused %}
+      <p><span class="badge status-pending">Automação pausada</span> <a href="/settings">Ver controles</a></p>
+    {% elif scheduler.enabled and scheduler.alive %}
+      <p><span class="badge status-completed">Atualizações automáticas ativas</span></p>
+    {% elif scheduler.enabled %}
+      <p><a href="/settings">Verificar agendador</a></p>
+    {% endif %}
+    <a href="/crawls#escopo">Ajustar UF e período da coleta</a>
+  </div>
+</section>
+<section class="metrics agenda-metrics" aria-label="O que precisa da sua atenção">
+  {% for item in agenda %}
+  <a class="metric agenda-metric" href="{{ item.href }}">
+    <span>{{ item.title }}</span><strong>{{ item.total }}</strong><small>{{ item.hint }}</small>
+    <span class="agenda-arrow" aria-hidden="true">↗</span>
+  </a>
   {% endfor %}
 </section>
-<section class="panel">
-  <h2>Leads recentes</h2>
+{% if pending_documents %}
+<div class="agenda-notice">
+  <span><strong>{{ pending_documents }}</strong> documento(s) aguardando análise ou OCR.</span>
+  <a href="/crawls">Ver documentos e pendências</a>
+</div>
+{% endif %}
+<section class="panel agenda-results">
+  <div class="section-heading"><h2>Oportunidades para analisar</h2><a href="/leads?lead_status=actionable">Ver fila completa</a></div>
   {% if leads %}
   <div class="table-wrap"><table>
-    <thead><tr><th>Empresa</th><th>Evento</th><th>Score</th><th>Adicionado em</th><th>Prazo</th><th>Revisão</th></tr></thead>
+    <thead><tr><th>Empresa</th><th>Motivo</th><th>Prioridade</th><th>Prazo</th><th>Ação</th></tr></thead>
     <tbody>{% for lead in leads %}<tr>
-      <td><a href="/leads/{{ lead.id }}">{{ lead.company_name or 'Empresa não confirmada' }}</a></td>
-      <td>{{ lead.event_type or 'unknown' }}</td><td>{{ lead.score }}</td>
-      <td>{{ lead.created_at }}</td>
-      <td>{{ lead.deadline_status or 'unknown' }}</td>
-      <td>{{ 'Sim' if lead.requires_manual_review else 'Não' }}</td>
+      <td><a href="{{ lead.href }}">{{ lead.company_name }}</a><small>{{ lead.lead_status }}</small><small>Adicionado em {{ lead.created_at }}</small></td>
+      <td>{{ lead.event_type }}</td>
+      <td><span class="score">{{ lead.score }}/100</span></td>
+      <td>{{ lead.deadline.when }}<small>{{ lead.deadline.kind }}</small></td>
+      <td><a class="button compact secondary" href="{{ lead.href }}">Analisar</a></td>
     </tr>{% endfor %}</tbody>
   </table></div>
-  {% else %}<p class="empty">Nenhum lead criado. Execute o pipeline para começar.</p>{% endif %}
+  {% else %}
+  <div class="empty-state">
+    {% if metrics['Leads'] %}
+    <h3>Nenhuma oportunidade aguarda análise nesta fila</h3>
+    <a href="/leads">Consultar todas as oportunidades</a>
+    {% elif last_procurement_run %}
+    <h3>Nenhuma oportunidade documentada no acervo</h3>
+    <p>Confira quais fontes responderam e quantos documentos chegaram à análise na última coleta de contratações.</p>
+    <a href="#ultimo-lote">Ver cobertura da última coleta</a>
+    {% else %}
+    <h3>As oportunidades vão aparecer aqui</h3>
+    <p>Use <strong>Coletar dados</strong> para consultar as fontes de {{ selected_uf }} e analisar os documentos. O período padrão cobre {{ collection_days }} dias.</p>
+    <a href="/crawls">Ver o escopo e acompanhar a coleta</a>
+    {% endif %}
+  </div>
+  {% endif %}
 </section>
+{% if last_procurement_run %}
+{% set run = last_procurement_run %}
+<section class="panel" id="ultimo-lote" aria-labelledby="ultimo-lote-titulo">
+  <div class="section-heading"><h2 id="ultimo-lote-titulo">Última coleta de contratações</h2><a href="/crawls?run={{ run.id }}#execucao-{{ run.id }}">Ver execução e diagnóstico</a></div>
+  <p>{{ run.connector_label }} · {{ run.status_label }} · Início: {{ run.started_at }}</p>
+  {% for source in run.sources if source.retryable %}
+    <p><strong>{{ source.label }} · {{ source.status_label }}</strong>
+      <a href="/crawls?run={{ run.id }}#execucao-{{ run.id }}">Conferir falha e tentar {{ source.label }} novamente</a>
+    </p>
+  {% endfor %}
+  <dl class="facts">
+    <div><dt>Registros encontrados nas fontes</dt><dd>{{ run.records_found }}</dd></div>
+    <div><dt>Contratações novas</dt><dd>{{ run.records_created }}</dd></div>
+    {% for label, value in document_counts.items() %}<div><dt>{{ label }}</dt><dd>{{ value }}</dd></div>{% endfor %}
+  </dl>
+  {% if run.has_document_batch %}<p class="hint">A etapa documental usa a fila do acervo e pode examinar documentos de contratações anteriores.{% if not document_counts %} Contadores da etapa ainda indisponíveis.{% endif %}</p>
+  {% else %}<p class="hint">Esta execução não tem etapa documental registrada.</p>{% endif %}
+  <div class="action-row"><a href="{{ run.records_url }}">Ver contratações vinculadas</a>
+    {% if run.has_document_batch %}<a href="/crawls/{{ run.id }}/documents">{{ 'Conferir falhas e próximas tentativas' if document_counts.get('Falhas de processamento', 0) > 0 else 'Ver arquivos deste lote' }}</a>{% endif %}
+    <a href="{{ run.result_url }}">Ver oportunidades vinculadas</a>
+  </div>
+</section>
+{% endif %}
+<details class="panel"><summary>Indicadores do acervo</summary>
+  <section class="metrics" aria-label="Indicadores">{% for label,value in metrics.items() %}
+    <article class="metric"><span>{{ label }}</span><strong>{{ value }}</strong></article>
+  {% endfor %}</section>
+</details>
 {% endblock %}

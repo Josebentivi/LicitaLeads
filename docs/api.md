@@ -1,5 +1,72 @@
 # API e interface web
 
+## Agenda e navegação de análise
+
+`GET /dashboard` mostra a agenda do analista e o estado das atualizações.
+Na interface, `GET /leads` aceita `q` (empresa, CNPJ ou processo), `lead_status`,
+`due` (`today`, `24h`, `72h`), `event_type`, `min_score`, `requires_review`,
+`created_from`, `created_to`, `include_history`, `run` (UUID da coleta) e `page`.
+Esses filtros web não alteram o contrato de `GET /api/leads`.
+
+`GET /procurements` também oferece `q`, `published_from`, `published_to` e `run`.
+O recorte por coleta usa vínculos de origem e documentos do lote; pode incluir
+oportunidades anteriores dessas contratações, não apenas as criadas na execução.
+Filtros inválidos não são silenciosamente removidos para ampliar a busca.
+
+`GET /evidencias/{id}` é a visão HTML da evidência, com trecho escapado,
+localizador e links de origem. `GET /api/evidence/{id}` continua retornando
+metadados JSON. Datas-base de cálculo nunca substituem a data-limite ausente.
+
+O formulário `POST /leads/{id}/review` aceita `decision`, `reviewer`, `notes`,
+`return_to` e `continue_review`. Destinos de retorno são restritos a `/leads`
+com seus filtros locais; registros históricos/invalidados não aceitam revisão
+nova por esse formulário. Erros mantêm os campos e o sucesso é confirmado na tela.
+Os formulários de coleta também reapresentam campos não secretos em erros 422.
+Veja [experiência do analista](experiencia_usuario.md).
+
+## Encerramento da aplicação
+
+O rodapé da sidebar abre `GET /application/shutdown`, com confirmação e alternativa
+sem JavaScript. O encerramento completo exige inicialização pelo `iniciar.bat` e
+conexão local; iniciar somente a API não permite controlar o scheduler externo.
+
+- `GET /api/application/shutdown`: disponibilidade, identificador e progresso do
+  encerramento. Não retorna o token privado de controle.
+- `POST /api/application/shutdown`: corpo `{"token": "<confirmação da página>"}`,
+  cabeçalho `Origin` da própria aplicação; retorna `202`. Chamadas repetidas
+  retornam o mesmo identificador. Origem, token ou conexão inválidos recebem `403`;
+  supervisão indisponível recebe `409`.
+- `POST /application/shutdown`: formulário com o mesmo token e comportamento.
+
+Durante o encerramento, novas ações de alteração recebem `503`. Coletas e IA
+ficam pausadas na próxima abertura; trabalhos pendentes e ativos são cancelados,
+sem remover dados concluídos. O launcher reserva 60 segundos para limpeza
+cooperativa e registra processos que precisem de finalização forçada. Perda de
+comunicação não comprova encerramento completo. Nenhum PID ou comando é aceito
+nessas interfaces.
+
+## Central de IA
+
+`GET /ia` reúne Resumo, Documentos e análises, Sugestões para revisão, Consumo e
+Configuração. HTML e API usam os mesmos serviços; listagens têm 20 registros por
+página. Filtros: `run`, `procurement` (UUIDs), `company` (CNPJ exato), `source` e
+`status`. O filtro de empresa nos documentos representa contexto das contratações;
+nas sugestões, exige a identidade candidata exata.
+
+- `GET /api/llm/overview`: fila, controles, consumo e configuração sem segredos.
+- `GET /api/llm/documents` e `/documents/{id}`: documentos e análises paginadas.
+- `GET /api/llm/jobs/{id}`: resultado, cobertura, evidências e tentativas recentes.
+- `GET /api/llm/suggestions` e `/suggestions/{id}`: candidatos separados dos fatos.
+- `POST /api/llm/controls/{collections|llm}`: corpo `{"paused": true}`.
+- `POST /api/llm/documents/{id}/enqueue`: enfileiramento local, resposta `202`.
+- `POST /api/llm/batches/{id}/{cancel|retry}`: ações elegíveis, resposta `202`.
+- `POST /api/llm/suggestions/{id}/{confirm|reject}`: `company_id` na confirmação,
+  `reviewer` e `note` opcionais. Retorna `409` para revisão anterior, evidência
+  obsoleta, identidade incompatível ou conflito; `404` para recurso inexistente.
+
+Essas ações não executam chamadas ao LLM na requisição web. A manutenção mantém
+os bloqueios existentes. Endpoints antigos de IA sob `/api/crawls` são preservados.
+
 Aplicação FastAPI. Com `python run.py`, a UI fica em
 <http://localhost:8000>, o Swagger em <http://localhost:8000/docs> e a
 verificação em <http://localhost:8000/health>.
@@ -107,7 +174,8 @@ com janela inicial e de revisão herdada de `DEFAULT_LOOKBACK_DAYS` (30 dias),
 salvo override explícito de `PRICE_REGISTRY_LOOKBACK_DAYS`. Somente os órgãos/unidades
 conhecidos da UF e suas fontes elegíveis são consultados, respeitando a pausa geral. Na
 interface, `/atas` oferece um formulário de coleta manual com UF, órgão/unidade,
-fonte e dias (inicialmente o menor entre 7 e a janela automática configurada).
+fonte e período De/Até (inicialmente o menor entre 7 e a janela automática
+configurada).
 A lista reúne unidades já identificadas em
 contratações coletadas; ela pode estar incompleta e não representa cobertura
 integral da UF. A seleção envia CNPJ e unidade à fonte, sem iniciar uma consulta
@@ -121,9 +189,10 @@ O formulário não altera o agendamento. HTTP 204 e listas vazias bem-sucedidas
 são registrados como consulta concluída sem resultados.
 
 `GET /atas/collection-scopes?uf=MA` fornece as opções do formulário.
-`POST /atas/collect` recebe `uf`, `registry_scope`, `connector` e `days`;
-`registry_scope=all` seleciona todas as unidades conhecidas e `connector=all`
-seleciona suas fontes disponíveis.
+`POST /atas/collect` recebe `uf`, `registry_scope`, `connector`, `start_date` e
+`end_date`; `days` continua aceito como fallback quando as datas não são
+informadas. `registry_scope=all` seleciona todas as unidades conhecidas e
+`connector=all` seleciona suas fontes disponíveis.
 seleções ausentes, desconhecidas ou incompatíveis retornam 422.
 Na API, `POST /api/crawls/run` também aceita `unit_code` opcional (até 30 caracteres).
 Unidade, órgão e período permanecem nos filtros de repetição e continuação.
@@ -177,7 +246,9 @@ Corpo de `POST /api/crawls/run`: `connector` (`pncp`, `compras_gov`, `all`),
 `start_date`+`end_date`), `modalities`, `municipality`, `agency`, `agency_cnpj`,
 `unit_code`, `keyword`, `document_batch_size`, `discovery_kind` (`publication`,
 `update` ou `open_proposals`) e `force_refresh` (padrão `false`). As datas
-explícitas devem ser fornecidas em conjunto e em ordem. O corpo aceito não
+explícitas devem ser fornecidas em conjunto e em ordem e, quando presentes,
+têm prioridade sobre `days`. Os formulários web enviam `start_date`/`end_date`
+pelos campos De/Até. O corpo aceito não
 contém um campo `process_documents`; a opção documental da interface pertence
 ao formulário web. Campos extras são ignorados pelo modelo atual: enviar
 `process_documents=false` não desliga o processamento. A solicitação de
@@ -302,6 +373,18 @@ oferece as ações de retentativa e cancelamento dos lotes de IA.
 | `GET /api/payments/sources` | Lista fontes federais/manuais/municipais configuradas |
 | `GET /api/payments/municipal/sources` | Lista as cinco fontes municipais, configuracao e ultima coleta |
 | `POST /api/payments/municipal/run` | Coleta uma fonte municipal: `source`, `year`, `include_details`, `company_cnpj` |
+
+Em `GET /api/contracts`, o filtro `expiring_within_days` aceita de 1 a 365 dias.
+A janela inclui hoje e o último dia em horário de Brasília. Ordena os contratos pela
+primeira data publicada no intervalo. `valid_until` conserva a data do cabeçalho
+e `term_expirations` apresenta as datas dos termos com situação e origem para conferência.
+
+No detalhe do contrato, `payment_summary.payment_count` conta os registros vigentes
+da fase de pagamento vinculados ao contrato. `paid_value` e `balance` ficam nulos
+quando a contagem é zero ou algum desses registros está sem valor. A situação
+`pago` exige pagamentos de valor positivo que atinjam o valor contratual de
+referência. Essa referência usa o primeiro valor publicado entre global, acumulado
+e inicial, preservando zero. A ausência de registros descreve o acervo local.
 
 As fontes municipais de Sao Luis, Imperatriz, Timon, Caxias e Bacabal sao
 independentes. Uma falha fica registrada como `CrawlRun` com status `failed` e

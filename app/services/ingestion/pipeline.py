@@ -18,6 +18,7 @@ from zoneinfo import ZoneInfo
 
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.orm import load_only
 
 from app.config import Settings, get_settings
 from app.connectors.base import (
@@ -90,6 +91,7 @@ from app.services.identifiers import (
 from app.services.ingestion.collection_batches import (
     CollectionCoordinator,
     latest_limited_batch,
+    retained_response_fingerprint,
     row_identity,
 )
 from app.services.ingestion.document_retry import DOCUMENT_LEASE
@@ -186,6 +188,7 @@ class PipelineRequest:
     sync_context: dict[str, Any] | None = None
     recheck_key: str | None = None
     price_registry_scopes: tuple[PriceRegistryScope, ...] = ()
+    parent_run_id: UUID | None = None
 
     def filters(self) -> ProcurementFilters:
         return ProcurementFilters(
@@ -231,6 +234,7 @@ class PipelineRequest:
                 "force_refresh": self.force_refresh,
                 **({"sync_context": self.sync_context} if self.sync_context else {}),
                 **({"recheck_key": self.recheck_key} if self.recheck_key else {}),
+                **({"parent_run_id": str(self.parent_run_id)} if self.parent_run_id else {}),
                 **(
                     {"price_registry_scopes": [asdict(item) for item in self.price_registry_scopes]}
                     if self.price_registry_scopes
@@ -1535,31 +1539,40 @@ class IngestionPipeline:
                 "accumulated_value": raw.accumulated_value,
                 "is_adhesion": raw.is_adhesion,
                 "supplier_cnpj": supplier_cnpj,
-                "supplier_name": raw.supplier_name,
                 "source_url": raw.source_url,
             }.items():
-                if value is not None:
+                if value is not None or name in raw.cleared_fields:
                     setattr(contract, name, value)
-            if raw.procurement_control_number:
+            await session.flush()
+            if (raw.supplier_name is not None or "supplier_name" in raw.cleared_fields) and (
+                not raw.supplier_cnpj or normalize_cnpj(raw.supplier_cnpj) == contract.supplier_cnpj
+            ):
+                contract.supplier_name = raw.supplier_name
+                await session.flush()
+            if contract.procurement_control_number:
                 procurement = await session.scalar(
                     select(Procurement).where(
-                        Procurement.pncp_control_number == raw.procurement_control_number
+                        Procurement.pncp_control_number == contract.procurement_control_number
                     )
                 )
-                if procurement is not None:
-                    contract.procurement_id = procurement.id
-            if raw.price_registry_control_number:
+                contract.procurement_id = procurement.id if procurement else None
+            elif "procurement_control_number" in raw.cleared_fields:
+                contract.procurement_id = None
+            if contract.price_registry_control_number:
                 registry = await session.scalar(
                     select(PriceRegistry).where(
-                        PriceRegistry.pncp_control_number == raw.price_registry_control_number
+                        PriceRegistry.pncp_control_number == contract.price_registry_control_number
                     )
                 )
-                if registry is not None:
-                    contract.price_registry_id = registry.id
-            cnpj = normalize_cnpj(raw.supplier_cnpj)
+                contract.price_registry_id = registry.id if registry else None
+            elif "price_registry_control_number" in raw.cleared_fields:
+                contract.price_registry_id = None
+            cnpj = normalize_cnpj(contract.supplier_cnpj)
             if cnpj and is_valid_cnpj(cnpj):
-                company = await self._get_or_create_company(session, cnpj, raw.supplier_name)
+                company = await self._get_or_create_company(session, cnpj, contract.supplier_name)
                 contract.company_id = company.id
+            elif "supplier_cnpj" in raw.cleared_fields:
+                contract.company_id = None
             for raw_item in items or []:
                 number = raw_item.item_number or raw_item.external_id or "1"
                 fingerprint = stable_fingerprint("contract_item", contract.id, number)
@@ -1723,16 +1736,18 @@ class IngestionPipeline:
                 "source_url": raw.source_url,
             }
             for name, value in values.items():
-                if value is not None:
+                if value is not None or name in raw.cleared_fields:
                     setattr(registry, name, value)
-            if raw.linked_pncp_control_number:
+            await session.flush()
+            if registry.linked_pncp_control_number:
                 procurement = await session.scalar(
                     select(Procurement).where(
-                        Procurement.pncp_control_number == raw.linked_pncp_control_number
+                        Procurement.pncp_control_number == registry.linked_pncp_control_number
                     )
                 )
-                if procurement is not None:
-                    registry.procurement_id = procurement.id
+                registry.procurement_id = procurement.id if procurement else None
+            elif "linked_pncp_control_number" in raw.cleared_fields:
+                registry.procurement_id = None
             await session.flush()
             for raw_item in items:
                 number = raw_item.item_number or raw_item.external_id or "1"
@@ -2049,19 +2064,42 @@ class IngestionPipeline:
         run_id: UUID,
         result: ConnectorResult[Any],
     ) -> list[UUID]:
+        if not result.raw_records:
+            return []
+        complete = result.is_complete
+        pagination = result.pagination.model_dump() if result.pagination else None
+        fingerprints = [retained_response_fingerprint(run_id, raw) for raw in result.raw_records]
         identifiers: list[UUID] = []
-        for raw in result.raw_records:
-            async with write_session(self.session_factory) as session:
+        async with write_session(self.session_factory) as session:
+            await self._assert_fence(session)
+            retained = {
+                entity.fingerprint: entity
+                for entity in (
+                    await session.scalars(
+                        select(SourceRecord)
+                        .options(
+                            load_only(
+                                SourceRecord.fingerprint,
+                                SourceRecord.availability,
+                                SourceRecord.diagnostic,
+                                SourceRecord.collection_complete,
+                                SourceRecord.pagination_metadata,
+                            )
+                        )
+                        .where(SourceRecord.fingerprint.in_(fingerprints))
+                    )
+                ).all()
+            }
+            for raw, fingerprint in zip(result.raw_records, fingerprints, strict=True):
                 entity = await self._source_record(
                     session,
                     run_id,
                     raw,
                     result.availability,
                     result.diagnostic,
-                    collection_complete=result.is_complete,
-                    pagination_metadata=result.pagination.model_dump()
-                    if result.pagination
-                    else None,
+                    collection_complete=complete,
+                    pagination_metadata=pagination,
+                    retained=retained.get(fingerprint),
                 )
                 identifiers.append(entity.id)
         return identifiers
@@ -2076,7 +2114,25 @@ class IngestionPipeline:
         *,
         collection_complete: bool | None = None,
         pagination_metadata: dict[str, Any] | None = None,
+        retained: SourceRecord | None = None,
     ) -> SourceRecord:
+        parsed_availability = DataAvailability(availability.value)
+        if retained is not None and retained.collection_complete is None:
+            # The exact response is already durable. Its validation can be
+            # recorded on the same row without copying the raw body again.
+            retained.availability = parsed_availability
+            retained.diagnostic = diagnostic
+            retained.collection_complete = collection_complete
+            retained.pagination_metadata = pagination_metadata
+            return retained
+        if (
+            retained is not None
+            and retained.collection_complete == collection_complete
+            and retained.pagination_metadata == pagination_metadata
+            and retained.availability == parsed_availability
+            and retained.diagnostic == diagnostic
+        ):
+            return retained
         fingerprint = stable_fingerprint(
             "source_record",
             run_id,
@@ -2087,7 +2143,6 @@ class IngestionPipeline:
             collection_complete,
             _json_value(pagination_metadata),
         )
-        await self._assert_fence(session)
         entity = await session.scalar(
             select(SourceRecord).where(SourceRecord.fingerprint == fingerprint)
         )
@@ -2100,7 +2155,7 @@ class IngestionPipeline:
                 response_hash=raw.response_hash,
                 raw_payload=_json_value(raw.raw_payload),
                 http_status=raw.http_status,
-                availability=DataAvailability(availability.value),
+                availability=parsed_availability,
                 collected_at=raw.collected_at,
                 diagnostic=diagnostic,
                 collection_complete=collection_complete,
@@ -2550,6 +2605,10 @@ class IngestionPipeline:
                 continue
             if raw.person_type and raw.person_type.upper() in {"F", "PF", "CPF"}:
                 continue
+            from app.services.event_detection.authority import nonaward_supplier
+
+            if nonaward_supplier(raw.supplier_name):
+                continue  # Also guard DTOs already saved by an older continuation.
             cnpj = normalize_cnpj(raw.supplier_cnpj)
             if not cnpj or not is_valid_cnpj(cnpj):
                 continue

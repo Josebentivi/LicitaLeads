@@ -20,6 +20,8 @@ from app.repositories.crawls import MAINTENANCE_LEASE, JobLeaseRepository
 from app.services.scheduler_control import set_scheduler_paused
 
 COUNT_TABLE_LABELS: dict[str, str] = {
+    "llm_suggestions": "Sugestões de IA para revisão",
+    "llm_event_citations": "Citações dos eventos de IA",
     "participant_values": "Valores documentais das participantes",
     "fact_verifications": "Verificação dos fatos",
     "document_identities": "Identidades oficiais de documentos",

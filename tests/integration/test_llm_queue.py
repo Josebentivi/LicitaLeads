@@ -527,7 +527,8 @@ async def test_web_queue_and_cancel_preserve_extraction(
     monkeypatch.setattr("app.api.routes.crawls.get_settings", lambda: settings)
     response = await api_client.get("/crawls/progress")
     assert response.status_code == 200 and "fila independente" in response.text
-    assert "US$" in response.text and "500 chamadas/hora" in response.text
+    assert "/ia" in response.text
+    assert "US$" in (await api_client.get("/ia?tab=cost")).text
     assert (await api_client.post(f"/api/crawls/{run_id}/cancel")).status_code == 202
     async with database.sessions() as session:
         assert (
@@ -562,6 +563,43 @@ async def test_demand_reuse_and_new_prompt_or_model_requires_new_work(database, 
             )
             == 1
         )
+        assert await session.scalar(select(func.count()).select_from(LLMWorkItem)) == 2
+
+
+@pytest.mark.parametrize("terminal", ["failed", "cancelled", "obsolete"])
+async def test_central_enqueue_reactivates_existing_demand_once(
+    database, settings, api_client, monkeypatch, terminal
+):
+    monkeypatch.setattr("app.api.routes.llm.get_settings", lambda: settings)
+    document_id, _ = await seed(database, settings, count=2)
+    url = f"/api/llm/documents/{document_id}/enqueue"
+    first = await api_client.post(url)
+    assert first.status_code == 202 and first.json() == {"enqueued": 2}
+    async with write_session(database.sessions) as session:
+        batch = (
+            await session.scalars(select(LLMBatch).where(LLMBatch.label == "Central de IA"))
+        ).one()
+        demands = select(LLMDemand).where(LLMDemand.batch_id == batch.id).order_by(LLMDemand.id)
+        original = (await session.scalars(demands)).all()
+        original_ids = [(demand.id, demand.work_id) for demand in original]
+        assert len(original_ids) == 2
+        work_id = original[0].work_id
+        work = await session.get_one(LLMWorkItem, work_id)
+        work.status, work.error, work.attempts = terminal, {"code": "archived_error"}, 3
+        work.next_attempt_at = datetime.now(UTC) + timedelta(hours=1)
+
+    retry = await api_client.post(url)
+    assert retry.status_code == 202 and retry.json() == {"enqueued": 1}
+    assert (await api_client.post(url)).status_code == 409
+    async with database.sessions() as session:
+        work = await session.get_one(LLMWorkItem, work_id)
+        assert (work.status, work.error, work.attempts, work.next_attempt_at) == (
+            "pending",
+            None,
+            0,
+            None,
+        )
+        assert [(d.id, d.work_id) for d in await session.scalars(demands)] == original_ids
         assert await session.scalar(select(func.count()).select_from(LLMWorkItem)) == 2
 
 

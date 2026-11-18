@@ -1,45 +1,36 @@
 {% extends "base.html" %}
-{% from "_macros.html" import info_tip %}
-{% block title %}Lead · LicitaLead Monitor{% endblock %}
+{% block title %}Oportunidade · LicitaLead Monitor{% endblock %}
 {% block content %}
-<p><a href="/leads">← Leads</a></p>
-<div class="page-heading"><div><p class="eyebrow">Score {{ lead.score }}/100{{ info_tip('Pontuação versionada de 0 a 100. A versão 2.0 prioriza urgência e prova; o detalhamento está na visão completa da empresa.') }}</p><h1>{% if lead.cnpj %}<a href="/empresas/{{ lead.cnpj }}">{{ lead.company_name or 'Empresa não confirmada' }}</a>{% else %}{{ lead.company_name or 'Empresa não confirmada' }}{% endif %}</h1><p>{{ lead.cnpj or 'CNPJ não disponível' }}{% if lead.cnpj %} · <a href="/empresas/{{ lead.cnpj }}">Visão completa da empresa</a>{% endif %}</p></div><span class="badge">{{ lead.lead_status }}</span></div>
-<section class="panel"><h2>Origem e prazo</h2>
-  <div class="facts">
-    <div><dt>Processo de origem</dt><dd><a href="/procurements/{{ lead.procurement_id }}">Abrir contratação</a></dd></div>
-    <div><dt>Evento</dt><dd>{{ lead.triggering_event_id }}</dd></div>
-    <div><dt>Prazo</dt><dd>{% if deadline %}{{ deadline.when }} — {{ deadline.status }} — {{ deadline.type }}{% else %}Sem prazo vinculado{% endif %}</dd></div>
-  </div>
-</section>
-<section class="panel"><h2>Oportunidade</h2><p>{{ lead.reason_summary or 'Motivo requer revisão manual.' }}</p><p><strong>Ação recomendada:</strong> {{ lead.recommended_action or 'Revisar evidências.' }}</p></section>
-<section class="panel"><h2>Contatos corporativos</h2><div class="table-wrap"><table><thead><tr><th>Tipo</th><th>Contato</th><th>Status</th><th>Origem</th></tr></thead>
-<tbody>{% for contact in contacts %}<tr><td>{{ contact.contact_type }}</td><td>{% if contact.contact_type_key == 'email' %}<a href="mailto:{{ contact.value }}">{{ contact.value }}</a>{% elif contact.contact_type_key in ('phone', 'whatsapp') %}<a href="tel:{{ contact.value }}">{{ contact.value }}</a>{% else %}{{ contact.value }}{% endif %}</td><td>{{ contact.status }}</td><td>{% if contact.source_url %}<a href="{{ contact.source_url }}" target="_blank" rel="noopener">Abrir origem</a>{% else %}—{% endif %}</td></tr>{% else %}<tr><td colspan="4" class="empty">Nenhum contato corporativo registrado para esta empresa.</td></tr>{% endfor %}</tbody></table></div></section>
-<section class="panel"><h2>Cronologia</h2><div class="relevant-dates">
-  <span><strong>Adicionado em</strong>{{ lead.created_at }}</span>
-  <span><strong>Atualizado em</strong>{{ lead.updated_at }}</span>
-  {% for review in reviews %}<span><strong>Revisão: {{ review.decision }}</strong>{{ review.reviewed_at }} · {{ review.reviewer or 'Revisor não informado' }}{% if review.previous_status %} · status anterior: {{ review.previous_status }}{% endif %}{% if review.notes %} · {{ review.notes }}{% endif %}</span>{% endfor %}
-  {% if draft %}<span><strong>Rascunho gerado em</strong>{{ lead.draft_created_at }}</span>{% endif %}
-</div>{% if not reviews %}<p class="hint">Nenhuma revisão registrada. Mudanças de status feitas fora do fluxo de revisão não geram evento.</p>{% endif %}</section>
-<section class="panel"><h2>Rastreabilidade</h2>{% for evidence in evidences %}<article class="evidence"><blockquote>{{ evidence.text_excerpt }}</blockquote><a href="/api/evidence/{{ evidence.id }}">Abrir evidência{% if evidence.page_number %}, página {{ evidence.page_number }}{% endif %}</a></article>{% else %}<p class="empty">Nenhuma evidência vinculada.</p>{% endfor %}</section>
-<section class="panel"><h2>Revisão humana</h2>
-  <form method="post" action="/leads/{{ lead.id }}/review" class="filters">
-    <label>Decisão <select name="decision" required><option value="">Selecione</option><option value="approved">Aprovar</option><option value="rejected">Rejeitar</option><option value="needs_changes">Solicitar ajustes</option></select></label>
-    <label>Revisor <input name="reviewer" required maxlength="255" placeholder="Seu nome"></label>
-    <label>Observações <input name="notes" maxlength="4000" placeholder="Opcional"></label>
-    <button type="submit">Registrar revisão</button>
-  </form>
-</section>
-<section class="panel" id="rascunho">
-  <h2>Rascunho</h2>
-  {% if integrity_notice %}<p role="alert">{{ integrity_notice }}</p>{% endif %}
-  {% if draft_error %}<p class="error" role="alert">{{ draft_error }}</p>{% endif %}
-  {% if draft %}
-    <h3>{{ draft.subject }}</h3><pre class="draft">{{ draft.message }}</pre>
-  {% elif not integrity_notice %}
-    <form method="post" action="/leads/{{ lead.id }}/draft">
-      <button type="submit">Gerar rascunho</button>
-      <p class="hint">Nenhuma mensagem será enviada.</p>
-    </form>
-  {% endif %}
-</section>
+<nav class="action-row" aria-label="Navegação da análise"><a href="{{ return_to }}">← Voltar à lista e aos filtros</a>{% if next_href %}<a href="{{ next_href }}">Próxima oportunidade →</a>{% endif %}</nav>
+{% if review_feedback == 'ok' %}<p class="alert success" role="status">Revisão registrada. A situação desta oportunidade foi atualizada.</p>{% elif review_feedback == 'previous' %}<p class="alert success" role="status">Revisão anterior registrada. Esta é a próxima oportunidade da sua fila.</p>{% endif %}
+{% if review_feedback == 'ok' and not next_href %}<p>Você chegou ao fim desta sequência de revisão. <a href="{{ return_to }}">Voltar aos resultados</a></p>{% endif %}
+<div class="page-heading"><div><p class="eyebrow">Prioridade {{ lead.score }}/100</p><h1>{{ lead.company_name }}</h1><p>{{ lead.cnpj_label }}{% if lead.cnpj %} · <a href="/empresas/{{ lead.cnpj }}">Visão completa da empresa</a>{% endif %}</p></div><span class="badge">{{ lead.lead_status }}</span></div>
+{% if integrity_notice %}<p class="alert warning" role="alert">{{ integrity_notice }}</p>{% endif %}
+<section class="panel"><h2>O que aconteceu?</h2><p class="opportunity-event">{{ lead.event_label }}</p><p>{{ lead.reason_summary or 'Motivo requer revisão manual.' }}</p>
+<dl class="facts"><div><dt>Contratação</dt><dd><a href="/procurements/{{ lead.procurement_id }}">{{ lead.process }}</a></dd></div><div><dt>Órgão</dt><dd>{{ lead.agency }}</dd></div><div><dt>Data do fato</dt><dd>{{ lead.event_at }}</dd></div></dl>
+<p><strong>Ação recomendada:</strong> {{ lead.recommended_action or 'Revisar evidências.' }}</p>
+<details><summary>Por que esta prioridade?</summary><p>A nota ajuda a ordenar a fila e não confirma, por si, a existência de uma medida jurídica cabível.</p><dl class="facts"><div><dt>Urgência</dt><dd>{{ lead.urgency_score }}</dd></div><div><dt>Força da evidência</dt><dd>{{ lead.evidence_score }}</dd></div><div><dt>Relevância jurídica</dt><dd>{{ lead.legal_relevance_score }}</dd></div><div><dt>Contatos</dt><dd>{{ lead.contact_score }}</dd></div><div><dt>Referência econômica</dt><dd>{{ lead.economic_value_score }}</dd></div><div><dt>Versão da pontuação</dt><dd>{{ lead.scoring_version }}</dd></div></dl></details></section>
+<section class="panel" aria-labelledby="deadline-title"><h2 id="deadline-title">Qual é o prazo?</h2><p class="badge">{{ deadline.kind }}</p><p><strong>{{ deadline.when }}</strong></p><p>{{ deadline.type }} · {{ deadline.status }}</p>
+{% if deadline.trigger %}<p class="hint">Data-base do cálculo: {{ deadline.trigger }}. A data-base não é a data-limite.</p>{% endif %}
+{% if deadline.explanation %}<details><summary>Origem e cálculo do prazo</summary><p>{{ deadline.explanation }}</p><p class="hint">Situação registrada no último cálculo: {{ deadline.recorded_status }}. A indicação temporal acima considera a data atual, sem alterar esse registro.</p></details>{% endif %}
+{% if deadline.requires_review %}<p class="hint">O cálculo exige conferência humana.</p>{% endif %}</section>
+<section class="panel" id="evidencias"><h2>Onde está a prova?</h2>{% for evidence in evidences %}<article class="evidence"><blockquote>{{ evidence.text_excerpt }}</blockquote><a class="button secondary" href="/evidencias/{{ evidence.id }}">Conferir evidência{% if evidence.page_number %} · página {{ evidence.page_number }}{% endif %}</a></article>{% else %}<p class="empty">Nenhuma evidência vinculada. Consulte a contratação de origem antes de concluir a análise.</p>{% endfor %}<div class="action-row">{% if lead.official_url %}<a href="{{ lead.official_url }}" target="_blank" rel="noopener noreferrer">Abrir contratação na fonte oficial</a>{% endif %}{% if lead.origin_platform_url and lead.origin_platform_url != lead.official_url %}<a href="{{ lead.origin_platform_url }}" target="_blank" rel="noopener noreferrer">Abrir plataforma de origem</a>{% endif %}</div></section>
+<section class="panel" id="revisao"><h2>Qual é a sua decisão?</h2><p class="hint">Revisão humana do fato e da evidência.</p>
+{% if review_error %}<p class="alert error" role="alert">{{ review_error }}</p>{% endif %}
+{% if not integrity_notice %}
+<form method="post" action="/leads/{{ lead.id }}/review?{{ {'return_to': return_to}|urlencode }}" class="review-form" data-submit-once>
+  <input type="hidden" name="return_to" value="{{ return_to }}">
+  <label>Decisão <select name="decision" required><option value="">Selecione</option>{% for value,label in [('approved','Aprovar'),('rejected','Rejeitar'),('needs_changes','Solicitar ajustes')] %}<option value="{{ value }}"{% if review_form.get('decision') == value %} selected{% endif %}>{{ label }}</option>{% endfor %}</select></label>
+  <label>Revisor <input name="reviewer" required maxlength="255" placeholder="Seu nome" value="{{ review_form.get('reviewer', '') }}" data-reviewer-preference></label>
+  <label>Observações <textarea name="notes" maxlength="4000" rows="3" placeholder="Opcional">{{ review_form.get('notes', '') }}</textarea></label>
+  <div class="action-row"><button type="submit">Registrar revisão</button>{% if continue_available %}<button type="submit" name="continue_review" value="true" class="button secondary">Registrar e analisar próxima</button>{% endif %}</div>
+  <p class="hint">A revisão fica registrada com seu nome, data e observações.</p>
+</form>{% endif %}</section>
+<section class="panel" id="rascunho"><h2>Preparar rascunho</h2>
+{% if draft_error %}<p class="alert error" role="alert">{{ draft_error }}</p>{% endif %}
+{% if draft %}<h3>{{ draft.subject }}</h3><pre class="draft" id="draft-message">{{ draft.message }}</pre><button type="button" class="button secondary" data-copy-target="draft-message">Copiar rascunho</button><span data-copy-feedback role="status" aria-live="polite"></span>
+{% elif not integrity_notice %}<form method="post" action="/leads/{{ lead.id }}/draft{% if return_to != '/leads' %}?{{ {'return_to': return_to}|urlencode }}{% endif %}" data-submit-once><button type="submit">Gerar rascunho</button></form>{% endif %}<p class="hint">Nenhuma mensagem será enviada. Confira o texto antes de utilizá-lo.</p></section>
+<details class="panel"><summary>Contatos corporativos · {{ contacts|length }}</summary><div class="table-wrap"><table><thead><tr><th>Tipo</th><th>Contato</th><th>Status</th><th>Origem</th></tr></thead><tbody>{% for contact in contacts %}<tr><td>{{ contact.contact_type }}</td><td>{% if contact.contact_type_key == 'email' %}<a href="mailto:{{ contact.value }}">{{ contact.value }}</a>{% elif contact.contact_type_key in ('phone', 'whatsapp') %}<a href="tel:{{ contact.value }}">{{ contact.value }}</a>{% else %}{{ contact.value }}{% endif %}</td><td>{{ contact.status }}</td><td>{% if contact.source_url %}<a href="{{ contact.source_url }}" target="_blank" rel="noopener">Abrir origem</a>{% else %}—{% endif %}</td></tr>{% else %}<tr><td colspan="4" class="empty">Nenhum contato corporativo registrado para esta empresa.</td></tr>{% endfor %}</tbody></table></div></details>
+<details class="panel"><summary>Cronologia</summary><div class="relevant-dates"><span><strong>Adicionado em</strong>{{ lead.created_at }}</span><span><strong>Atualizado em</strong>{{ lead.updated_at }}</span>{% for review in reviews %}<span><strong>Revisão: {{ review.decision }}</strong>{{ review.reviewed_at }} · {{ review.reviewer or 'Revisor não informado' }}{% if review.previous_status %} · situação anterior: {{ review.previous_status }}{% endif %}{% if review.notes %} · {{ review.notes }}{% endif %}</span>{% endfor %}{% if draft %}<span><strong>Rascunho gerado em</strong>{{ lead.draft_created_at }}</span>{% endif %}</div>{% if not reviews %}<p class="hint">Nenhuma revisão registrada.</p>{% endif %}</details>
+<details class="panel"><summary>Detalhes técnicos</summary><p>Oportunidade: <code>{{ lead.id }}</code> · Evento: <code>{{ lead.triggering_event_id }}</code></p></details>
 {% endblock %}

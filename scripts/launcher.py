@@ -31,6 +31,9 @@ from pathlib import Path
 from typing import IO
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPO_ROOT))
+from app.runtime_control import SHUTDOWN_SECONDS, OwnedRuntime, atomic_json  # noqa: E402
+
 LAUNCHER_PATH = Path(__file__).resolve()
 SCHEDULER_LOG = REPO_ROOT / "data" / "scheduler.log"
 SCHEDULER_PID = REPO_ROOT / "data" / "scheduler.pid"
@@ -52,6 +55,7 @@ print(json.dumps({
     "port": settings.app_port,
     "scheduler_enabled": settings.scheduler_enabled,
     "database_url": settings.database_url,
+    "shutdown_receipt": str(settings.raw_data_storage_path.parent / "application.shutdown.json"),
 }))
 """
 
@@ -1053,7 +1057,8 @@ class _Scheduler:
             stdout=self.log,
             stderr=self.log,
             creationflags=flags,
-            env={**os.environ, **(env or {})},
+            start_new_session=os.name != "nt",
+            env={**os.environ, **(env or {}), "LICITA_CONTROL_ROLE": "scheduler"},
         )
         self.job = _assign_kill_on_close_job(self.process)
         with suppress(OSError):
@@ -1091,7 +1096,93 @@ def _install_signal_handlers(stop_callback: Callable[[], None]) -> None:
             signal.signal(number, handler)
 
 
-def _run_server(venv_python: Path, *, env: Mapping[str, str] | None = None) -> int:
+def _stop_owned_tree(process: subprocess.Popen[bytes]) -> None:
+    """Stop only a child whose Popen handle is still owned by this launcher."""
+    if process.poll() is not None:
+        return
+    if os.name == "nt":
+        subprocess.run(
+            ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+            capture_output=True,
+            timeout=10,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    else:
+        with suppress(ProcessLookupError):
+            os.killpg(process.pid, signal.SIGKILL)
+    with suppress(subprocess.TimeoutExpired):
+        process.wait(timeout=5)
+
+
+def _wait_for_server(
+    process: subprocess.Popen[bytes],
+    runtime: OwnedRuntime | None,
+    scheduler: _Scheduler | None,
+) -> int:
+    if runtime is None:
+        return process.wait()
+    channel = runtime.channel
+    forced: list[str] = []
+    complete_at: float | None = None
+    while process.poll() is None or (
+        channel.requested
+        and scheduler is not None
+        and scheduler.process is not None
+        and scheduler.process.poll() is None
+    ):
+        if channel.requested:
+            stopped = (
+                scheduler is None
+                or scheduler.process is None
+                or scheduler.process.poll() is not None
+            )
+            deadline = float(channel.read("request")["requested_at"]) + SHUTDOWN_SECONDS
+            if time.time() >= deadline:
+                if not stopped and scheduler and scheduler.process:
+                    forced.append("scheduler")
+                    _stop_owned_tree(scheduler.process)
+                    stopped = scheduler.process.poll() is not None
+                if channel.read("api").get("phase") != "drained":
+                    forced.append("api")
+                    channel.write(
+                        "launcher",
+                        {"phase": "forcing", "forced": forced, "scheduler_stopped": stopped},
+                    )
+                    _stop_owned_tree(process)
+                    break
+            if stopped and channel.read("api").get("phase") == "drained":
+                complete_at = complete_at or time.monotonic()
+                phase = "exit" if time.monotonic() - complete_at >= 3 else "complete"
+            else:
+                phase = "cancelling"
+            channel.write(
+                "launcher", {"phase": phase, "forced": forced, "scheduler_stopped": stopped}
+            )
+            if complete_at is not None and time.monotonic() - complete_at >= 8:
+                forced.append("api")
+                _stop_owned_tree(process)
+                break
+        time.sleep(0.2)
+    if channel.requested:
+        receipt = channel.receipt()
+        incomplete = not receipt.get("cleanup_complete", False)
+        atomic_json(channel.receipt_path, {**receipt, "forced": forced, "finished_at": time.time()})
+        print(
+            "Aplicacao encerrada."
+            + (f" Encerramento forcado: {', '.join(forced)}." if forced else "")
+            + (" Limpeza pendente: sera recuperada na proxima abertura." if incomplete else "")
+        )
+        return 0
+    return process.returncode or 0
+
+
+def _run_server(
+    venv_python: Path,
+    *,
+    env: Mapping[str, str] | None = None,
+    runtime: OwnedRuntime | None = None,
+    scheduler: _Scheduler | None = None,
+) -> int:
     """Run the API in the foreground until it exits."""
 
     environment = os.environ.copy()
@@ -1102,10 +1193,21 @@ def _run_server(venv_python: Path, *, env: Mapping[str, str] | None = None) -> i
         [str(venv_python), "run.py", "--migrate"],
         cwd=REPO_ROOT,
         env=environment,
+        start_new_session=os.name != "nt",
     )
     _assign_kill_on_close_job(process)
+    if os.name != "nt":
+
+        def stop_foreground() -> None:
+            if scheduler is not None:
+                scheduler.stop()
+            if process.poll() is None:
+                with suppress(ProcessLookupError):
+                    os.killpg(process.pid, signal.SIGINT)
+
+        _install_signal_handlers(stop_foreground)
     try:
-        return process.wait()
+        return _wait_for_server(process, runtime, scheduler)
     except KeyboardInterrupt:
         process.terminate()
         with suppress(subprocess.TimeoutExpired):
@@ -1282,6 +1384,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             f"virtual local em {venv_dir} para evitar travamentos do pip."
         )
     scheduler = _Scheduler()
+    runtime: OwnedRuntime | None = None
     try:
         venv_python = _prepare_venv([sys.executable], venv_dir=venv_dir, repair=args.repair)
         inputs_hash = _hash_inputs(REPO_ROOT / "pyproject.toml", sys.version_info[:3])
@@ -1368,6 +1471,18 @@ def main(argv: Sequence[str] | None = None) -> int:
             if repair_notice:
                 print(repair_notice)
 
+        runtime = OwnedRuntime(
+            Path(
+                str(
+                    settings.get(
+                        "shutdown_receipt", REPO_ROOT / "data" / "application.shutdown.json"
+                    )
+                )
+            ),
+            database_url,
+        )
+        override = {**override, **runtime.environment, "LICITA_CONTROL_ROLE": "api"}
+
         if args.no_scheduler or not bool(settings.get("scheduler_enabled", True)):
             _stop_orphan_scheduler()
             print("Scheduler desativado nesta execucao.")
@@ -1384,12 +1499,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             _start_browser_thread(host, port, base_url)
         print(f"\nIniciando a interface em {base_url} (pode levar alguns segundos)...")
         print("Pressione Ctrl+C ou feche esta janela para encerrar.\n")
-        return _run_server(venv_python, env=override)
+        return _run_server(venv_python, env=override, runtime=runtime, scheduler=scheduler)
     except LauncherError as exc:
         print(f"\nERRO: {exc}", file=sys.stderr)
         return 1
     finally:
         scheduler.stop()
+        if runtime is not None:
+            runtime.close()
 
 
 if __name__ == "__main__":

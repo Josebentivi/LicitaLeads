@@ -2,9 +2,16 @@
 {% from "_macros.html" import info_tip, pagination_nav %}
 {% block title %}Contratações · LicitaLead Monitor{% endblock %}
 {% block content %}
-<div class="page-heading"><div><p class="eyebrow">Monitoramento</p><h1>Contratações</h1></div></div>
-<form method="get" class="filters">
+<div class="page-heading"><div><p class="eyebrow">Monitoramento</p><h1>Contratações</h1></div><a href="/itens">Buscar itens em todo o acervo</a></div>
+<form method="get" action="/procurements" class="panel" data-filter-form>
+  <div class="filters">
+  <label class="search-field">Processo, objeto ou órgão <input type="search" name="q" value="{{ filters.q }}" maxlength="200" placeholder="Número, descrição ou órgão"></label>
   <label>UF <select name="uf"><option value="">Todas</option>{% for code, name in ufs %}<option value="{{ code }}"{% if code == filters.uf %} selected{% endif %}>{{ code }} · {{ name }}</option>{% endfor %}</select></label>
+  <label>Publicação de <input type="date" name="published_from" value="{{ filters.published_from }}"></label><label>até <input type="date" name="published_to" value="{{ filters.published_to }}"></label>
+  <label>Situação <select name="status_category"><option value="">Todas</option>{% for key,label in status_category_options %}<option value="{{ key }}"{% if key == filters.status_category %} selected{% endif %}>{{ label }}</option>{% endfor %}</select></label>
+  <button type="submit">Filtrar</button><a href="/procurements">Limpar filtros</a></div>
+  {% if filters.run %}<input type="hidden" name="run" value="{{ filters.run }}"><p class="hint">Contratações vinculadas à coleta selecionada por registros de origem. <a href="/procurements">Ver todo o acervo</a>.</p>{% endif %}
+  <details{% if filters.invalid_cnpj or filters.company_cnpj or filters.agency_cnpj or filters.modalities or filters.municipality or filters.agency or filters.procurement_type or filters.phase or filters.is_srp or filters.value_min is not none or filters.value_max is not none %} open{% endif %}><summary>Filtros avançados</summary><div class="filters">
   <label>Município <input name="municipality" value="{{ filters.municipality or '' }}"></label>
   <label>Órgão <input name="agency" value="{{ filters.agency or '' }}"></label>
   <label>CNPJ do órgão <input name="agency_cnpj" value="{{ filters.agency_cnpj or '' }}" placeholder="00.000.000/0000-00"></label>
@@ -18,12 +25,6 @@
     <select name="procurement_type">
       <option value="">Todas</option>
       {% for key, label in type_options %}<option value="{{ key }}"{% if key == filters.procurement_type %} selected{% endif %}>{{ label }}</option>{% endfor %}
-    </select>
-  </label>
-  <label>Situação{{ info_tip('Classificação operacional: proposta aberta (janela vigente), encerrada, cancelada, suspensa ou sem prazo conhecido. Baseada no texto publicado pela fonte e na data final de propostas.') }}
-    <select name="status_category">
-      <option value="">Todas</option>
-      {% for key, label in status_category_options %}<option value="{{ key }}"{% if key == filters.status_category %} selected{% endif %}>{{ label }}</option>{% endfor %}
     </select>
   </label>
   <label>Fase{{ info_tip('Fase operacional inferida de status, datas e eventos documentados. Nao substitui a situacao oficial nem o edital.') }}
@@ -41,22 +42,24 @@
   </label>
   <label>Valor mínimo <input name="value_min" type="number" step="0.01" min="0" value="{{ filters.value_min if filters.value_min is not none else '' }}"></label>
   <label>Valor máximo <input name="value_max" type="number" step="0.01" min="0" value="{{ filters.value_max if filters.value_max is not none else '' }}"></label>
-  <button type="submit">Filtrar</button>
+  </div></details>
 </form>
-{% if filters.invalid_cnpj %}<p class="hint">CNPJ inválido informado — o filtro de CNPJ correspondente foi ignorado.</p>{% endif %}
+{% for error in filter_errors %}<p class="alert error" role="alert">{{ error }}</p>{% endfor %}
+<div class="section-heading"><p role="status">{{ pagination.total }} contratação(ões) · {{ active_filter_count }} filtro(s) ativo(s)</p><a href="{{ list_url }}" data-save-search>Guardar esta busca neste navegador</a></div><p data-saved-search role="status"></p>
+{% include "_active_filters.html" %}
 {% if filters.company_cnpj_valid %}<p class="hint">Contratações vinculadas à empresa (participações comprovadas e fornecedores registrados em atas) — <a href="/empresas/{{ filters.company_cnpj_valid }}">ver empresa</a>.</p>{% endif %}
 <section class="panel table-wrap">
 <table><thead><tr><th>Processo</th><th>Órgão</th><th>Local</th><th>Modalidade</th><th>Contratação</th><th>Valor estimado</th><th>Situação</th><th>Fase</th><th>SRP</th></tr></thead>
 <tbody>{% for item in procurements %}<tr>
-  <td><a href="/procurements/{{ item.id }}">{{ item.purchase_number or item.external_id or item.id }}</a><small>{{ item.object_description or item.title or '' }}</small></td>
-  <td>{{ item.agency_name or 'not_available' }}</td><td>{{ item.municipality or '' }}/{{ item.uf or '' }}</td>
+  <td><a href="/procurements/{{ item.id }}{% if list_url != '/procurements' %}?{{ {'return_to': list_url}|urlencode }}{% endif %}">{{ item.purchase_number or item.external_id or item.id }}</a><small>{{ item.object_description or item.title or '' }}</small></td>
+  <td>{{ item.agency_name or 'Não informado' }}</td><td>{{ item.municipality or '' }}/{{ item.uf or '' }}</td>
   <td>{{ item.modality|modality_label }}</td>
   <td>{{ item.procurement_type|procurement_type_label }}</td>
   <td>{{ item.estimated_value|brl }}</td>
-  <td>{{ item.status or 'unknown' }}</td>
+  <td>{{ item.status or 'Não informado' }}</td>
   <td>{{ item.current_phase|procurement_phase_label }}</td>
   <td>{% if item.is_srp %}Sim{% elif item.is_srp is not none %}Não{% else %}—{% endif %}</td>
-</tr>{% else %}<tr><td colspan="9" class="empty">Nenhuma contratação encontrada.</td></tr>{% endfor %}</tbody></table>
+</tr>{% else %}<tr><td colspan="9" class="empty"><p>Nenhuma contratação encontrada.</p><a href="/procurements">Limpar filtros</a> · <a href="/crawls#escopo">Escolher UF e período de coleta</a></td></tr>{% endfor %}</tbody></table>
 </section>
 {{ pagination_nav(request, pagination.page, pagination.page_size, pagination.total) }}
 {% endblock %}

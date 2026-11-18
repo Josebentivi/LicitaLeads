@@ -153,7 +153,10 @@ async def test_manual_file_continues_from_saved_rows_without_upload(database):
 
 async def test_cut_commitment_details_do_not_replace_aggregate_until_complete(database):
     settings = Settings(
-        _env_file=None, municipal_payment_max_records=1, allow_insecure_http_sources=True
+        _env_file=None,
+        municipal_payment_max_records=1,
+        payment_ingestion_batch_size=1,
+        allow_insecure_http_sources=True,
     )
     payment_service = PaymentIngestionService(settings, session_factory=database.sessions)
     aggregate = RawPayment(

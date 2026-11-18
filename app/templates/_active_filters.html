@@ -1,0 +1,1 @@
+{% if active_filters %}<nav class="filter-tabs" aria-label="Filtros aplicados">{% for filter in active_filters %}<a href="{{ filter.remove_url }}" aria-label="Remover filtro {{ filter.label }}: {{ filter.value }}">{{ filter.label }}: {{ filter.value }} ×</a>{% endfor %}</nav>{% endif %}

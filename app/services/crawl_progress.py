@@ -16,10 +16,12 @@ from app.connectors.progress import ProgressEvent
 from app.models import CrawlRun
 
 STAGE_LABELS = {
+    "complete": "Coleta completa",
     "queued": "Aguardando início",
     "discovery": "Buscando registros",
     "details": "Consultando detalhes",
     "documents": "Processando documentos do lote",
+    "preparing": "Preparando gravação",
     "persisting": "Gravando registros",
     "finalizing": "Finalizando coleta",
     "completed": "Coleta concluída",

@@ -77,6 +77,13 @@ def main() -> None:
             f"Details: {exc}"
         ) from exc
 
+    if not args.reload:
+        from app.main import app
+
+        server = uvicorn.Server(uvicorn.Config(app, host=settings.app_host, port=settings.app_port))
+        app.state.request_server_exit = lambda: setattr(server, "should_exit", True)
+        server.run()
+        return
     uvicorn.run(
         "app.main:app",
         host=settings.app_host,

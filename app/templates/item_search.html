@@ -1,0 +1,22 @@
+{% extends "base.html" %}
+{% from "_macros.html" import pagination_nav %}
+{% block title %}Itens de compra · LicitaLead Monitor{% endblock %}
+{% block content %}
+<h1>Itens de compra</h1>
+<form method="get" class="filters">
+  <label>Descrição do item <input type="search" name="q" maxlength="200" value="{{ q }}"></label>
+  <label>Órgão <input name="agency" maxlength="160" value="{{ agency }}"></label>
+  <label>Unidade <select name="unit"><option value="">Todas</option>{% for value in units %}<option{% if value == unit %} selected{% endif %}>{{ value }}</option>{% endfor %}</select></label>
+  <button type="submit">Filtrar</button><a href="/itens">Limpar filtros</a>
+</form>
+<p role="status">{{ total }} item(ns) encontrado(s)</p>{% include "_active_filters.html" %}
+<div class="panel table-wrap"><table>
+  <thead><tr><th>Descrição e processo</th><th>Órgão</th><th>Quantidade</th><th>Unidade</th><th>Unitário estimado</th><th>Total estimado</th></tr></thead>
+  <tbody>{% for item, process in rows %}<tr>
+    <td><a href="/procurements/{{ process.id }}?{{ {'item_query': item.item_number, 'return_to': list_url}|urlencode }}#item-{{ item.id }}">{{ item.description or 'Descrição não informada' }}</a>
+      <small>{{ process.pncp_control_number or process.purchase_number or 'Processo sem número publicado' }} · Item {{ item.item_number }}</small></td>
+    <td>{{ process.agency_name|display_text }}</td><td>{{ item.quantity|display_text }}</td><td>{{ item.unit|display_text }}</td>
+    <td>{{ item.estimated_unit_value|brl(4) }}</td><td>{{ item.estimated_total_value|brl }}</td>
+  </tr>{% else %}<tr><td colspan="6">Nenhum item encontrado para esta consulta.</td></tr>{% endfor %}</tbody>
+</table></div>{{ pagination_nav(request, page, 50, total) }}
+{% endblock %}

@@ -3,36 +3,37 @@
 {% block title %}Contratos - LicitaLead Monitor{% endblock %}
 {% block content %}
 <div class="page-heading"><div><p class="eyebrow">Monitoramento</p><h1>Contratos</h1></div></div>
-<section class="panel">
-  <h2>Coleta manual de contratos</h2>
-  <form method="post" action="/contratos/collect" class="filters">
-    <label>Fonte <select name="connector"><option value="all">Todas</option><option value="pncp">PNCP</option><option value="compras_gov">Compras.gov.br</option></select></label>
-    <label>CNPJ do órgão <input name="agency_cnpj" required maxlength="30"></label>
-    <label>Dias <input name="days" type="number" min="1" max="3650" value="30" required></label>
-    {% include "_force_refresh_option.html" %}
-    <button type="submit">Coletar contratos agora</button>
-  </form>
-  <p class="hint">O período corresponde à publicação no PNCP e ao início da vigência no Compras.gov.br.</p>
-</section>
-<form method="get" class="filters">
+<p class="hint">Consulte fornecedores, vigências e termos oficiais. <a href="/crawls">Ver coletas</a>.</p>
+<form method="get" action="/contratos" class="filters" data-filter-form>
   <label>Busca <input name="search" value="{{ filters.search or '' }}"></label>
-  <label>Orgao <input name="agency" value="{{ filters.agency or '' }}"></label>
+  <label>Órgão <input name="agency" value="{{ filters.agency or '' }}"></label>
   <label>CNPJ do fornecedor <input name="supplier_cnpj" value="{{ filters.supplier_cnpj or '' }}"></label>
+  <label>Fim de vigência publicado <select name="expiring_within_days">
+    <option value="">Qualquer data</option>
+    {% for days in [30,60,90] %}<option value="{{ days }}"{% if filters.expiring_within_days == days %} selected{% endif %}>Até {{ days }} dias</option>{% endfor %}
+    {% if filters.expiring_within_days and filters.expiring_within_days not in [30,60,90] %}<option value="{{ filters.expiring_within_days }}" selected>Até {{ filters.expiring_within_days }} dias</option>{% endif %}
+  </select></label>
   <button type="submit">Filtrar</button>
+  <a href="/contratos">Limpar filtros</a>
 </form>
+{% if filter_error %}<p class="alert error" role="alert">{{ filter_error }}</p>{% endif %}
+<p role="status">{{ pagination.total }} contrato(s) · {{ active_filter_count }} filtro(s) ativo(s)</p>{% include "_active_filters.html" %}
+{% if contracts %}
+{% if filters.expiring_within_days %}<p>O período inclui hoje. A lista considera datas no cabeçalho e nos termos e ordena pela primeira data do período. Confira a vigência aplicável na fonte.</p>{% endif %}
 <section class="panel table-wrap">
-<table><thead><tr><th>Contrato</th><th>Orgao</th><th>Fornecedor</th><th>Objeto</th><th>Assinatura</th><th>Vigencia final</th><th>Valor</th><th>Fonte</th></tr></thead>
+<table><thead><tr><th>Contrato</th><th>Órgão</th><th>Fornecedor</th><th>Objeto</th><th>Assinatura</th><th>Vigências publicadas</th><th>Valor</th><th>Fonte</th></tr></thead>
 <tbody>{% for item in contracts %}<tr>
-  <td><a href="/contratos/{{ item.id }}">{{ item.number }}/{{ item.year }}</a></td>
+  <td><a href="/contratos/{{ item.id }}{% if list_url != '/contratos' %}?{{ {'return_to': list_url}|urlencode }}{% endif %}">{{ item.number }}/{{ item.year }}</a></td>
   <td>{{ item.agency }}</td>
   <td>{% if item.supplier_cnpj %}<a href="/empresas/{{ item.supplier_cnpj }}">{{ item.supplier }}</a>{% else %}{{ item.supplier }}{% endif %}</td>
   <td><small>{{ item.object_description }}</small></td>
   <td>{{ item.signed_at }}</td>
-  <td>{{ item.valid_until }}</td>
+  <td>Cabeçalho · {{ item.valid_until }}{% if item.term_dates %}<details><summary>{{ item.term_dates|length }} data(s) em termos</summary>{% for term in item.term_dates %}<small>Termo {{ term.number }} · {{ term.date }}</small>{% endfor %}<a href="/contratos/{{ item.id }}?{{ {'return_to': list_url}|urlencode }}#termos">Conferir termos e fontes</a></details>{% endif %}</td>
   <td>{{ item.value }}</td>
   <td>{{ item.source }}</td>
-</tr>{% else %}<tr><td colspan="8" class="empty">Nenhum contrato coletado. Rode uma coleta com modo contracts.</td></tr>{% endfor %}</tbody></table>
+</tr>{% endfor %}</tbody></table>
 </section>
+{% else %}<div class="panel empty">Nenhum contrato encontrado. <a href="/contratos">Limpe os filtros</a> ou acompanhe a atualização em <a href="/crawls">Coletas</a>.</div>{% endif %}
 <p class="hint">Contrato assinado nao significa pagamento. O status financeiro aparece no detalhe e depende de fonte de pagamento conciliada.</p>
 {{ pagination_nav(request, pagination.page, pagination.page_size, pagination.total) }}
 {% endblock %}

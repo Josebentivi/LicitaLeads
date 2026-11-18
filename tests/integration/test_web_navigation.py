@@ -164,7 +164,7 @@ async def test_group_hubs_show_real_indicators(
     assert "Contratos vigentes" in compras.text
     assert "Conciliação pendente" in financeiro.text
     assert "Portais municipais indisponíveis" in financeiro.text
-    assert "Leads aguardando revisão" in oportunidades.text
+    assert "Oportunidades aguardando revisão" in oportunidades.text
     assert "Prazos em 24 horas" in oportunidades.text
     assert "Falhas recentes" in operacao.text
     assert "municipal:timon" in operacao.text

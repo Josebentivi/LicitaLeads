@@ -93,6 +93,50 @@ def _quote_key(value: str) -> str:
     return re.sub(r"\s+", " ", value).strip().casefold()
 
 
+def attribution_status(analysis: LLMEventAnalysis) -> str:
+    """Party identity must occur in the passage asserting this act."""
+    from app.services.event_detection.detector import _EVENT_PATTERNS
+
+    acts = [
+        q.text
+        for q in analysis.evidence_quotes
+        if any(
+            kind == analysis.event_type and pattern.search(q.text)
+            for kind, pattern in _EVENT_PATTERNS
+        )
+    ]
+    if not acts:
+        acts = [
+            q.text
+            for q in analysis.evidence_quotes
+            if re.search(
+                r"\b(?:registrou|apresentou|decidiu|constatou|foi|declarou|protocolou)\b",
+                q.text,
+                re.I,
+            )
+        ]
+    if not acts:
+        return "review"
+    expected = analysis.company_cnpj
+    for text in acts:
+        parties = {normalize_cnpj(m.group()) for m in _CNPJ_TOKEN.finditer(text)}
+        if expected and parties and expected not in parties:
+            return "contradictory"
+        if expected and parties == {expected}:
+            return "confirmed"
+        name = normalize_company_name(analysis.company_name)
+        normalized = normalize_company_name(text, strip_legal_suffix=False) or ""
+        if (
+            name
+            and re.search(rf"(?:^| ){re.escape(name)}(?: |$)", normalized)
+            and len(parties) <= 1
+        ):
+            return "confirmed"
+    if not analysis.company_cnpj and not analysis.company_name:
+        return "unattributed"
+    return "review"
+
+
 class EvidenceBoundLLMEventAnalyzer:
     """Validate provider output and reject every quote absent from the source."""
 
@@ -128,6 +172,10 @@ class EvidenceBoundLLMEventAnalyzer:
         page_text = {page: _quote_key(value) for page, value in (pages or {}).items()}
         checked: list[LLMEventAnalysis] = []
         for analysis in analyses:
+            from app.services.event_detection.authority import assertion_diagnostic
+
+            if any(assertion_diagnostic(q.text) for q in analysis.evidence_quotes):
+                raise LLMEvidenceError("LLM quote does not establish a performed act")
             quotes: list[str] = []
             for quote in analysis.evidence_quotes:
                 needle = _quote_key(quote.text)
@@ -149,6 +197,8 @@ class EvidenceBoundLLMEventAnalyzer:
                 normalized_name = normalize_company_name(analysis.company_name)
                 if normalized_name and normalized_name not in source_names:
                     raise LLMEvidenceError("LLM company name is absent from source")
+            if attribution_status(analysis) == "contradictory":
+                raise LLMEvidenceError("LLM company contradicts the party in the cited act")
             update: dict[str, Any] = {}
             if analysis.reason_summary:
                 normalized_reason = _quote_key(analysis.reason_summary)
@@ -162,6 +212,10 @@ class EvidenceBoundLLMEventAnalyzer:
                     analysis.event_date.strftime("%Y-%m-%d"),
                 }
                 if not any(value in quote_text for value in candidates):
+                    update["event_date"] = None
+                elif not re.search(
+                    r"\b" + analysis.event_date.strftime("%H:%M") + r"\b", quote_text
+                ):
                     update["event_date"] = None
             checked.append(analysis.model_copy(update=update) if update else analysis)
         return checked

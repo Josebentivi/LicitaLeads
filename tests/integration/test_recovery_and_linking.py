@@ -47,7 +47,7 @@ async def _procurement_with_awarded_company(
             external_id=f"link-{suffix}",
             title="Pregão Eletrônico 14/2026",
             agency_name="Prefeitura Municipal de Exemplo",
-            agency_cnpj="00000000000191",
+            agency_cnpj="01612325000198",
             uf="MA",
             municipality="São Luís",
             estimated_value=180000,
@@ -343,7 +343,7 @@ async def test_crawl_page_reports_running_sources_honestly(
 
 
 @pytest.mark.asyncio
-async def test_single_winner_event_is_linked_and_deadline_is_idempotent(
+async def test_single_winner_is_only_suggested_until_manual_review(
     database: DatabaseContext,
     tmp_path: Path,
 ) -> None:
@@ -358,16 +358,32 @@ async def test_single_winner_event_is_linked_and_deadline_is_idempotent(
     summary = await service.process_pending()
 
     assert summary.events_created == 1
-    assert summary.leads_created == 1
+    assert summary.leads_created == 0
     async with database.sessions() as session:
         event = await session.scalar(select(ProcurementEvent))
         lead = await session.scalar(select(Lead))
         deadline_count = await session.scalar(select(func.count()).select_from(Deadline))
 
-    assert event is not None and event.company_id == company_id
+    assert event is not None and event.company_id is None
     assert event.requires_manual_review is True
-    assert lead is not None and lead.company_id == company_id
-    assert deadline_count == 1
+    assert lead is None
+    assert deadline_count == 0
+
+    from app.models.llm_review import LLMSuggestion
+    from app.services.llm.central import review_suggestion
+
+    async with database.sessions() as session, session.begin():
+        suggestion = await session.scalar(select(LLMSuggestion))
+        assert suggestion and suggestion.company_id == company_id
+        await review_suggestion(
+            session,
+            suggestion.id,
+            confirm=True,
+            company_id=company_id,
+            reviewer="Operador",
+            note="Conferido",
+            settings=_settings(tmp_path),
+        )
 
     await service.detect_existing()
     await service.recalculate_deadlines_and_leads()

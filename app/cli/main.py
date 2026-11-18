@@ -3,19 +3,15 @@
 from __future__ import annotations
 
 import asyncio
-import csv
 import json
 from datetime import date
 from pathlib import Path
 from typing import Annotated
 
 import typer
-from sqlalchemy import select
-from sqlalchemy.orm import selectinload
 
 from app.config import get_settings
 from app.database import async_session_factory
-from app.models import Lead
 from app.services.ingestion import (
     IngestionPipeline,
     PipelineRequest,
@@ -54,6 +50,67 @@ def prepare_test_browser_command() -> None:
         typer.echo(str(exc), err=True)
         raise typer.Exit(1) from exc
     typer.echo(f"{result['browser']} {result['version']}: {result['detail']}")
+
+
+@app.command("piloto-tce-ma")
+def piloto_tce_ma_command(
+    inicio: Annotated[
+        str, typer.Option("--inicio", help="Data de publicação inicial (AAAA-MM-DD).")
+    ],
+    fim: Annotated[str, typer.Option("--fim", help="Data de publicação final (AAAA-MM-DD).")],
+    saida: Annotated[
+        Path, typer.Option("--saida", help="Nova pasta do relatório e banco de auditoria.")
+    ],
+    origem: Annotated[Path | None, typer.Option("--origem", exists=True, dir_okay=False)] = None,
+    limite: Annotated[int, typer.Option("--limite", min=1, max=20)] = 20,
+) -> None:
+    """Compara pregões de São Luís entre PNCP, TCE-MA e Compras.gov.br."""
+    from pydantic import TypeAdapter, ValidationError
+
+    from app.services.tce_ma_pilot import OriginObservation, run_tce_ma_pilot
+    from app.services.tce_ma_pilot_report import summarize_pilot, write_pilot_report
+
+    try:
+        start, end = date.fromisoformat(inicio), date.fromisoformat(fim)
+    except ValueError as exc:
+        raise typer.BadParameter("use datas no formato AAAA-MM-DD") from exc
+    try:
+        observations = (
+            TypeAdapter(list[OriginObservation]).validate_json(origem.read_bytes())
+            if origem
+            else []
+        )
+    except ValidationError as exc:
+        fields = ", ".join(
+            ".".join(map(str, error["loc"])) for error in exc.errors(include_input=False)
+        )
+        raise typer.BadParameter(
+            f"observações da origem inválidas: {fields}", param_hint="--origem"
+        ) from exc
+    output = saida.resolve()
+    try:
+        report = asyncio.run(
+            run_tce_ma_pilot(
+                settings=get_settings(),
+                output=output,
+                start=start,
+                end=end,
+                limit=limite,
+                observations=observations,
+                progress=typer.echo,
+            )
+        )
+    except (ValueError, FileExistsError) as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    report["resumo"] = summarize_pilot(report)
+    (output / "comparativo.json").write_text(
+        json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    )
+    write_pilot_report(report, output)
+    typer.echo(f"Relatório: {output / 'relatorio.md'}")
+    typer.echo(json.dumps(report["resumo"], ensure_ascii=False))
+    if report["estado"] == "partial":
+        raise typer.Exit(2)
 
 
 @app.command("enqueue-llm")
@@ -112,6 +169,13 @@ def reconcile_data_command(
             help="verifica participantes, valores e aliases documentais em todo o acervo",
         ),
     ] = False,
+    flow_integrity: Annotated[
+        bool,
+        typer.Option(
+            "--flow-integrity",
+            help="audita atos documentais, marcadores sem homologação e vínculos oficiais",
+        ),
+    ] = False,
     resume: Annotated[
         str | None,
         typer.Option("--resume", help="retoma o ID de uma reconciliação de participantes"),
@@ -141,7 +205,7 @@ def reconcile_data_command(
 
             from app.services.suspension_restoration import restore_suspended_state
 
-            if participation_integrity or resume:
+            if participation_integrity or flow_integrity or resume:
                 raise typer.BadParameter("recuperação de notas não aceita outros modos de reparo")
             baseline_id = UUID(restore_suspended_state_from)
             if not apply:
@@ -189,20 +253,24 @@ def reconcile_data_command(
                     "backup": backup.as_dict(),
                     "result_report": str(report_path),
                 }
-        if participation_integrity:
+        if participation_integrity and flow_integrity:
+            raise typer.BadParameter("Escolha apenas um modo de reconciliação")
+        if participation_integrity or flow_integrity:
             from uuid import UUID
 
+            from app.services.flow_reconciliation import reconcile_flow
             from app.services.participation_reconciliation import reconcile_participation
+
+            reconciler = reconcile_flow if flow_integrity else reconcile_participation
+            report_kind = "flow" if flow_integrity else "participation"
 
             selected_resume = UUID(resume) if resume else None
             if not apply:
                 if resume:
                     raise typer.BadParameter("--resume exige --apply")
-                return await reconcile_participation(async_session_factory, get_settings())
+                return await reconciler(async_session_factory, get_settings())
             async with exclusive_maintenance(async_session_factory) as owner:
-                integrity_impact = await reconcile_participation(
-                    async_session_factory, get_settings()
-                )
+                integrity_impact = await reconciler(async_session_factory, get_settings())
                 backup = await run_blocking_maintenance(
                     lambda: create_backup(
                         get_settings(),
@@ -211,13 +279,13 @@ def reconcile_data_command(
                         sqlite_timeout_seconds=300,
                     )
                 )
-                impact_path = backup.path.with_suffix(".participation-impact.json")
+                impact_path = backup.path.with_suffix(f".{report_kind}-impact.json")
                 await asyncio.to_thread(
                     impact_path.write_text,
                     json.dumps(integrity_impact, ensure_ascii=False, indent=2),
                     encoding="utf-8",
                 )
-                integrity_result = await reconcile_participation(
+                integrity_result = await reconciler(
                     async_session_factory,
                     get_settings(),
                     apply=True,
@@ -225,7 +293,7 @@ def reconcile_data_command(
                     maintenance_owner=owner,
                     resume_id=selected_resume,
                 )
-                result_path = backup.path.with_suffix(".participation-result.json")
+                result_path = backup.path.with_suffix(f".{report_kind}-result.json")
                 await asyncio.to_thread(
                     result_path.write_text,
                     json.dumps(integrity_result, ensure_ascii=False, indent=2),
@@ -238,7 +306,7 @@ def reconcile_data_command(
                     "result_report": str(result_path),
                 }
         if resume:
-            raise typer.BadParameter("--resume exige --participation-integrity")
+            raise typer.BadParameter("--resume exige --participation-integrity ou --flow-integrity")
         if not apply:
             async with async_session_factory() as session:
                 impact = await reconcile_data(session)
@@ -657,72 +725,45 @@ def run_pipeline(
 @app.command("export-leads")
 def export_leads(
     destination: Annotated[Path, typer.Argument(help="Arquivo CSV de destino")],
+    query: Annotated[str, typer.Option("--busca", help="Empresa, CNPJ ou processo")] = "",
+    include_history: Annotated[
+        bool,
+        typer.Option(
+            "--incluir-historico",
+            help="Incluir e identificar atribuições históricas ou invalidadas",
+        ),
+    ] = False,
 ) -> None:
-    """Export the auditable lead summary as UTF-8 CSV."""
+    """Exporta oportunidades e provas com a data de emissão e a validade da atribuição."""
+    from datetime import UTC, datetime
+    from tempfile import NamedTemporaryFile
 
-    async def load_rows() -> list[Lead]:
-        async with async_session_factory() as session:
-            return list(
-                (
-                    await session.scalars(
-                        select(Lead)
-                        .options(
-                            selectinload(Lead.company),
-                            selectinload(Lead.procurement),
-                            selectinload(Lead.triggering_event),
-                            selectinload(Lead.deadline),
-                        )
-                        .order_by(Lead.score.desc(), Lead.created_at.desc())
-                    )
-                ).all()
-            )
+    from app.services.opportunity_export import opportunity_csv
+    from app.services.opportunity_workspace import OpportunityFilters
 
-    rows = asyncio.run(load_rows())
+    filters = OpportunityFilters(
+        query=query.strip(), include_history=include_history, timezone=get_settings().timezone
+    )
     destination.parent.mkdir(parents=True, exist_ok=True)
-    with destination.open("w", encoding="utf-8-sig", newline="") as stream:
-        writer = csv.DictWriter(
-            stream,
-            fieldnames=[
-                "lead_id",
-                "empresa",
-                "cnpj",
-                "orgao",
-                "processo",
-                "evento",
-                "motivo",
-                "prazo_explicito",
-                "prazo_estimado",
-                "status_prazo",
-                "score",
-                "status_lead",
-                "fonte",
-            ],
-        )
-        writer.writeheader()
-        for lead in rows:
-            writer.writerow(
-                {
-                    "lead_id": lead.id,
-                    "empresa": lead.company.legal_name or lead.company.normalized_name,
-                    "cnpj": lead.company.cnpj,
-                    "orgao": lead.procurement.agency_name,
-                    "processo": lead.procurement.pncp_control_number
-                    or lead.procurement.purchase_number,
-                    "evento": lead.triggering_event.event_type.value,
-                    "motivo": lead.reason_summary,
-                    "prazo_explicito": (
-                        lead.deadline.explicit_deadline_at if lead.deadline else None
-                    ),
-                    "prazo_estimado": (
-                        lead.deadline.estimated_deadline_at if lead.deadline else None
-                    ),
-                    "status_prazo": lead.deadline.status.value if lead.deadline else "UNKNOWN",
-                    "score": lead.score,
-                    "status_lead": lead.lead_status.value,
-                    "fonte": lead.triggering_event.source_url,
-                }
-            )
-    typer.echo(f"{len(rows)} lead(s) exportados para {destination.resolve()}")
+
+    async def write() -> int:
+        temporary = None
+        try:
+            async with async_session_factory() as session:
+                with NamedTemporaryFile(dir=destination.parent, delete=False) as stream:
+                    temporary = Path(stream.name)
+                    chunks = 0
+                    async for chunk in opportunity_csv(session, filters, cutoff=datetime.now(UTC)):
+                        stream.write(chunk)
+                        chunks += 1
+            temporary.replace(destination)
+            return chunks - 1  # The first chunk is the CSV header.
+        finally:
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)
+
+    count = asyncio.run(write())
+    typer.echo(f"{count} lead(s) exportados para {destination.resolve()}")
 
 
 @app.command("continue-crawl")

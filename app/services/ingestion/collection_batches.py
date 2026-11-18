@@ -8,13 +8,14 @@ import logging
 import time
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
+from itertools import batched
 from typing import Any
 from uuid import UUID
 
 from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app.connectors.base import ConnectorResult, DataAvailability, RawSourceRecord
+from app.connectors.base import ConnectorResult, DataAvailability, RawPayment, RawSourceRecord
 from app.connectors.continuation import ResponseReplay, request_key
 from app.connectors.http import response_validators
 from app.database import write_session
@@ -36,6 +37,11 @@ def digest(value: Any) -> str:
     ).hexdigest()
 
 
+def retained_response_fingerprint(run_id: UUID, raw: RawSourceRecord) -> str:
+    """Identify the exact HTTP observation retained for continuation."""
+    return digest([str(run_id), raw.record_key, raw.collected_at.isoformat()])
+
+
 def stream_key(filters: dict[str, Any]) -> str:
     return digest(
         {
@@ -46,6 +52,7 @@ def stream_key(filters: dict[str, Any]) -> str:
                 "continuation_batch_id",
                 "resume_automatically",
                 "retry_of_run_id",
+                "parent_run_id",
             }
             and not (key == "force_refresh" and value is False)
         }
@@ -53,7 +60,11 @@ def stream_key(filters: dict[str, Any]) -> str:
 
 
 def row_identity(raw: Any) -> str:
-    data = raw.model_dump(mode="json")
+    return _payload_identity(raw.model_dump(mode="json"))
+
+
+def _payload_identity(payload: dict[str, Any]) -> str:
+    data = dict(payload)
     for name in (
         "observed_at",
         "source_record_ref",
@@ -64,6 +75,13 @@ def row_identity(raw: Any) -> str:
     ):
         data.pop(name, None)
     return digest(data)
+
+
+def _record_from_work_item(item: CollectionWorkItem, model: Any) -> Any:
+    raw = model.model_validate(item.payload)
+    if isinstance(raw, RawPayment) and raw.source_record_id is None and item.source_record_id:
+        raw = raw.model_copy(update={"source_record_id": item.source_record_id})
+    return raw
 
 
 class CollectionCoordinator:
@@ -167,9 +185,7 @@ class CollectionCoordinator:
                 run.heartbeat_at = now
                 # Telemetry is owned by CrawlProgressRecorder. A response from
                 # another concurrent operation must not reset its stage.
-                fingerprint = digest(
-                    [str(self.run_id), raw.record_key, raw.collected_at.isoformat()]
-                )
+                fingerprint = retained_response_fingerprint(self.run_id, raw)
                 record = await session.scalar(
                     select(SourceRecord).where(SourceRecord.fingerprint == fingerprint)
                 )
@@ -437,7 +453,13 @@ class CollectionCoordinator:
         )
 
     async def pending_result(
-        self, source: str, model: Any, *, limit: int = 0, exclude: set[UUID] | None = None
+        self,
+        source: str,
+        model: Any,
+        *,
+        limit: int = 0,
+        exclude: set[UUID] | None = None,
+        include_raw_records: bool = True,
     ) -> ConnectorResult[Any] | None:
         async with self.sessions() as session:
             query = (
@@ -468,10 +490,14 @@ class CollectionCoordinator:
             data = []
             seen = set()
             for item in work:
-                raw = model.model_validate(item.payload)
+                raw = _record_from_work_item(item, model)
                 data.append(raw)
                 self.items[row_identity(raw)] = item.id
-                if item.source_record_id and item.source_record_id not in seen:
+                if (
+                    include_raw_records
+                    and item.source_record_id
+                    and item.source_record_id not in seen
+                ):
                     stored = await session.get(SourceRecord, item.source_record_id)
                     if stored is not None:
                         records.append(
@@ -493,6 +519,25 @@ class CollectionCoordinator:
     async def stage(
         self, source: str, result: ConnectorResult[Any], mapping: dict[str, UUID]
     ) -> None:
+        default_source_id = next(iter(mapping.values())) if len(mapping) == 1 else None
+        default_ref = result.raw_records[0].record_key if len(result.raw_records) == 1 else None
+        prepared: dict[str, tuple[dict[str, Any], UUID | None]] = {}
+        for raw in result.data:
+            payload = raw.model_dump(mode="json")
+            identity = _payload_identity(payload)
+            if identity in prepared:
+                continue
+            source_id = getattr(raw, "source_record_id", None) or (
+                mapping.get(raw.source_record_ref) if raw.source_record_ref else None
+            )
+            if not payload.get("source_record_ref") and default_ref is not None:
+                payload["source_record_ref"] = default_ref
+            prepared[identity] = (
+                payload,
+                source_id if source_id is not None else default_source_id,
+            )
+
+        item_ids: dict[str, UUID] = {}
         async with write_session(self.sessions) as session:
             await self.fence(session)
             batch = await session.get_one(CollectionBatch, self.batch_id)
@@ -518,49 +563,44 @@ class CollectionCoordinator:
                         else None,
                     },
                 }
-            position = int(
-                await session.scalar(
-                    select(func.max(CollectionWorkItem.position)).where(
-                        CollectionWorkItem.batch_id == self.batch_id,
-                        CollectionWorkItem.source == source,
-                    )
-                )
-                or 0
-            )
-            for raw in result.data:
-                identity = row_identity(raw)
-                existing = await session.scalar(
-                    select(CollectionWorkItem).where(
-                        CollectionWorkItem.batch_id == self.batch_id,
+            # Keep the lookup below SQLite's bind limit, without fetching saved payloads.
+            for identities in batched(prepared, 500):
+                existing = await session.execute(
+                    select(CollectionWorkItem.identity, CollectionWorkItem.id).where(
+                        CollectionWorkItem.batch_id == batch.id,
                         CollectionWorkItem.source == source,
                         CollectionWorkItem.kind == "record",
-                        CollectionWorkItem.identity == identity,
+                        CollectionWorkItem.identity.in_(identities),
                     )
                 )
-                if existing is not None:
-                    self.items[identity] = existing.id
-                    continue
-                source_id = getattr(raw, "source_record_id", None) or (
-                    mapping.get(raw.source_record_ref) if raw.source_record_ref else None
+                item_ids.update((identity, identifier) for identity, identifier in existing)
+            missing = [identity for identity in prepared if identity not in item_ids]
+            if missing:
+                position = int(
+                    await session.scalar(
+                        select(func.max(CollectionWorkItem.position)).where(
+                            CollectionWorkItem.batch_id == batch.id,
+                            CollectionWorkItem.source == source,
+                        )
+                    )
+                    or 0
                 )
-                if source_id is None and len(mapping) == 1:
-                    source_id = next(iter(mapping.values()))
-                payload = raw.model_dump(mode="json")
-                if not payload.get("source_record_ref") and len(result.raw_records) == 1:
-                    payload["source_record_ref"] = result.raw_records[0].record_key
-                position += 1
-                item = CollectionWorkItem(
-                    batch_id=batch.id,
-                    source=source,
-                    kind="record",
-                    identity=identity,
-                    payload=payload,
-                    source_record_id=source_id,
-                    position=position,
-                )
-                session.add(item)
+                items = [
+                    CollectionWorkItem(
+                        batch_id=batch.id,
+                        source=source,
+                        kind="record",
+                        identity=identity,
+                        payload=prepared[identity][0],
+                        source_record_id=prepared[identity][1],
+                        position=position + offset,
+                    )
+                    for offset, identity in enumerate(missing, start=1)
+                ]
+                session.add_all(items)
                 await session.flush()
-                self.items[identity] = item.id
+                item_ids.update((item.identity, item.id) for item in items)
+        self.items.update((identity, item_ids[identity]) for identity in prepared)
 
     async def discovery_complete(self, source: str) -> bool:
         async with self.sessions() as session:
@@ -592,7 +632,9 @@ class CollectionCoordinator:
     async def select_records(
         self, source: str, model: Any, *, limit: int = 0, exclude: set[UUID] | None = None
     ) -> list[Any]:
-        result = await self.pending_result(source, model, limit=limit, exclude=exclude)
+        result = await self.pending_result(
+            source, model, limit=limit, exclude=exclude, include_raw_records=False
+        )
         return result.data if result is not None else []
 
     async def confirm(
@@ -653,8 +695,6 @@ class CollectionCoordinator:
 
     async def payment_slice(self, source: str, records: list[Any], limit: int) -> list[Any]:
         """New rows consume the budget; complete a staged commitment atomically."""
-        from app.connectors.base import RawPayment
-
         selected = records[:limit] if limit else list(records)
         remainder = records[len(selected) :]
         cut_groups = {
@@ -691,7 +731,7 @@ class CollectionCoordinator:
                 ).all()
                 for item in rows:
                     if item.payload.get("commitment_external_id") in ready_groups:
-                        raw = RawPayment.model_validate(item.payload)
+                        raw = _record_from_work_item(item, RawPayment)
                         prepared.append(raw.model_copy(update={"collection_work_id": str(item.id)}))
         return prepared
 

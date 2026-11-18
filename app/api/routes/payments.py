@@ -36,13 +36,17 @@ async def list_payments(
     phase: str | None = None,
     match_status: str | None = Query(None, max_length=50),
     source: str | None = Query(None, max_length=50),
+    municipality: str | None = Query(None, max_length=50),
+    budget_function: str | None = Query(None, max_length=120),
+    fiscal_year: int | None = Query(None, ge=2000, le=2100),
     date_from: datetime | None = None,
     date_to: datetime | None = None,
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, object]:
     """List payment documents without assuming an unlinked payment is unpaid."""
 
-    result = await PaymentRepository(db).list_filtered(
+    repository = PaymentRepository(db)
+    result = await repository.list_filtered(
         page=page,
         page_size=page_size,
         supplier_cnpj=supplier_cnpj,
@@ -51,11 +55,17 @@ async def list_payments(
         phase=phase,
         match_status=match_status,
         source=source,
+        municipality=municipality,
+        budget_function=budget_function,
+        fiscal_year=fiscal_year,
         date_from=date_from,
         date_to=date_to,
     )
+    entries = await repository.budget_entries(list(result.items))
     return {
-        "items": [model_dict(row) for row in result.items],
+        "items": [
+            {**model_dict(row), "municipal_budget": entries.get(row.id)} for row in result.items
+        ],
         "page": result.page,
         "page_size": result.page_size,
         "total": result.total,

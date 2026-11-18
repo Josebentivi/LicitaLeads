@@ -5,11 +5,22 @@
   <div>
     <p class="eyebrow">Operação</p>
     <h1>Coletas</h1>
-    <p class="hint">Resultados válidos são preservados mesmo quando uma fonte fica indisponível. A lista é atualizada automaticamente enquanto houver coleta em andamento.</p>
+    <p>Uma coleta consulta contratações, documentos, atas, contratos, pagamentos e o TCE-MA no escopo disponível.</p>
   </div>
 </div>
 
+<details class="panel collection-scope" id="escopo">
+  <summary>Escopo da próxima coleta · {{ selected_uf }} · {{ period.label }}</summary>
+  <div class="filters" data-collection-period>
+    <label>UF <select name="uf" form="complete-collection-form">
+      {% for code, name in ufs %}<option value="{{ code }}"{% if code == selected_uf %} selected{% endif %}>{{ code }} · {{ name }}</option>{% endfor %}
+    </select></label>
+    {% with target_form = 'complete-collection-form' %}{% include "_collection_period_fields.html" %}{% endwith %}
+    <label class="checkbox"><input name="force_refresh" type="checkbox" value="true" form="complete-collection-form"> Reconsultar detalhes já verificados</label>
+  </div>
+  <p class="hint">Ajuste o escopo e clique em <strong>Coletar dados</strong> no topo. Os pagamentos são consultados pelos exercícios incluídos no período.</p>
+</details>
 {% include "_crawl_progress.html" %}
-<div class="section-heading"><h2>Histórico de coletas</h2></div>
+<div class="section-heading"><h2>{{ 'Execução selecionada' if focused_run else 'Histórico de coletas' }}</h2>{% if focused_run %}<a href="/crawls#crawl-table">Voltar ao histórico recente</a>{% elif not llm_status %}<a href="/ia">Fila e sugestões da IA</a>{% endif %}</div>
 {% include "_crawl_table.html" %}
 {% endblock %}

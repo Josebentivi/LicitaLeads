@@ -15,7 +15,7 @@ from time import monotonic
 from typing import Any
 from uuid import UUID, uuid4
 
-from sqlalchemy import func, or_, select, update
+from sqlalchemy import case, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.config import Settings, get_settings
@@ -57,8 +57,9 @@ def request_config(settings: Settings) -> dict[str, Any]:
         "model": settings.llm_model,
         "max_completion_tokens": settings.llm_max_output_tokens,
         "prompt_version": PROMPT_VERSION,
-        "validator_version": 2,
-        "format": "json_object",
+        "validator_version": 3,
+        "selector_version": 2,
+        "format": "json_schema",
     }
 
 
@@ -122,6 +123,7 @@ async def document_snapshot(session: AsyncSession, document: Document) -> dict[s
         "chain": chain,
         "procurement_id": str(document.procurement_id),
         "document_type": document.document_type,
+        "title": document.title,
         "published_at": document.published_at.isoformat() if document.published_at else None,
     }
 
@@ -151,7 +153,9 @@ async def enqueue_document(
     run_id: UUID | None = None,
     batch: LLMBatch | None = None,
     explicit: bool = False,
+    count_reactivated: bool = False,
 ) -> int:
+    """Count new demands, optionally including work reactivated for an existing demand."""
     if not settings.llm_enabled or settings.llm_provider != "openai":
         return 0
     await session.flush()
@@ -165,31 +169,48 @@ async def enqueue_document(
         run = await session.get(CrawlRun, run_id)
         if run is None or run.cancel_requested or run.status == CrawlRunStatus.CANCELLED:
             return 0
+    from app.services.event_detection.authority import assertion_diagnostic
+
+    if assertion_diagnostic("", document.title):
+        return 0
+    eligible = (DocumentChunk.document_id == document.id) & (
+        func.length(DocumentChunk.text) >= settings.llm_min_chunk_characters
+    )
+    eligible_count = (
+        await session.scalar(select(func.count()).select_from(DocumentChunk).where(eligible)) or 0
+    )
+    relevant = or_(
+        *(
+            func.lower(DocumentChunk.text).contains(word)
+            for word in (
+                "inabilit",
+                "desclassific",
+                "recurso",
+                "dilig",
+                "rejeitad",
+                "contrarraz",
+                "decis",
+            )
+        )
+    )
     chunks = list(
         (
             await session.scalars(
                 select(DocumentChunk)
-                .where(DocumentChunk.document_id == document.id)
-                .where(func.length(DocumentChunk.text) >= settings.llm_min_chunk_characters)
-                .order_by(DocumentChunk.sequence, DocumentChunk.id)
+                .where(eligible)
+                .order_by(case((relevant, 0), else_=1), DocumentChunk.sequence, DocumentChunk.id)
                 .limit(settings.llm_max_chunks_per_document)
             )
         ).all()
     )
+    chunks = [chunk for chunk in chunks if not assertion_diagnostic(chunk.text, document.title)]
     count = 0
     for chunk in chunks:
-        cache_key = digest(
-            [
-                request_config(settings),
-                chunk.text,
-                chunk.page_number,
-                chunk.start_offset,
-                chunk.end_offset,
-                chunk.locator,
-            ]
-        )
+        context = await chunk_context(session, document, chunk)
+        cache_key = digest([request_config(settings), cache_context(context)])
         key = digest([str(document.id), str(chunk.id), snapshot, cache_key, config_key(settings)])
         work = await session.scalar(select(LLMWorkItem).where(LLMWorkItem.job_key == key))
+        reactivated = False
         if work is None:
             work = LLMWorkItem(
                 job_key=key,
@@ -198,6 +219,13 @@ async def enqueue_document(
                 document_id=document.id,
                 chunk_id=chunk.id,
                 snapshot=snapshot,
+                context=context,
+                coverage={
+                    "eligible": eligible_count,
+                    "selected": len(chunks),
+                    "omitted": max(0, eligible_count - len(chunks)),
+                    "selector_version": 2,
+                },
             )
             session.add(work)
             await session.flush()
@@ -206,6 +234,7 @@ async def enqueue_document(
                 continue
             work.status, work.error, work.next_attempt_at = "pending", None, None
             work.attempts = 0
+            reactivated = True
         demand = await session.scalar(
             select(LLMDemand.id).where(LLMDemand.batch_id == batch.id, LLMDemand.work_id == work.id)
         )
@@ -213,8 +242,64 @@ async def enqueue_document(
             session.add(
                 LLMDemand(batch_id=batch.id, work_id=work.id, reused=work.status == "succeeded")
             )
+        if demand is None or (count_reactivated and reactivated):
             count += 1
     return count
+
+
+async def chunk_context(
+    session: AsyncSession, document: Document, chunk: DocumentChunk
+) -> dict[str, Any]:
+    """Bounded adjacent context from one document; never ZIP aggregate text."""
+    chunks = list(
+        (
+            await session.scalars(
+                select(DocumentChunk)
+                .where(
+                    DocumentChunk.document_id == document.id,
+                    DocumentChunk.sequence.between(chunk.sequence - 1, chunk.sequence + 1),
+                )
+                .order_by(DocumentChunk.sequence, DocumentChunk.id)
+                .limit(3)
+            )
+        ).all()
+    )
+    pages: dict[str, str] = {}
+    for member in chunks:
+        if member.page_number:
+            key = str(member.page_number)
+            pages[key] = pages.get(key, "") + "\n" + member.text
+    return {
+        "text": f"Documento: {document.title or ''}\n\n"
+        + "\n\n".join(
+            f"[Página {c.page_number or 'não informada'}; localização {c.locator or 'trecho'}]\n{c.text}"
+            for c in chunks
+        ),
+        "pages": pages,
+        "chunks": [
+            {
+                "id": str(c.id),
+                "hash": digest(c.text),
+                "page": c.page_number,
+                "locator": c.locator,
+                "start": c.start_offset,
+                "end": c.end_offset,
+            }
+            for c in chunks
+        ],
+    }
+
+
+def context_pages(context: dict[str, Any]) -> dict[int, str] | None:
+    return {int(k): v for k, v in context.get("pages", {}).items()} or None
+
+
+def cache_context(context: dict[str, Any]) -> dict[str, Any]:
+    """Local row IDs do not change the content/location sent to the provider."""
+    return {
+        **context,
+        "chunks": [{k: v for k, v in chunk.items() if k != "id"} for chunk in context["chunks"]],
+    }
 
 
 async def cancel_for_run(session: AsyncSession, run_id: UUID) -> bool:
@@ -374,6 +459,7 @@ class Dispatch:
     attempt_id: UUID
     text: str
     page: int | None
+    pages: dict[int, str] | None = None
 
 
 class LLMQueueService:
@@ -438,16 +524,8 @@ class LLMQueueService:
             or await document_snapshot(session, doc) != work.snapshot
         ):
             return None
-        key = digest(
-            [
-                request_config(self.settings),
-                chunk.text,
-                chunk.page_number,
-                chunk.start_offset,
-                chunk.end_offset,
-                chunk.locator,
-            ]
-        )
+        context = await chunk_context(session, doc, chunk)
+        key = digest([request_config(self.settings), cache_context(context)])
         return (doc, chunk) if key == work.cache_key else None
 
     async def _apply(
@@ -463,8 +541,8 @@ class LLMQueueService:
         doc, chunk = current
         analyses = EvidenceBoundLLMEventAnalyzer.validate(
             result.analyses,
-            chunk.text,
-            pages={chunk.page_number: chunk.text} if chunk.page_number else None,
+            (work.context or {}).get("text", chunk.text),
+            pages=context_pages(work.context or {}),
         )
         # Import lazily: the processor only imports enqueue_document at commit.
         from app.services.ingestion.processor import DocumentProcessingService
@@ -474,7 +552,14 @@ class LLMQueueService:
             procurement = await session.get(Procurement, doc.procurement_id)
             if procurement:
                 await service._detect_llm_events(
-                    session, procurement, doc, chunk, analyses=analyses
+                    session,
+                    procurement,
+                    doc,
+                    chunk,
+                    analyses=analyses,
+                    context_chunk_ids=[
+                        UUID(c["id"]) for c in (work.context or {}).get("chunks", [])
+                    ],
                 )
         finally:
             await service.aclose()
@@ -484,6 +569,10 @@ class LLMQueueService:
     async def _claim(
         self, fence: Callable[[AsyncSession], Any]
     ) -> tuple[Dispatch | None, datetime | None]:
+        from app.services.scheduler_control import component_paused
+
+        if component_paused("llm", self.settings):
+            return None, None
         async with write_session(self.factory) as session:
             await fence(session)
             state = await session.scalar(
@@ -545,7 +634,10 @@ class LLMQueueService:
             session.add(attempt)
             work.status, work.attempts = "running", work.attempts + 1
             await session.flush()
-            return Dispatch(work.id, attempt.id, chunk.text, chunk.page_number), None
+            context = work.context or await chunk_context(session, doc, chunk)
+            return Dispatch(
+                work.id, attempt.id, context["text"], chunk.page_number, context_pages(context)
+            ), None
 
     async def _send(self, dispatch: Dispatch, fence: Callable[[AsyncSession], Any]) -> LLMReply:
         async with write_session(self.factory) as session:
@@ -557,7 +649,7 @@ class LLMQueueService:
                 or await self._current(session, work) is None
             ):
                 return LLMReply(diagnostic={"error": True, "code": "cancelled_or_obsolete"})
-        pages = {dispatch.page: dispatch.text} if dispatch.page else None
+        pages = dispatch.pages or ({dispatch.page: dispatch.text} if dispatch.page else None)
         task = asyncio.create_task(self.provider.request(dispatch.text, pages))
         try:
             while not task.done():
@@ -589,7 +681,8 @@ class LLMQueueService:
                     for a in EvidenceBoundLLMEventAnalyzer.validate(
                         reply.analyses,
                         dispatch.text,
-                        pages={dispatch.page: dispatch.text} if dispatch.page else None,
+                        pages=dispatch.pages
+                        or ({dispatch.page: dispatch.text} if dispatch.page else None),
                     )
                 ]
             except Exception:

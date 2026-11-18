@@ -1,9 +1,10 @@
 {% extends "base.html" %}
-{% block title %}Ajuda · LicitaLead Monitor<section class="panel"><h2>Participantes e valores documentais</h2><p>Os valores identificam empresa, lote/item, natureza da proposta e evidência. Referências a fornecedores de custo não comprovam participação. Custos, garantias e orçamento estimado permanecem separados das propostas e dos resultados finais.</p><p>Referências ambíguas ficam para revisão; atribuições invalidadas permanecem no histórico. Divergências não alimentam indicadores ou novas avaliações, e notas antigas dependem de recálculo explícito. O histórico fica disponível nas telas da contratação e da empresa.</p></section>
-{% endblock %}
+{% block title %}Ajuda · LicitaLead Monitor{% endblock %}
 {% block content %}
 <div class="page-heading"><div><p class="eyebrow">Manual de uso</p><h1>Ajuda</h1></div></div>
 <p class="hint">Este manual explica, em linguagem simples, como usar a plataforma no dia a dia. Os ícones <strong>i</strong> espalhados pelas telas também trazem explicações curtas: passe o mouse ou clique neles.</p>
+<section class="panel"><h2>Seu trabalho em três passos</h2><ol><li>Na <a href="/dashboard">Minha agenda de análise</a>, abra uma prioridade ou uma fila já filtrada.</li><li>Em <a href="/leads">Oportunidades</a>, confira o fato, a natureza do prazo e a evidência com o documento de origem.</li><li>Registre sua decisão e continue para a próxima oportunidade. Se precisar, gere e copie um rascunho.</li></ol><p>As buscas podem ser guardadas neste navegador. O nome do revisor também é lembrado localmente e continua editável.</p></section>
+<section class="panel"><h2>Participantes e valores documentais</h2><p>Os valores identificam empresa, lote/item, natureza da proposta e evidência. Referências a fornecedores de custo não comprovam participação. Custos, garantias e orçamento estimado permanecem separados das propostas e dos resultados finais.</p><p>Referências ambíguas ficam para revisão; atribuições invalidadas permanecem no histórico. Divergências não alimentam indicadores ou novas avaliações, e notas antigas dependem de recálculo explícito. O histórico fica disponível nas telas da contratação e da empresa.</p></section>
 
 <nav class="panel help-toc" aria-label="Índice do manual">
   <strong>Nesta página</strong>
@@ -72,10 +73,10 @@
 
   <h3>Atas (ARP)</h3>
   <p><strong>Para que serve:</strong> lista as atas de registro de preços publicadas oficialmente.</p>
-  <p><strong>O que fazer aqui:</strong> em <strong>"Coletar atas agora"</strong>, escolha UF, órgão/unidade e fonte, ou todas as unidades conhecidas e fontes disponíveis. A lista vem das contratações já identificadas e pode não cobrir toda a UF. Escolha os dias e acompanhe em <a href="/crawls">Coletas</a>. Abra uma ata para ver itens, valores, fornecedores e histórico.</p>
+  <p><strong>O que fazer aqui:</strong> busque a ata e abra o detalhe para ver itens, valores, fornecedores e histórico. <strong>Coletar dados</strong> consulta as unidades conhecidas da UF. Acompanhe a atualização em <a href="/crawls">Coletas</a>.</p>
 
   <h3>Contratos e pagamentos</h3>
-  <p>Em <a href="/contratos">Contratos</a>, colete por fonte, CNPJ do órgão e período e confira itens, termos e pagamentos conciliados. Em <a href="/pagamentos">Pagamentos</a>, consulte as fontes municipais ou importe CSV/JSON do portal; confira os erros e a origem. Um contrato não é um pagamento, e um pagamento não conciliado não prova inadimplência.</p>
+  <p>Em <a href="/contratos">Contratos</a>, busque por número, órgão ou CNPJ do fornecedor. Em <a href="/pagamentos">Pagamentos</a>, confira os vínculos e a origem ou importe CSV/JSON oficial. A coleta do topo atualiza ambos. Um pagamento sem vínculo precisa de conferência e não prova inadimplência.</p>
 
   <h3>Leads</h3>
   <p><strong>Para que serve:</strong> lista as oportunidades geradas para o escritório.</p>
@@ -153,14 +154,15 @@
   <h2>Para quem opera as coletas</h2>
   <p>Esta seção é curta e voltada a quem inicia e acompanha as coletas. O advogado não precisa dela no dia a dia.</p>
   <ul>
-    <li><strong>Iniciar uma coleta:</strong> no Dashboard, em Atas ou Contratos, pela API (<code>POST /api/crawls/run</code>) ou pela CLI. O formulário de atas começa com até 7 dias, limitado pela janela automática se ela for menor; o comando <code>crawl-atas</code> usa 365 se <code>--days</code> for omitido. A tela <a href="/crawls">Coletas</a> acompanha e oferece ações sobre as execuções.</li>
-    <li><strong>Coletas automáticas:</strong> por padrão, o sistema também coleta sozinho (atualização a cada 60 minutos, descoberta a cada 6 horas, documentos a cada 2 horas). As atas de registro de preços são coletadas ao iniciar o agendador e a cada 24 horas, para órgãos/unidades conhecidos da UF, com janela inicial e de revisão de 30 dias por padrão (segue <code>DEFAULT_LOOKBACK_DAYS</code>, salvo configuração específica de atas); a página <a href="/atas">Atas</a> também permite <strong>"Coletar atas agora"</strong>. Para parar sem desligar o programa, use <strong>"Pausar coletas automáticas"</strong> em Configurações; o botão "Retomar" volta a ativar. Apagar todos os dados pausa as coletas automaticamente para o banco não ser repovoado na hora.</li>
-    <li><strong>Encerrar:</strong> uma coleta em andamento pode ser encerrada na própria tela.</li>
+    <li><strong>Iniciar uma coleta:</strong> clique em <strong>Coletar dados</strong> no topo. A coleta consulta contratações, documentos, atas, contratos, pagamentos e o TCE-MA no escopo disponível. Para ajustar a UF ou as datas inclusivas, use <a href="/crawls#escopo">Escopo da próxima coleta</a> e clique no mesmo botão. A tela <a href="/crawls">Coletas</a> mostra o resultado de cada etapa.</li>
+    <li><strong>Coletas automáticas:</strong> por padrão, o sistema também coleta sozinho (atualização a cada 60 minutos, descoberta a cada 6 horas, documentos a cada 2 horas). As atas são consultadas ao iniciar o agendador e a cada 24 horas, para órgãos e unidades conhecidos na UF. Para parar sem desligar o programa, use <strong>Pausar coletas automáticas</strong> em Configurações. Apagar todos os dados pausa as coletas automáticas.</li>
+    <li><strong>Encerrar coleta:</strong> uma coleta em andamento pode ser cancelada na própria tela.</li>
+    <li><strong>Encerrar a aplicação:</strong> o botão no rodapé do menu lateral pede confirmação, cancela coletas, IA e testes ativos ou pendentes e encerra a instância iniciada pelo <code>iniciar.bat</code>. Os dados concluídos são preservados. A próxima abertura mantém coletas e IA pausadas. Se o navegador não fechar a aba, ela mostrará a confirmação; perda de comunicação isolada não comprova o desligamento completo.</li>
     <li><strong>Continuar:</strong> retoma o lote e o período congelados, inclusive registros já recebidos. Lotes agendados limitados podem continuar no ciclo automático; falhas e cancelamentos exigem continuação explícita.</li>
     <li><strong>Repetir:</strong> cria outra execução com os filtros anteriores. Por padrão, reaproveita versões comprovadamente inalteradas; marque <strong>"Reconsultar detalhes já verificados"</strong> para forçar nova consulta. A continuação preserva a opção do lote original.</li>
     <li><strong>Interrompida ou parcial:</strong> consulte o diagnóstico e as pendências. Limites, falhas ou respostas incompletas podem produzir resultado parcial; registros já confirmados são preservados.</li>
     <li><strong>Documentos:</strong> são processados após as APIs quando a opção de documentos está ativa, ou pelo comando <code>python -m app.cli process-documents</code>. Arquivos com falha elegíveis podem ser reprocessados no lote, respeitando prazo e limite de tentativas.</li>
-    <li><strong>IA:</strong> quando ativada, analisa trechos em uma fila separada; confira em Coletas pendências, bloqueios e custos conhecidos. Ela não substitui a revisão humana.</li>
+    <li><strong><a href="/ia">Central de IA</a>:</strong> reúne documentos e análises, sugestões para revisão, consumo e configuração. Coletas e IA possuem pausas independentes. A análise pode cobrir apenas parte do documento; confirme a cobertura e as evidências. Enfileirar documentos já extraídos não inicia download ou OCR. Sugestões só serão vinculadas após confirmação humana.</li>
     <li><strong>Atualizar campos antigos:</strong> <code>python -m app.cli backfill-fields</code> recupera SRP, amparo legal e rota de contratação de coletas anteriores, sem novo download.</li>
     <li><strong>Cuidado com o reset:</strong> em Configurações, "Apagar todos os dados" remove tudo e não pode ser desfeito.</li>
     <li><strong>Bloqueio por trava antiga:</strong> se o apagamento indicar um job em andamento sem haver trabalho real, use "Liberar travas antigas" na própria tela; travas expiradas ou de coleta inativa são removidas automaticamente antes do apagamento.</li>

@@ -149,3 +149,6 @@ __all__ = [
     "UTCDateTime",
     "utc_now",
 ]
+from app.models.llm_review import LLMEventCitation, LLMSuggestion
+
+__all__ += ["LLMEventCitation", "LLMSuggestion"]

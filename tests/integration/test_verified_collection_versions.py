@@ -120,6 +120,38 @@ async def test_same_official_version_avoids_details_and_force_refresh_fetches_ag
         await raw.aclose()
 
 
+async def test_direct_pncp_refresh_only_expands_when_the_official_version_changes(database):
+    state, client, pipeline = setup(database)
+    request = PipelineRequest(
+        connector="pncp",
+        external_ids=(state["row"]["numeroControlePNCP"],),
+        process_documents=False,
+    )
+    try:
+        first = await pipeline.run(request)
+        assert first.status is CrawlRunStatus.COMPLETED
+
+        state["requests"].clear()
+        unchanged = await pipeline.run(request)
+        paths = [call.url.path for call in state["requests"]]
+        assert len(paths) == 1 and paths[0].endswith("/compras/2026/1")
+        assert unchanged.source_results["pncp"]["records_reused"] == 1
+
+        state["requests"].clear()
+        state["row"]["dataAtualizacaoGlobal"] = "2026-10-28T11:00:00"
+        state["item"] = "Equipamento atualizado"
+        changed = await pipeline.run(request)
+        assert changed.status is CrawlRunStatus.COMPLETED
+        assert changed.source_results["pncp"]["records_reused"] == 0
+        paths = [call.url.path for call in state["requests"]]
+        assert any(path.endswith("/itens") for path in paths)
+        assert any(path.endswith("/arquivos") for path in paths)
+        async with database.sessions() as session:
+            assert await session.scalar(select(ProcurementItem.description)) == state["item"]
+    finally:
+        await client.aclose()
+
+
 async def test_one_final_detail_request_both_enriches_and_verifies_the_bundle(database):
     state, raw, pipeline = setup(database)
     try:

@@ -12,6 +12,8 @@ origem de cada conclusão e nunca inventa participantes, eventos ou prazos.
 
 - [Coletas incrementais, continuação e histórico de alterações](docs/coletas_incrementais.md)
 - [Fila de IA](docs/fila_ia.md) e [testes locais](docs/testes_locais.md)
+- [Experiência do analista](docs/experiencia_usuario.md): agenda de prioridades,
+  evidências legíveis, revisão contínua, buscas e coletas simplificadas.
 
 A documentação completa está em [`docs/`](docs/README.md):
 
@@ -137,10 +139,11 @@ python -m app.cli prepare-test-browser
 python -m app.cli export-leads leads.csv
 ```
 
-O exemplo de atas escolhe 30 dias explicitamente. Sem `--days`, a CLI usa 365;
-o formulário manual começa com até 7 dias (ou a janela automática, se menor),
-e a coleta automática usa a janela geral de 30 dias no exemplo, salvo configuração específica. As unidades da interface
-são as já conhecidas e podem não cobrir toda a UF.
+O exemplo de atas escolhe 30 dias explicitamente. Sem `--days`, a CLI usa 365.
+Na interface, **Coletar dados** consulta contratações, documentos, atas,
+contratos e pagamentos disponíveis. A página **Coletas** permite ajustar a UF e
+o período inclusivo e acompanha as etapas. Atas usam as unidades já conhecidas;
+a cobertura pode ser menor que a UF.
 
 O scheduler é deliberadamente separado da API:
 
@@ -153,8 +156,8 @@ cada 60 min, documentos a cada 2 h). Acompanhe as execuções em `/crawls`.
 As atas de registro de preços são coletadas por
 padrão ao iniciar o scheduler e a cada 24 h, para órgãos/unidades conhecidos da UF.
 A janela inicial e de revisão segue `DEFAULT_LOOKBACK_DAYS` (30 dias), salvo override
-explícito de `PRICE_REGISTRY_LOOKBACK_DAYS`; o intervalo usa `SCHEDULER_PRICE_REGISTRY_HOURS`. A página
-`/atas` também oferece **Coletar atas agora**. As coletas automáticas podem ser
+explícito de `PRICE_REGISTRY_LOOKBACK_DAYS`; o intervalo usa `SCHEDULER_PRICE_REGISTRY_HOURS`.
+As coletas automáticas podem ser
 pausadas/retomadas em Configurações (as rotinas continuam rodando, mas são
 puladas) e o reset de dados as pausa para não repovoar o banco. Use
 `iniciar.bat --no-scheduler` para subir sem scheduler.
@@ -291,9 +294,9 @@ MVP não deve ser exposto publicamente sem uma camada de autenticação.
 - `crawl-payments-municipal` tenta S?o Lu?s, Imperatriz, Timon, Caxias e Bacabal;
   S?o Lu?s pode retornar `access_restricted` (Cloudflare) e Timon respondeu HTTP 500
   no endpoint identificado. Falhas ficam registradas como `CrawlRun` com diagn?stico.
-- Na p?gina `/pagamentos`, as coletas municipais rodam em background e mostram
-  est?gio, tempo decorrido e progresso dos pagamentos; o painel ? atualizado por
-  HTMX enquanto houver uma coleta ativa.
+- **Coletar dados** consulta portais municipais por exercício. A tela **Coletas**
+  acompanha o progresso; em **Pagamentos**, ficam o acervo, a conciliação e a
+  importação de arquivos oficiais quando o portal restringe o acesso automático.
 
 ## Navegacao
 

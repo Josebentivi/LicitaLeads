@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app.config import get_settings
 from app.database import async_session_factory
 from app.models import CollectionBatch, CrawlRun, CrawlRunStatus, JobLease
+from app.repositories.crawls import JobLeaseRepository
 from app.services.ingestion.document_retry import DOCUMENT_LEASE
 
 _STALE_MESSAGE = (
@@ -30,6 +31,14 @@ def _normalize_cursor(run: CrawlRun, message: str) -> None:
     """Rewrite stale per-source progress so a terminal run never shows as running."""
 
     cursor = dict(run.cursor or {})
+    stages = cursor.get("complete_stages")
+    if isinstance(stages, list):
+        from app.services.ingestion.complete_collection import close_collection_stages
+
+        terminal = "cancelled" if run.status is CrawlRunStatus.CANCELLED else "failed"
+        cursor["complete_stages"] = close_collection_stages(stages, terminal)
+        cursor["progress"] = {"stage": terminal}
+        run.cursor = cursor
     sources = cursor.get("sources")
     if not isinstance(sources, dict):
         return
@@ -52,6 +61,13 @@ async def _release_lease(session: AsyncSession, run: CrawlRun, now: datetime) ->
     """Release the crawl lease held by the interrupted run, never a newer one."""
 
     filters = run.filters if isinstance(run.filters, dict) else {}
+    if filters.get("mode") == "complete":
+        from app.services.ingestion.complete_collection import COMPLETE_COLLECTION_LEASE
+
+        await JobLeaseRepository(session).release(
+            name=COMPLETE_COLLECTION_LEASE, owner_id=f"complete:{run.id}"
+        )
+        return
     if run.batch_id:
         batch = await session.get(CollectionBatch, run.batch_id)
         if batch is not None and batch.last_run_id == run.id:

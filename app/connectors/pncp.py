@@ -125,6 +125,7 @@ class PNCPConnector:
     """Read-only connector for officially documented, unauthenticated PNCP APIs."""
 
     name = "pncp"
+    adapter_version = 2  # Earlier proofs accepted non-award supplier placeholders.
 
     def __init__(
         self,
@@ -474,7 +475,10 @@ class PNCPConnector:
             partial=partial,
         )
 
-    async def fetch_results(self, external_id: str) -> ConnectorResult[list[RawResult]]:
+    async def fetch_results(
+        self, external_id: str, *, item_numbers: set[int] | None = None
+    ) -> ConnectorResult[list[RawResult]]:
+        """Read published results, optionally scoped to specific item numbers."""
         reference = parse_pncp_external_id(external_id)
         cached_items = self._item_cache.pop(external_id, None)
         if cached_items is not None:
@@ -495,7 +499,9 @@ class PNCPConnector:
             if item.get("temResultado") is not True:
                 continue
             item_number = to_int(item.get("numeroItem"))
-            if item_number is None:
+            if item_number is None or (
+                item_numbers is not None and item_number not in item_numbers
+            ):
                 continue
             path = (
                 f"orgaos/{reference.cnpj}/compras/{reference.year}/{reference.sequence}"
@@ -515,6 +521,10 @@ class PNCPConnector:
                 errors.append(ConnectorContractError("PNCP result collection truncated"))
             by_ref = self._records_by_ref(result_records)
             for row, row_ref in zip(result_rows, result_refs, strict=True):
+                from app.services.event_detection.authority import nonaward_supplier
+
+                if nonaward_supplier(row.get("nomeRazaoSocialFornecedor")):
+                    continue  # Retained in the source page; not an award or a transport failure.
                 if not self._has_result_identity(row):
                     errors.append(
                         ConnectorContractError("PNCP result row without item/supplier identity")
@@ -1464,6 +1474,10 @@ class PNCPConnector:
 
     @staticmethod
     def _has_result_identity(row: dict[str, Any]) -> bool:
+        from app.services.event_detection.authority import nonaward_supplier
+
+        if nonaward_supplier(row.get("nomeRazaoSocialFornecedor")):
+            return False
         return to_int(row.get("numeroItem")) is not None and bool(
             normalized_identifier(row.get("niFornecedor")) or row.get("nomeRazaoSocialFornecedor")
         )
