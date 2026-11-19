@@ -427,7 +427,8 @@ def test_parse_pncp_external_id_accepts_alphanumeric_cnpj() -> None:
 
 
 @pytest.mark.asyncio
-async def test_pncp_contract_discovery_maps_contract_and_provenance() -> None:
+@pytest.mark.parametrize("bare_list", [False, True], ids=["envelope", "list"])
+async def test_pncp_contract_discovery_maps_contract_and_provenance(bare_list: bool) -> None:
     row = {
         "numeroControlePNCP": "contract-control-1",
         "numeroControlePncpCompra": "12345678000199-1-000001/2026",
@@ -450,19 +451,20 @@ async def test_pncp_contract_discovery_maps_contract_and_provenance() -> None:
         "niFornecedor": "00000000000191",
         "nomeRazaoSocialFornecedor": "Empresa Contratada Ltda.",
     }
+    payload = (
+        [row]
+        if bare_list
+        else {
+            "data": [row],
+            "totalRegistros": 1,
+            "totalPaginas": 1,
+            "numeroPagina": 1,
+            "paginasRestantes": 0,
+        }
+    )
 
     def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(
-            200,
-            json={
-                "data": [row],
-                "totalRegistros": 1,
-                "totalPaginas": 1,
-                "numeroPagina": 1,
-                "paginasRestantes": 0,
-            },
-            request=request,
-        )
+        return httpx.Response(200, json=payload, request=request)
 
     raw_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     connector = PNCPConnector(
@@ -482,7 +484,43 @@ async def test_pncp_contract_discovery_maps_contract_and_provenance() -> None:
     assert result.data[0].supplier_cnpj == "00000000000191"
     assert result.data[0].global_value == 1000
     assert result.data[0].source_record_ref == result.raw_records[0].record_key
+    assert result.is_complete and result.pagination.total_records == 1
     await raw_client.aclose()
+
+
+@pytest.mark.parametrize(
+    ("discovery_kind", "path"),
+    [("publication", "/contratos"), ("update", "/contratos/atualizacao")],
+)
+async def test_pncp_contract_discovery_treats_http_204_as_complete_empty(
+    discovery_kind: str, path: str
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/api/consulta/v1" + path
+        assert request.url.params["pagina"] == "1"
+        return httpx.Response(204)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as raw_client:
+        connector = PNCPConnector(
+            _settings(), http_client=AsyncHTTPClient(_settings(), client=raw_client)
+        )
+        result = await connector.discover_contracts(
+            ProcurementFilters(
+                start_date=date(2026, 9, 15),
+                end_date=date(2026, 9, 16),
+                agency_cnpj="00000000000191",
+                discovery_kind=discovery_kind,
+            )
+        )
+
+    assert result.availability is DataAvailability.EMPTY
+    assert result.data == []
+    assert result.is_complete
+    assert result.pagination.total_records == 0
+    assert result.pagination.fetched_pages == 1
+    assert len(result.raw_records) == 1
+    assert result.raw_records[0].http_status == 204
+    assert result.raw_records[0].raw_payload == []
 
 
 @pytest.mark.parametrize("discovery_kind", ["publication", "update"])

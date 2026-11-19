@@ -14,6 +14,7 @@ from app.connectors.pncp import PNCPConnector
 from app.models import (
     CollectionBatch,
     CollectionWorkItem,
+    Contract,
     CrawlRun,
     CrawlRunStatus,
     FieldState,
@@ -279,6 +280,66 @@ async def test_scoped_collection_checks_items_before_other_details_and_resumes_p
         )
         assert len(saved_origins := list(origins)) == 2
         assert all("/publicacao" in endpoint for endpoint in saved_origins)
+
+
+async def test_empty_contract_response_completes_a_failed_collection_on_resume(database):
+    settings = Settings(_env_file=None, http_min_request_interval_seconds=0)
+    requests = []
+
+    def handler(request):
+        assert request.url.path.endswith("/contratos")
+        requests.append(dict(request.url.params))
+        return httpx.Response(204)
+
+    async def collect(request, run_id=None, *, interrupt=False):
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            connector = PNCPConnector(
+                settings, http_client=AsyncHTTPClient(settings, client=client)
+            )
+            if interrupt:
+                discover = connector.discover_contracts
+
+                async def fail_after_response(filters):
+                    await discover(filters)
+                    raise RuntimeError("Falha após salvar a resposta")
+
+                connector.discover_contracts = fail_after_response
+            pipeline = IngestionPipeline(
+                settings, session_factory=database.sessions, connectors={"pncp": connector}
+            )
+            return await pipeline.run(request, run_id=run_id)
+
+    request = PipelineRequest(connector="pncp", mode="contracts", process_documents=False)
+    first = await collect(request, interrupt=True)
+    assert first.source_results["pncp"]["status"] == "failed"
+    async with database.sessions.begin() as session:
+        child, filters = await create_continuation(session, first.run_id)
+        batch = await session.get(CollectionBatch, child.batch_id)
+        assert batch.status == "failed"
+        saved = await session.scalar(
+            select(CollectionWorkItem).where(
+                CollectionWorkItem.batch_id == batch.id, CollectionWorkItem.kind == "response"
+            )
+        )
+        assert saved.payload["http_status"] == 204
+        assert saved.payload["raw_payload"] == []
+        child_id, batch_id = child.id, child.batch_id
+
+    second = await collect(pipeline_request_from_filters(filters), child_id)
+    assert second.status is CrawlRunStatus.COMPLETED, second.diagnostics
+    assert (second.records_found, second.records_created, second.records_updated) == (0, 0, 0)
+    assert len(requests) == 2 and requests[0] == requests[1]
+    async with database.sessions() as session:
+        batch = await session.get(CollectionBatch, batch_id)
+        assert batch.status == "complete"
+        assert batch.cursors["pncp"]["discovery_complete"]
+        assert await session.scalar(select(Contract.id)) is None
+        responses = await session.scalars(
+            select(SourceRecord).where(
+                SourceRecord.crawl_run_id == child_id, SourceRecord.http_status == 204
+            )
+        )
+        assert [record.availability for record in responses] == [DataAvailability.EMPTY]
 
 
 async def test_real_connector_replays_saved_pages_after_worker_restart(database):

@@ -21,6 +21,7 @@ from app.connectors._common import (
     normalized_identifier,
     normalized_text,
     observed_pages,
+    pagination_number,
     positive_int,
     repeated_page,
     runtime_settings,
@@ -876,7 +877,7 @@ class PNCPConnector:
                     break
                 total_pages += observed_total_pages if page == 1 else 0
                 if page == 1:
-                    total_records += to_int(payload.get("totalRegistros")) or len(rows)
+                    total_records = pagination_number(payload, "totalRegistros") or len(rows)
                 has_more = page < observed_total_pages
                 if (
                     page_budget_exhausted(
