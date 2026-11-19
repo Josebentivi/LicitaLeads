@@ -1,15 +1,53 @@
 {% extends "base.html" %}
 {% block title %}{{ company.legal_name or company.normalized_name }} · Empresa{% endblock %}
 {% block content %}
+{% set legal_name = (company.legal_name or '') | trim %}
 <p><a href="{{ return_to or '/empresas' }}">← {{ 'Pagamentos' if return_to and return_to.startswith('/pagamentos') else 'Empresas' }} · voltar aos filtros</a></p>
 <p><a href="/ia?tab=suggestions&amp;company={{ company.cnpj }}">Sugestões de IA desta empresa</a> · <a href="/ia?tab=documents&amp;company={{ company.cnpj }}">Análises no contexto das contratações</a></p>
 <details class="panel"><summary>Sugestões de IA · separadas dos fatos confirmados</summary><div id="company-ai-content"><a data-company-load href="/ia?tab=suggestions&amp;company={{ company.cnpj }}" hx-get="/ia?tab=suggestions&amp;company={{ company.cnpj }}" hx-target="#company-ai-content" hx-swap="innerHTML">Carregar sugestões para revisão</a></div></details>
 <header class="procurement-header">
-  <div><p class="eyebrow">Visão completa da empresa</p><h1>{{ company.legal_name or company.normalized_name }}</h1>
+  <div><p class="eyebrow">Visão completa da empresa</p><h1>{{ legal_name or company.normalized_name }}</h1>
   <p>CNPJ {{ company.cnpj | company_value('cnpj') }}{% if company.trade_name %} · {{ company.trade_name }}{% endif %} · Sede: {{ company.municipality or 'Município não informado' }} / {{ company.uf or 'UF não informada' }}</p>
   {% if company.domain or company.website %}<p>{% if company.domain %}Domínio corporativo: {{ company.domain }}{% endif %}{% if company.website and company.website|company_safe_url %} · <a href="{{ company.website }}" target="_blank" rel="noopener noreferrer">Site corporativo</a>{% endif %}</p>{% endif %}</div>
 </header>
 <p class="hint">{{ overview.notice }} Os vínculos usam CNPJ e identificadores oficiais. Prazos e indícios exigem conferência; a pontuação é uma ferramenta de priorização.</p>
+<section class="panel" id="dados-corporativos">
+  <h2>Dados corporativos</h2>
+  <p>{{ contact_profile.missing_count }} de 5 campos a completar ou verificar.</p>
+  <dl class="facts">
+    <div><dt>Razão social</dt><dd>{{ legal_name or 'Não informada' }}{% if contact_profile.name_source_url | company_safe_url %} · <a href="{{ contact_profile.name_source_url }}" target="_blank" rel="noopener noreferrer">Consultar origem</a>{% endif %}</dd></div>
+    <div><dt>CNPJ</dt><dd>{{ company.cnpj | company_value('cnpj') }}</dd></div>
+    {% for title, contact in contact_profile.details.items() %}
+    <div><dt>{{ title }}</dt><dd>{% if contact %}{{ contact.contact_value }} · {{ contact.status | company_label }}{% if contact.source_url | company_safe_url %} · <a href="{{ contact.source_url }}" target="_blank" rel="noopener noreferrer">Consultar origem</a>{% endif %}{% else %}Não informado{% endif %}</dd></div>
+    {% endfor %}
+  </dl>
+  <details>
+    <summary>Registrar um dado corporativo</summary>
+    <form method="post" action="/empresas/{{ company.cnpj }}/contatos" class="filters">
+      <label>Campo <select name="field" required>{% if not legal_name %}<option value="legal_name">Razão social</option>{% endif %}<option value="address">Endereço corporativo</option><option value="phone">Telefone</option><option value="email">E-mail</option></select></label>
+      <label>Dado <input name="value" required maxlength="1000"></label>
+      <label>Endereço público da fonte <input type="url" name="source_url" required maxlength="2048"></label>
+      <label><input type="checkbox" name="corporate" value="true" required> Conferi o dado público e corporativo na fonte.</label>
+      <button type="submit">Registrar</button>
+    </form>
+  </details>
+</section>
+<section class="panel" id="historico-participacoes">
+  <h2>Histórico de participações</h2>
+  <p class="hint">Contratações distintas com participação comprovada no acervo, agrupadas pela data de publicação nos últimos dois anos.</p>
+  <form method="get" action="/empresas/{{ company.cnpj }}#historico-participacoes" class="filters">
+    <input type="hidden" name="section" value="{{ initial.section }}">
+    <input type="hidden" name="return_to" value="{{ return_to }}">
+    {% if status %}<input type="hidden" name="status" value="{{ status }}">{% endif %}
+    {% if active_only %}<input type="hidden" name="active_only" value="true">{% endif %}
+    <label>Agrupar por <select name="history"><option value="semestre"{% if history_mode == 'semestre' %} selected{% endif %}>Semestre</option><option value="ano"{% if history_mode == 'ano' %} selected{% endif %}>Ano</option></select></label>
+    <button type="submit">Atualizar histórico</button>
+  </form>
+  <div class="table-wrap"><table>
+    <thead><tr><th>Período</th><th>Publicação</th><th>Contratações com participação</th></tr></thead>
+    <tbody>{% for period in participation_history %}<tr><td>{{ period.title }}</td><td>{{ period.start.strftime('%d/%m/%Y') }} a {{ period.end.strftime('%d/%m/%Y') }}</td><td>{% if period.total %}<a href="{{ period.href }}">{{ period.total }} contratação(ões)</a>{% else %}0{% endif %}</td></tr>{% endfor %}</tbody>
+  </table></div>
+</section>
 <nav class="company-section-nav" aria-label="Seções da empresa">{% for key,label in section_labels.items() %}<a href="#company-{{ key }}">{{ label }} ({{ overview.counts[key] }})</a>{% endfor %}</nav>
 {% include "_company_summary.html" %}
 {% for key,label in section_labels.items() %}

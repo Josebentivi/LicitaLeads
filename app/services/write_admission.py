@@ -3,6 +3,7 @@
 from datetime import UTC, datetime
 
 from sqlalchemy import event, select, text, update
+from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import ORMExecuteState, Session
 
 from app.models import Base, JobLease
@@ -33,6 +34,12 @@ def _admit(session: Session) -> None:
         raise MaintenanceInProgress("a manutenção perdeu a propriedade da lease")
     if lease and lease.owner_id != owner:
         raise MaintenanceInProgress("manutenção exclusiva em andamento; tente novamente depois")
+
+
+async def admit_before_row_lock(session: AsyncSession) -> None:
+    """Use the same lock order as writes that reach admission before locking rows."""
+    if session.get_bind().dialect.name == "postgresql":
+        await session.run_sync(_admit)
 
 
 @event.listens_for(ApplicationSession, "before_flush")

@@ -5,9 +5,11 @@ Supplier identity is exact. Looking at a dossier never repairs legacy links.
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime, time, timedelta
 from typing import Any, Literal
+from urllib.parse import urlencode
 from uuid import UUID
+from zoneinfo import ZoneInfo
 
 from fastapi import HTTPException
 from sqlalchemy import and_, exists, func, literal, or_, select
@@ -18,6 +20,8 @@ from app.api.serialization import model_dict
 from app.models import (
     Company,
     CompanyContact,
+    ContactStatus,
+    ContactType,
     Contract,
     ContractItem,
     ContractTerm,
@@ -38,6 +42,7 @@ from app.models import (
 )
 from app.repositories.current_evidence import evidence_current as evidence_current
 from app.repositories.current_evidence import inactive_document_ids as inactive_document_ids
+from app.services.collection_periods import earliest_collection_day
 from app.services.identifiers import is_valid_cnpj, normalize_cnpj
 from app.services.participation_integrity import (
     event_verified,
@@ -124,11 +129,12 @@ def supplier_identity(model, company: Company | type[Company]):
     )
 
 
-async def find_company(db: AsyncSession, cnpj: str) -> Company:
+async def find_company(db: AsyncSession, cnpj: str, *, lock: bool = False) -> Company:
     normalized = normalize_cnpj(cnpj)
     if not normalized or not is_valid_cnpj(normalized):
         raise HTTPException(404, "Empresa não encontrada")
-    company = await db.scalar(select(Company).where(Company.cnpj == normalized))
+    statement = select(Company).where(Company.cnpj == normalized)
+    company = await db.scalar(statement.with_for_update() if lock else statement)
     if company is None:
         raise HTTPException(404, "Empresa não encontrada")
     return company
@@ -353,6 +359,8 @@ class CompanyOverviewService:
         )
 
     async def overview(self) -> dict[str, Any]:
+        from app.services.opportunity_workspace import deadline_usable
+
         # Scalar subqueries keep the number of round trips independent of the dossier size.
         counts = {}
         for section in MODELS:
@@ -384,11 +392,13 @@ class CompanyOverviewService:
             )
             .limit(3)
         )
+        today = datetime.now(UTC)
         upcoming = await self.db.scalars(
             self.statement("deadlines")
             .where(
                 func.coalesce(Deadline.explicit_deadline_at, Deadline.estimated_deadline_at)
-                >= datetime.now(UTC)
+                >= today,
+                deadline_usable(today),
             )
             .order_by(None)
             .order_by(
@@ -411,6 +421,124 @@ class CompanyOverviewService:
             "contacts": [self.row("contacts", x) for x in contacts],
             "notice": "Acervo coletado; ausência de registros não comprova ausência de atividade.",
         }
+
+    async def contact_profile(self) -> dict[str, Any]:
+        details = {}
+        labels = {
+            ContactType.ADDRESS: "Endereço corporativo",
+            ContactType.PHONE: "Telefone",
+            ContactType.EMAIL: "E-mail",
+        }
+        for kind, title in labels.items():
+            row = await self.db.scalar(
+                select(CompanyContact)
+                .where(
+                    CompanyContact.company_id == self.company.id,
+                    CompanyContact.contact_type == kind,
+                    CompanyContact.is_corporate.is_(True),
+                    CompanyContact.is_personal.is_(False),
+                    CompanyContact.status != ContactStatus.INVALID,
+                )
+                .order_by(
+                    (CompanyContact.status == ContactStatus.VERIFIED).desc(),
+                    CompanyContact.verified_at.desc().nullslast(),
+                    CompanyContact.confidence.desc(),
+                    CompanyContact.updated_at.desc(),
+                    CompanyContact.id,
+                )
+                .limit(1)
+            )
+            details[title] = row
+        name_origin = await self.db.execute(
+            select(FieldObservation.value, SourceRecord.endpoint)
+            .join(SourceRecord, SourceRecord.id == FieldObservation.source_record_id)
+            .where(
+                FieldObservation.entity_type == "company",
+                FieldObservation.entity_id == self.company.id,
+                FieldObservation.field_name == "legal_name",
+            )
+            .order_by(FieldObservation.collected_at.desc(), FieldObservation.id)
+            .limit(1)
+        )
+        origin = name_origin.one_or_none()
+        missing_count = int(not (self.company.legal_name or "").strip()) + sum(
+            row is None or row.status != ContactStatus.VERIFIED for row in details.values()
+        )
+        return {
+            "details": details,
+            "name_source_url": (
+                origin.endpoint if origin and origin.value == self.company.legal_name else None
+            ),
+            "missing_count": missing_count,
+        }
+
+    async def participation_history(
+        self, granularity: Literal["semestre", "ano"], *, timezone: str, today: date | None = None
+    ) -> list[dict[str, Any]]:
+        """Count each documented procurement once in its publication period."""
+        zone = ZoneInfo(timezone)
+        current_day = today or datetime.now(zone).date()
+        end = current_day
+        earliest = earliest_collection_day(current_day)
+        periods: list[tuple[date, date, str]] = []
+        while end >= earliest:
+            second_half = granularity == "semestre" and end.month > 6
+            calendar_start = date(end.year, 7 if second_half else 1, 1)
+            start = max(earliest, calendar_start)
+            title = (
+                str(end.year)
+                if granularity == "ano"
+                else f"{2 if second_half else 1}º semestre de {end.year}"
+            )
+            periods.append((start, end, title))
+            end = start - timedelta(days=1)
+
+        def publication_start(day: date) -> datetime:
+            return datetime.combine(day, time.min, tzinfo=zone).astimezone(UTC)
+
+        counts = []
+        for start, end, _ in periods:
+            counts.append(
+                func.count(Procurement.id).filter(
+                    Procurement.publication_at >= publication_start(start),
+                    Procurement.publication_at < publication_start(end + timedelta(days=1)),
+                )
+            )
+        totals = (
+            await self.db.execute(
+                select(*counts).where(
+                    Procurement.publication_at >= publication_start(earliest),
+                    Procurement.publication_at < publication_start(current_day + timedelta(days=1)),
+                    exists(
+                        select(Participant.id)
+                        .where(
+                            Participant.procurement_id == Procurement.id,
+                            Participant.company_id == self.company.id,
+                            participant_current(),
+                        )
+                        .correlate(Procurement)
+                    ),
+                )
+            )
+        ).one()
+        return [
+            {
+                "title": title,
+                "start": start,
+                "end": end,
+                "total": total,
+                "href": "/procurements?"
+                + urlencode(
+                    {
+                        "company_cnpj": self.company.cnpj,
+                        "company_participation_only": "true",
+                        "published_from": start.isoformat(),
+                        "published_to": end.isoformat(),
+                    }
+                ),
+            }
+            for (start, end, title), total in zip(periods, totals, strict=True)
+        ]
 
     @staticmethod
     def row(section: str, entity: Any) -> dict[str, Any]:

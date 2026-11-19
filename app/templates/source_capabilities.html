@@ -1,7 +1,30 @@
 {% extends "base.html" %}
 {% block title %}Fontes · LicitaLead Monitor{% endblock %}
 {% block content %}<div class="page-heading"><div><p class="eyebrow">Auditoria</p><h1>Capacidades das fontes</h1></div></div>
-{% for source in capabilities %}<section class="panel"><h2>{{ source.name }}</h2><p><a href="{{ source.documentation_url }}" target="_blank" rel="noopener">Documentação oficial</a></p><div class="table-wrap"><table><thead><tr><th>Capacidade</th><th>Disponibilidade</th><th>Observação</th></tr></thead><tbody>{% for capability in source.capabilities %}<tr><td>{{ capability.name }}</td><td><span class="badge {{ capability.availability }}">{{ capability.availability }}</span></td><td>{{ capability.notes }}</td></tr>{% endfor %}</tbody></table></div></section>{% endfor %}
+{% set labels = {'available': 'Disponível', 'partial': 'Parcial', 'document_only': 'Somente em documentos', 'not_supported': 'Sem cobertura nesta integração'} %}
+<section class="panel">
+  <h2>Como ler a disponibilidade</h2>
+  <dl class="facts">
+    <div><dt>Disponível</dt><dd>A integração pode consultar esta capacidade.</dd></div>
+    <div><dt>Parcial</dt><dd>A fonte fornece parte das informações.</dd></div>
+    <div><dt>Somente em documentos</dt><dd>A comprovação depende da leitura de documento oficial.</dd></div>
+    <div><dt>Sem cobertura nesta integração</dt><dd>A aplicação ainda não tem acesso estruturado confirmado por esse conector.</dd></div>
+  </dl>
+</section>
+{% for source in capabilities %}
+<section class="panel">
+  <h2>{{ source.name }}</h2>
+  <p><a href="{{ source.documentation_url }}" target="_blank" rel="noopener noreferrer">Documentação oficial</a></p>
+  {% if source.id == 'compras_gov' %}
+  <p>Esta tabela descreve a integração com Dados Abertos. Para conferir os atos da sessão no portal, use o link publicado na contratação ou a consulta oficial.</p>
+  <p><a href="https://www.gov.br/compras/pt-br/acesso-a-informacao/consulta-detalhada" target="_blank" rel="noopener noreferrer">Consulta detalhada do Compras.gov.br</a></p>
+  {% endif %}
+  <div class="table-wrap"><table>
+    <thead><tr><th>Capacidade</th><th>Disponibilidade</th><th>Observação</th></tr></thead>
+    <tbody>{% for capability in source.capabilities %}<tr><td>{{ capability.name }}</td><td><span class="badge {{ capability.availability }}">{{ labels.get(capability.availability, 'Indisponível') }}</span></td><td>{{ capability.notes }}</td></tr>{% endfor %}</tbody>
+  </table></div>
+</section>
+{% endfor %}
 <section class="panel">
   <h2>TCE-MA · SINC-Contrata</h2>
   <p>A coleta cruza pregões eletrônicos da Prefeitura de São Luís (UASG 980921) com o PNCP pelo número de controle oficial, conferindo órgão, número, ano e modalidade. Os procedimentos, resultados, contratos, licitantes pessoa jurídica e links publicados ficam na seção <strong>TCE-MA · dados complementares</strong> do pregão quando existe vínculo confirmado.</p>

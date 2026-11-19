@@ -161,10 +161,14 @@ class AuditTracker:
     observed_at: datetime
     outcome: RecordOutcome = field(default_factory=RecordOutcome)
     registered: dict[int, Any] = field(default_factory=dict)
+    field_sources: dict[tuple[int, str], tuple[Any, UUID]] = field(default_factory=dict)
     states: dict[tuple[str, UUID], dict[str, FieldState]] = field(default_factory=dict)
 
     def register(self, entity: Any, raw: Any) -> None:
         self.registered[id(entity)] = raw
+
+    def register_field(self, entity: Any, name: str, raw: Any, source_id: UUID) -> None:
+        self.field_sources[id(entity), name] = (raw, source_id)
 
 
 def install_audit(
@@ -190,6 +194,28 @@ def install_audit(
     return tracker
 
 
+def _provenance(session: Session, tracker: AuditTracker, raw: Any, source_id: UUID | None):
+    source_record = session.get(SourceRecord, source_id) if source_id else None
+    source = str(
+        getattr(raw, "source", None)
+        or (source_record.source if source_record else getattr(tracker.raw, "source", "unknown"))
+        or "unknown"
+    )
+    observed_at = utc(
+        getattr(raw, "observed_at", None)
+        or (source_record.collected_at if source_record else tracker.observed_at)
+    )
+    source_at = getattr(raw, "source_updated_at", None)
+    origin = getattr(raw, "source_update_field", None)
+    if source_at is None and raw is not None:
+        source_at = getattr(raw, "last_source_update_at", None)
+        origin = "last_source_update_at" if source_at else None
+    if source_at is None and raw is not None and hasattr(raw, "updated_at"):
+        source_at = raw.updated_at
+        origin = "updated_at" if source_at else None
+    return source, source_id, utc(source_at) if source_at else None, origin, observed_at
+
+
 def _before_flush(session: Session, _flush_context: Any, _instances: Any) -> None:
     tracker: AuditTracker = session.info["field_update_tracker"]
     for entity in list(session.new) + list(session.dirty):
@@ -209,27 +235,8 @@ def _before_flush(session: Session, _flush_context: Any, _instances: Any) -> Non
             continue
         raw = tracker.registered.get(id(entity), tracker.raw if root else None)
         source_id = getattr(entity, "source_record_id", None) or tracker.source_record_id
-        source_record = session.get(SourceRecord, source_id) if source_id else None
-        source = str(
-            getattr(raw, "source", None)
-            or (
-                source_record.source if source_record else getattr(tracker.raw, "source", "unknown")
-            )
-            or "unknown"
-        )
-        observed_at = utc(
-            getattr(raw, "observed_at", None)
-            or (source_record.collected_at if source_record else tracker.observed_at)
-        )
-        source_at = getattr(raw, "source_updated_at", None)
-        origin = getattr(raw, "source_update_field", None)
-        if source_at is None and raw is not None:
-            source_at = getattr(raw, "last_source_update_at", None)
-            origin = "last_source_update_at" if source_at else None
-        if source_at is None and raw is not None and hasattr(raw, "updated_at"):
-            source_at = raw.updated_at
-            origin = "updated_at" if source_at else None
-        source_at = utc(source_at) if source_at else None
+        provenance = _provenance(session, tracker, raw, source_id)
+        _, _, source_at, _, _ = provenance
         key = (entity_type, entity.id)
         inspection = inspect(entity)
         if key not in tracker.states:
@@ -262,12 +269,18 @@ def _before_flush(session: Session, _flush_context: Any, _instances: Any) -> Non
             prior_clock = clock_history.deleted[0]
             if prior_clock and source_at < utc(prior_clock):
                 entity.last_source_update_at = prior_clock
-        provenance = (source, source_id, source_at, origin, observed_at)
         for attribute in inspection.mapper.column_attrs:
-            source, source_id, source_at, origin, observed_at = provenance
             name = attribute.key
-            if name in METADATA:
+            if name in METADATA or name.startswith("_"):
                 continue
+            field_raw = raw
+            if field_proof := tracker.field_sources.get((id(entity), name)):
+                field_raw, field_source_id = field_proof
+                source, source_id, source_at, origin, observed_at = _provenance(
+                    session, tracker, field_raw, field_source_id
+                )
+            else:
+                source, source_id, source_at, origin, observed_at = provenance
             history = inspection.attrs[name].history
             received = getattr(entity, name)
             accepted_dependencies = [
@@ -288,9 +301,9 @@ def _before_flush(session: Session, _flush_context: Any, _instances: Any) -> Non
                 origin = f"derived_from:{reference.field_name}"
                 observed_at = max(utc(dep.observed_at) for dep in accepted_dependencies)
             source_name = SOURCE_FIELDS.get(table, {}).get(name, name)
-            source_value = getattr(raw, source_name, None)
+            source_value = getattr(field_raw, source_name, None)
             provided = (
-                raw is not None
+                field_raw is not None
                 and source_value is not None
                 and json_value(source_value) == json_value(received)
             )
@@ -343,9 +356,10 @@ def _before_flush(session: Session, _flush_context: Any, _instances: Any) -> Non
                         state.source_updated_at = source_at
                         state.timestamp_origin = origin
                 continue
-            explicit_clear = name in getattr(raw, "cleared_fields", []) and (
-                tracker.complete or bool(source_record and source_record.collection_complete)
-            )
+            explicit_clear = False
+            if name in getattr(field_raw, "cleared_fields", []):
+                record = session.get(SourceRecord, source_id) if source_id else None
+                explicit_clear = tracker.complete or bool(record and record.collection_complete)
             missing = received is None or (isinstance(received, str) and not received.strip())
             if missing and not explicit_clear and name not in DERIVED:
                 setattr(entity, name, _restore(old, previous, attribute.columns[0].type))

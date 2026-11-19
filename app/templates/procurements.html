@@ -11,22 +11,21 @@
   <label>Situação <select name="status_category"><option value="">Todas</option>{% for key,label in status_category_options %}<option value="{{ key }}"{% if key == filters.status_category %} selected{% endif %}>{{ label }}</option>{% endfor %}</select></label>
   <button type="submit">Filtrar</button><a href="/procurements">Limpar filtros</a></div>
   {% if filters.run %}<input type="hidden" name="run" value="{{ filters.run }}"><p class="hint">Contratações vinculadas à coleta selecionada por registros de origem. <a href="/procurements">Ver todo o acervo</a>.</p>{% endif %}
-  <details{% if filters.invalid_cnpj or filters.company_cnpj or filters.agency_cnpj or filters.modalities or filters.municipality or filters.agency or filters.procurement_type or filters.phase or filters.is_srp or filters.value_min is not none or filters.value_max is not none %} open{% endif %}><summary>Filtros avançados</summary><div class="filters">
+  {% if filters.company_participation_only %}<input type="hidden" name="company_participation_only" value="true">{% endif %}
+  {% for value in filters.modalities %}<input type="hidden" name="modality" value="{{ value }}">{% endfor %}
+  {% if filters.procurement_type %}<input type="hidden" name="procurement_type" value="{{ filters.procurement_type }}">{% endif %}
+  <details{% if filters.invalid_cnpj or filters.company_cnpj or filters.agency_cnpj or filters.municipality or filters.agency or filters.phase or filters.is_srp or filters.value_min is not none or filters.value_max is not none or filters.contracting_form or filters.licitation_modality or filters.auxiliary_procedure or filters.government_sphere or filters.object_query or filters.object_group or filters.object_preset %} open{% endif %}><summary>Filtros avançados</summary><div class="filters">
   <label>Município <input name="municipality" value="{{ filters.municipality or '' }}"></label>
-  <label>Órgão <input name="agency" value="{{ filters.agency or '' }}"></label>
+  <label>Nome do órgão <input name="agency" value="{{ filters.agency or '' }}"></label>
+  <label>Esfera do órgão <select name="government_sphere"><option value="">Todas</option>{% for key,label in government_spheres.items() %}<option value="{{ key }}"{% if filters.government_sphere == key %} selected{% endif %}>{{ label }}</option>{% endfor %}</select></label>
   <label>CNPJ do órgão <input name="agency_cnpj" value="{{ filters.agency_cnpj or '' }}" placeholder="00.000.000/0000-00"></label>
   <label>CNPJ da empresa licitante <input name="company_cnpj" value="{{ filters.company_cnpj or '' }}" placeholder="00.000.000/0000-00"></label>
-  <label>Modalidade
-    <select name="modality" multiple size="5">
-      {% for key, label in modality_options %}<option value="{{ key }}"{% if key in filters.modalities %} selected{% endif %}>{{ label }}</option>{% endfor %}
-    </select>
-  </label>
-  <label>Contratação{{ info_tip('Rota da Lei 14.133/2021 derivada da modalidade: licitação (art. 28), contratação direta (dispensa/inexigibilidade) ou procedimento auxiliar (credenciamento, pré-qualificação, manifestação de interesse).') }}
-    <select name="procurement_type">
-      <option value="">Todas</option>
-      {% for key, label in type_options %}<option value="{{ key }}"{% if key == filters.procurement_type %} selected{% endif %}>{{ label }}</option>{% endfor %}
-    </select>
-  </label>
+  <label>Forma de contratação <select name="contracting_form"><option value="">Todas</option>{% for key,label in contracting_forms.items() %}<option value="{{ key }}"{% if filters.contracting_form == key %} selected{% endif %}>{{ label }}</option>{% endfor %}</select></label>
+  <label>Modalidade de licitação <select name="licitation_modality"><option value="">Todas</option>{% for key,label in licitation_modalities.items() %}<option value="{{ key }}"{% if filters.licitation_modality == key %} selected{% endif %}>{{ label }}</option>{% endfor %}</select></label>
+  <label>Procedimento auxiliar <select name="auxiliary_procedure"><option value="">Todos</option>{% for key,label in auxiliary_procedures.items() %}<option value="{{ key }}"{% if filters.auxiliary_procedure == key %} selected{% endif %}>{{ label }}</option>{% endfor %}</select></label>
+  <label>Objeto ou item <input type="search" name="object_query" value="{{ filters.object_query }}" maxlength="200"></label>
+  <label>Grupo de objetos{{ info_tip('Atalhos de busca no texto publicado. A modalidade é informada pela fonte.') }} <select name="object_group"><option value="">Todos</option>{% for key,label in object_groups.items() %}<option value="{{ key }}"{% if filters.object_group == key %} selected{% endif %}>{{ label }}</option>{% endfor %}</select></label>
+  <label>Objetos sugeridos <select name="object_preset" multiple size="5">{% for preset in object_presets %}<option value="{{ preset.key }}"{% if preset.key in filters.object_preset %} selected{% endif %}>{{ preset.label }}</option>{% endfor %}</select></label>
   <label>Fase{{ info_tip('Fase operacional inferida de status, datas e eventos documentados. Nao substitui a situacao oficial nem o edital.') }}
     <select name="phase">
       <option value="">Todas</option>
@@ -47,14 +46,15 @@
 {% for error in filter_errors %}<p class="alert error" role="alert">{{ error }}</p>{% endfor %}
 <div class="section-heading"><p role="status">{{ pagination.total }} contratação(ões) · {{ active_filter_count }} filtro(s) ativo(s)</p><a href="{{ list_url }}" data-save-search>Guardar esta busca neste navegador</a></div><p data-saved-search role="status"></p>
 {% include "_active_filters.html" %}
-{% if filters.company_cnpj_valid %}<p class="hint">Contratações vinculadas à empresa (participações comprovadas e fornecedores registrados em atas) — <a href="/empresas/{{ filters.company_cnpj_valid }}">ver empresa</a>.</p>{% endif %}
+{% if filters.company_cnpj_valid %}<p class="hint">{{ 'Contratações com participação comprovada.' if filters.company_participation_only else 'Contratações vinculadas à empresa por participação ou fornecimento registrado em ata.' }} <a href="/empresas/{{ filters.company_cnpj_valid }}">Ver empresa</a></p>{% endif %}
 <section class="panel table-wrap">
-<table><thead><tr><th>Processo</th><th>Órgão</th><th>Local</th><th>Modalidade</th><th>Contratação</th><th>Valor estimado</th><th>Situação</th><th>Fase</th><th>SRP</th></tr></thead>
+<table><thead><tr><th>Processo</th><th>Órgão</th><th>Local</th><th>Modalidade de licitação</th><th>Forma de contratação</th><th>Valor estimado</th><th>Situação</th><th>Fase</th><th>SRP</th></tr></thead>
 <tbody>{% for item in procurements %}<tr>
   <td><a href="/procurements/{{ item.id }}{% if list_url != '/procurements' %}?{{ {'return_to': list_url}|urlencode }}{% endif %}">{{ item.purchase_number or item.external_id or item.id }}</a><small>{{ item.object_description or item.title or '' }}</small></td>
-  <td>{{ item.agency_name or 'Não informado' }}</td><td>{{ item.municipality or '' }}/{{ item.uf or '' }}</td>
-  <td>{{ item.modality|modality_label }}</td>
-  <td>{{ item.procurement_type|procurement_type_label }}</td>
+  {% set modality = item.modality_key or item.modality %}
+  <td>{{ item.agency_name or 'Não informado' }}{% if item.government_sphere %}<small>{{ item.government_sphere|government_sphere_label }}</small>{% endif %}</td><td>{{ item.municipality or '' }}/{{ item.uf or '' }}</td>
+  <td>{{ item.modality|modality_label if (modality|contracting_form) == 'licitacao' else '—' }}</td>
+  <td>{{ modality|contracting_form_label }}{% if modality in auxiliary_procedures %}<small>{{ auxiliary_procedures[modality] }}</small>{% endif %}</td>
   <td>{{ item.estimated_value|brl }}</td>
   <td>{{ item.status or 'Não informado' }}</td>
   <td>{{ item.current_phase|procurement_phase_label }}</td>

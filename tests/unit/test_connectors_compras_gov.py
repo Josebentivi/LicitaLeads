@@ -9,6 +9,7 @@ import pytest
 from app.connectors import DataAvailability, ProcurementFilters
 from app.connectors.compras_gov import ComprasGovConnector
 from app.connectors.http import AsyncHTTPClient
+from app.services.procurement_search import ObjectScope
 
 
 def _settings() -> SimpleNamespace:
@@ -23,6 +24,21 @@ def _settings() -> SimpleNamespace:
     )
 
 
+def test_compras_item_summary_comes_from_the_separate_published_field() -> None:
+    connector = ComprasGovConnector(_settings())
+    row = {"numeroItemPncp": 1, "descricaodetalhada": "Frasco de 1 litro"}
+
+    item = connector._map_item(row, "compra-1", "https://compras.test/itens")
+    assert item.description == item.detailed_description == "Frasco de 1 litro"
+    assert item.summary_description is None
+
+    item = connector._map_item(
+        {**row, "descricaoResumida": "Detergente"}, "compra-1", "https://compras.test/itens"
+    )
+    assert item.summary_description == "Detergente"
+    assert item.detailed_description == "Frasco de 1 litro"
+
+
 @pytest.mark.asyncio
 async def test_compras_discovery_uses_own_modality_domain_and_paginates() -> None:
     requests: list[httpx.Request] = []
@@ -33,6 +49,7 @@ async def test_compras_discovery_uses_own_modality_domain_and_paginates() -> Non
         "sequencialCompraPncp": 1,
         "orgaoEntidadeCnpj": "ABC123450001ZZ",
         "orgaoEntidadeRazaoSocial": "Município de São Luís",
+        "orgaoEntidadeEsferaId": "M",
         "unidadeOrgaoCodigoUnidade": "980921",
         "unidadeOrgaoNomeUnidade": "Prefeitura de São Luís",
         "unidadeOrgaoUfSigla": "MA",
@@ -70,12 +87,14 @@ async def test_compras_discovery_uses_own_modality_domain_and_paginates() -> Non
             start_date=date(2026, 9, 15),
             end_date=date(2026, 9, 16),
             uf="MA",
-            modalities=["pregao_eletronico"],
+            modalities=["pregao_eletronico", "leilao_eletronico"],
             page_size=1,
+            object_scope=ObjectScope.build("cadeiras", government_sphere="M"),
         )
     )
 
     assert result.availability is DataAvailability.AVAILABLE
+    assert result.unsupported_modalities == ["leilao_eletronico"]
     assert len(result.data) == 1
     assert result.data[0].modality_code == 5
     assert result.data[0].is_srp is False
@@ -85,6 +104,86 @@ async def test_compras_discovery_uses_own_modality_domain_and_paginates() -> Non
     assert all(request.url.params["codigoModalidade"] == "5" for request in requests)
     assert requests[0].url.params["dataPublicacaoPncpInicial"] == "2026-09-15"
     await raw_client.aclose()
+
+
+@pytest.mark.parametrize(
+    ("modalities", "retained", "unclassified"),
+    [
+        (["concorrencia_eletronica"], {"1", "3"}, 1),
+        (["concorrencia_presencial"], {"2"}, 1),
+        (["concorrencia_eletronica", "concorrencia_presencial"], {"1", "2", "3", "4"}, 0),
+        (["concorrencia"], {"1", "2", "3", "4"}, 0),
+        ([3], {"1", "2", "3", "4"}, 0),
+    ],
+)
+async def test_compras_discovery_scopes_variants_using_the_published_pncp_code(
+    modalities, retained, unclassified
+):
+    variants = (
+        (4, "Concorrência - Presencial"),  # The published code takes precedence.
+        (5, "Concorrência - Presencial"),
+        (None, "Concorrência Eletrônica"),
+        (None, "Concorrência"),
+    )
+    requests = []
+
+    def handler(request):
+        requests.append(request)
+        rows = [
+            {
+                "idCompra": str(number),
+                "numeroCompra": str(number),
+                "codigoModalidade": 3,
+                "modalidadeIdPncp": variant,
+                "modalidadeNome": label,
+            }
+            for number, (variant, label) in enumerate(variants, 1)
+        ]
+        return httpx.Response(
+            200, json={"resultado": rows, "totalPaginas": 1, "totalRegistros": len(rows)}
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        connector = ComprasGovConnector(
+            _settings(), http_client=AsyncHTTPClient(_settings(), client=client)
+        )
+        result = await connector.discover_procurements(ProcurementFilters(modalities=modalities))
+        assert len(requests) == 1 and requests[0].url.params["codigoModalidade"] == "3"
+        assert {row.external_id for row in result.data} == retained
+        assert result.unclassified_modality_rows == unclassified
+        assert result.is_complete is not bool(unclassified)
+
+
+@pytest.mark.parametrize("published_code", [None, 999])
+async def test_compras_unknown_variant_cannot_certify_an_empty_page(published_code):
+    def handler(_request):
+        return httpx.Response(
+            200,
+            json={
+                "resultado": [
+                    {
+                        "idCompra": "1",
+                        "codigoModalidade": 3,
+                        "modalidadeIdPncp": published_code,
+                        "modalidadeNome": "Concorrência",
+                    }
+                ],
+                "totalPaginas": 1,
+                "totalRegistros": 1,
+            },
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        connector = ComprasGovConnector(
+            _settings(), http_client=AsyncHTTPClient(_settings(), client=client)
+        )
+        result = await connector.discover_procurements(
+            ProcurementFilters(modalities=["concorrencia_eletronica"])
+        )
+    assert result.data == []
+    assert result.availability is DataAvailability.TEMPORARY_ERROR
+    assert result.partial and not result.is_complete
+    assert result.unclassified_modality_rows == 1
 
 
 @pytest.mark.asyncio

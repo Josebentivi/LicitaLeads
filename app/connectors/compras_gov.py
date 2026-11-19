@@ -59,7 +59,11 @@ from app.connectors.http import (
     setting,
 )
 from app.connectors.page_window import PageWindow
+from app.connectors.pncp import PNCP_MODALITY_CODES
+from app.services.collection_periods import normalize_discovery_kind
+from app.services.identifiers import canonical_modality
 from app.services.parallel import bounded_map
+from app.services.procurement_search import published_object_complement, published_sphere
 
 # These are Compras.gov.br modality codes, not PNCP modalidadeId values.
 COMPRAS_MODALITY_CODES: dict[str, int] = {
@@ -75,6 +79,25 @@ COMPRAS_MODALITY_CODES: dict[str, int] = {
     "dispensa_eletronica": 6,
     "inexigibilidade": 7,
     "concurso": 20,
+}
+_PNCP_MODALITY_VARIANTS = {
+    key: PNCP_MODALITY_CODES[key]
+    for key in (
+        "concorrencia_eletronica",
+        "concorrencia_presencial",
+        "pregao_eletronico",
+        "pregao_presencial",
+    )
+}
+_PNCP_MODALITY_IDS = frozenset(PNCP_MODALITY_CODES.values())
+_MODALITIES_UNAVAILABLE = {
+    "credenciamento",
+    "dialogo_competitivo",
+    "leilao",
+    "leilao_eletronico",
+    "leilao_presencial",
+    "manifestacao_de_interesse",
+    "pre_qualificacao",
 }
 
 _PNCP_CONTROL_NUMBER = re.compile(r"^[A-Z0-9]{14}-\d-\d{1,9}/\d{4}$", re.IGNORECASE)
@@ -132,21 +155,32 @@ class ComprasGovConnector:
     async def discover_procurements(
         self, filters: ProcurementFilters
     ) -> ConnectorResult[list[RawProcurement]]:
-        if _canonical_modality(filters.discovery_kind) not in {"publication", "publicacao"}:
+        if normalize_discovery_kind(filters.discovery_kind) != "publication":
             raise ValueError("Compras.gov.br discovery currently supports publication dates")
-        start, end = filters.resolved_period(
-            lookback_days=int(setting(self.settings, "default_lookback_days", 30))
-        )
-        modality_values = filters.modalities or self._configured_modalities()
-        if len(modality_values) > 1:
+        modality_groups: dict[int, list[str]] = {}
+        unsupported = []
+        for value in dict.fromkeys(filters.modalities or self._configured_modalities()):
+            key = canonical_modality(str(value)) or ""
+            if key in _MODALITIES_UNAVAILABLE:
+                unsupported.append(str(value))
+                continue
+            modality_groups.setdefault(self._modality_code(value), []).append(key)
 
-            async def partition(modality: str | int) -> ConnectorResult[Any]:
-                return await self.discover_procurements(
-                    filters.model_copy(update={"modalities": [modality]})
-                )
+        async def partition(modality: int) -> ConnectorResult[list[RawProcurement]]:
+            keys = modality_groups[modality]
+            variants = {key for key in keys if key in _PNCP_MODALITY_VARIANTS}
+            requested_variant = (
+                _PNCP_MODALITY_VARIANTS[next(iter(variants))]
+                if (len(variants) == 1 and variants == set(keys))
+                else None
+            )
+            return await self._discover_procurement_modality(filters, modality, requested_variant)
 
+        if len(modality_groups) == 1:
+            combined = await partition(next(iter(modality_groups)))
+        else:
             stream = bounded_map(
-                dict.fromkeys(modality_values),
+                modality_groups,
                 partition,
                 capacity=min(4, int(setting(self.settings, "http_max_concurrency", 4))),
             )
@@ -158,9 +192,17 @@ class ComprasGovConnector:
                 await stream.aclose()
             combined = combine_discoveries(partitions)
             combined.data = self._deduplicate(combined.data)
-            return combined
+        if unsupported and not modality_groups:
+            combined.availability = DataAvailability.NOT_SUPPORTED
+        combined.unsupported_modalities = unsupported
+        return combined
 
-        modalities = list(dict.fromkeys(self._modality_code(value) for value in modality_values))
+    async def _discover_procurement_modality(
+        self, filters: ProcurementFilters, modality: int, requested_variant: int | None
+    ) -> ConnectorResult[list[RawProcurement]]:
+        start, end = filters.resolved_period(
+            lookback_days=int(setting(self.settings, "default_lookback_days", 30))
+        )
         endpoint = join_url(self.base_url, self.PROCUREMENT_LIST_PATH)
         page_size = min(max(filters.page_size or 500, 10), 500)
         records: list[RawSourceRecord] = []
@@ -171,105 +213,113 @@ class ComprasGovConnector:
         total_records = 0
         truncated = False
         invalid_rows = 0
+        unclassified_rows = 0
 
-        for modality in modalities:
-            page = 1
-            collected_rows = 0
-            observed_total_pages = 0
-            async with PageWindow(
-                concurrency=int(setting(self.settings, "http_max_concurrency", 4)),
-                max_pages=min(filters.max_pages or _MAX_DETAIL_PAGES, _MAX_DETAIL_PAGES),
-            ) as window:
-                while True:
-                    params: dict[str, Any] = {
-                        "pagina": page,
-                        "tamanhoPagina": page_size,
-                        "dataPublicacaoPncpInicial": start.isoformat(),
-                        "dataPublicacaoPncpFinal": end.isoformat(),
-                        "codigoModalidade": modality,
-                        "unidadeOrgaoCodigoUnidade": filters.unit_code,
-                        "orgaoEntidadeCnpj": filters.agency_cnpj,
-                        "unidadeOrgaoCodigoIbge": filters.municipality_code,
-                        "unidadeOrgaoUfSigla": filters.uf,
-                    }
+        page = 1
+        collected_rows = 0
+        observed_total_pages = 0
+        async with PageWindow(
+            concurrency=int(setting(self.settings, "http_max_concurrency", 4)),
+            max_pages=min(filters.max_pages or _MAX_DETAIL_PAGES, _MAX_DETAIL_PAGES),
+        ) as window:
+            while True:
+                params: dict[str, Any] = {
+                    "pagina": page,
+                    "tamanhoPagina": page_size,
+                    "dataPublicacaoPncpInicial": start.isoformat(),
+                    "dataPublicacaoPncpFinal": end.isoformat(),
+                    "codigoModalidade": modality,
+                    "unidadeOrgaoCodigoUnidade": filters.unit_code,
+                    "orgaoEntidadeCnpj": filters.agency_cnpj,
+                    "unidadeOrgaoCodigoIbge": filters.municipality_code,
+                    "unidadeOrgaoUfSigla": filters.uf,
+                }
+                try:
+                    response = await window.request(
+                        self._http,
+                        endpoint,
+                        params,
+                        total_pages=observed_total_pages if page > 1 else 0,
+                    )
+                except _HTTP_EXCEPTIONS as exc:
+                    errors.append(exc)
+                    break
+                record = source_record(self.name, response)
+                repeated = repeated_page(records, record)
+                records.append(record)
+                if repeated:
+                    errors.append(
+                        ConnectorContractError("official source repeated a discovery page")
+                    )
+                    break
+                payload = response.payload
+                try:
+                    rows = list_payload(payload, "resultado", operation="Compras discovery")
+                except ConnectorContractError as exc:
+                    errors.append(exc)
+                    break
+                for row in rows:
+                    if not self._has_procurement_identity(row):
+                        invalid_rows += 1
+                        continue
                     try:
-                        response = await window.request(
-                            self._http,
-                            endpoint,
-                            params,
-                            total_pages=observed_total_pages if page > 1 else 0,
-                        )
-                    except _HTTP_EXCEPTIONS as exc:
-                        errors.append(exc)
-                        break
-                    record = source_record(self.name, response)
-                    repeated = repeated_page(records, record)
-                    records.append(record)
-                    if repeated:
-                        errors.append(
-                            ConnectorContractError("official source repeated a discovery page")
-                        )
-                        break
-                    payload = response.payload
-                    try:
-                        rows = list_payload(payload, "resultado", operation="Compras discovery")
-                    except ConnectorContractError as exc:
-                        errors.append(exc)
-                        break
-                    for row in rows:
-                        if not self._has_procurement_identity(row):
-                            invalid_rows += 1
+                        if not self._matches_client_filters(row, filters):
                             continue
-                        try:
-                            if self._matches_client_filters(row, filters):
-                                procurements.append(
-                                    self._map_procurement(row, response.url).model_copy(
-                                        update={"source_record_ref": record.record_key}
-                                    )
-                                )
-                        except Exception:
-                            invalid_rows += 1
+                        if requested_variant is not None:
+                            published_variant = positive_int(row.get("modalidadeIdPncp"))
+                            if published_variant not in _PNCP_MODALITY_IDS:
+                                label = canonical_modality(row.get("modalidadeNome")) or ""
+                                published_variant = PNCP_MODALITY_CODES.get(label)
+                            if published_variant is None:
+                                unclassified_rows += 1
+                            if published_variant != requested_variant:
+                                continue
+                        procurements.append(
+                            self._map_procurement(row, response.url).model_copy(
+                                update={"source_record_ref": record.record_key}
+                            )
+                        )
+                    except Exception:
+                        invalid_rows += 1
 
-                    fetched_pages += 1
-                    try:
-                        collected_rows += len(rows)
-                        observed_total_pages = observed_pages(
-                            payload,
-                            page,
-                            row_count=len(rows),
-                            collected_rows=collected_rows,
-                            page_size=page_size,
-                        )
-                    except ConnectorContractError as exc:
-                        errors.append(exc)
-                        break
-                    total_pages += observed_total_pages if page == 1 else 0
-                    if page == 1:
-                        total_records += (
-                            to_int(payload.get("totalRegistros"))
-                            if isinstance(payload, dict)
-                            else None
-                        ) or len(rows)
-                    has_more = page < observed_total_pages
-                    if (
-                        page_budget_exhausted(
-                            self._http,
-                            page,
-                            min(filters.max_pages or _MAX_DETAIL_PAGES, _MAX_DETAIL_PAGES),
-                            url=endpoint,
-                            params=params,
-                        )
-                        and not window.has_pending
-                        and has_more
-                    ):
-                        truncated = True
-                        break
-                    if not has_more:
-                        break
-                    page += 1
-            records.extend(
-                source_record(self.name, response) for response in window.unconsumed_responses()
-            )
+                fetched_pages += 1
+                try:
+                    collected_rows += len(rows)
+                    observed_total_pages = observed_pages(
+                        payload,
+                        page,
+                        row_count=len(rows),
+                        collected_rows=collected_rows,
+                        page_size=page_size,
+                    )
+                except ConnectorContractError as exc:
+                    errors.append(exc)
+                    break
+                total_pages += observed_total_pages if page == 1 else 0
+                if page == 1:
+                    total_records += (
+                        to_int(payload.get("totalRegistros")) if isinstance(payload, dict) else None
+                    ) or len(rows)
+                has_more = page < observed_total_pages
+                if (
+                    page_budget_exhausted(
+                        self._http,
+                        page,
+                        min(filters.max_pages or _MAX_DETAIL_PAGES, _MAX_DETAIL_PAGES),
+                        url=endpoint,
+                        params=params,
+                    )
+                    and not window.has_pending
+                    and has_more
+                ):
+                    truncated = True
+                    break
+                if not has_more:
+                    break
+                page += 1
+        records.extend(
+            source_record(self.name, response) for response in window.unconsumed_responses()
+        )
 
         procurements = self._deduplicate(procurements)
         pagination = PaginationInfo(
@@ -281,8 +331,13 @@ class ComprasGovConnector:
             fetched_pages=fetched_pages,
             truncated=truncated,
         )
+        variant_diagnostic = (
+            f"{unclassified_rows} registro(s) sem variante de modalidade confirmada"
+            if unclassified_rows
+            else None
+        )
         if procurements:
-            partial = bool(errors or truncated or invalid_rows)
+            partial = bool(errors or truncated or invalid_rows or unclassified_rows)
             return ConnectorResult(
                 data=procurements,
                 availability=DataAvailability.AVAILABLE,
@@ -290,15 +345,22 @@ class ComprasGovConnector:
                 raw_records=records,
                 pagination=pagination,
                 diagnostic=(
-                    "partial result: one or more pages/rows were not usable" if partial else None
+                    variant_diagnostic
+                    or (
+                        "partial result: one or more pages/rows were not usable"
+                        if partial
+                        else None
+                    )
                 ),
                 partial=partial,
+                unclassified_modality_rows=unclassified_rows,
             )
         if errors:
             result: ConnectorResult[list[RawProcurement]] = failed_result([], errors[0])
             result.source_urls = unique_urls(records)
             result.raw_records = records
             result.pagination = pagination
+            result.unclassified_modality_rows = unclassified_rows
             return result
         if invalid_rows:
             return ConnectorResult(
@@ -311,19 +373,22 @@ class ComprasGovConnector:
                     "official response contained records without a usable procurement identity"
                 ),
                 partial=True,
+                unclassified_modality_rows=unclassified_rows,
             )
         return ConnectorResult(
             data=[],
             availability=(
                 DataAvailability.TEMPORARY_ERROR
-                if truncated or invalid_rows
+                if truncated or unclassified_rows
                 else DataAvailability.EMPTY
             ),
-            partial=bool(truncated or invalid_rows),
+            partial=bool(truncated or unclassified_rows),
             source_urls=unique_urls(records),
             raw_records=records,
             pagination=pagination,
-            diagnostic="no procurements matched the official response and client-side filters",
+            diagnostic=variant_diagnostic
+            or "no procurements matched the official response and client-side filters",
+            unclassified_modality_rows=unclassified_rows,
         )
 
     async def fetch_procurement(
@@ -1389,7 +1454,7 @@ class ComprasGovConnector:
             if code < 1:
                 raise ValueError("Compras.gov.br modality code must be positive")
             return code
-        key = _canonical_modality(str(value))
+        key = canonical_modality(str(value)) or ""
         try:
             return COMPRAS_MODALITY_CODES[key]
         except KeyError as exc:
@@ -1405,6 +1470,10 @@ class ComprasGovConnector:
         return {"tipo": "idCompra", "codigo": value}
 
     def _matches_client_filters(self, row: dict[str, Any], filters: ProcurementFilters) -> bool:
+        if filters.object_scope and not filters.object_scope.matches_sphere(
+            row.get("orgaoEntidadeEsferaId")
+        ):
+            return False
         if filters.agency and not contains_text(
             [row.get("orgaoEntidadeRazaoSocial"), row.get("unidadeOrgaoNomeUnidade")],
             filters.agency,
@@ -1464,10 +1533,12 @@ class ComprasGovConnector:
             )
             or None,
             "object_description": row.get("objetoCompra"),
+            "object_complement": published_object_complement(row),
             "agency_name": row.get("orgaoEntidadeRazaoSocial")
             or row.get("unidadeOrgaoNomeUnidade"),
             "agency_cnpj": normalized_identifier(row.get("orgaoEntidadeCnpj")),
-            "government_sphere": row.get("orgaoEntidadeEsferaId"),
+            "government_sphere": published_sphere(row.get("orgaoEntidadeEsferaId"))
+            or row.get("orgaoEntidadeEsferaId"),
             "government_branch": row.get("orgaoEntidadePoderId"),
             "uf": row.get("unidadeOrgaoUfSigla"),
             "municipality": row.get("unidadeOrgaoMunicipioNome"),

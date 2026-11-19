@@ -10,12 +10,13 @@ import ast
 import asyncio
 import os
 import shutil
-import subprocess
 import sys
 import tempfile
 from pathlib import Path
 
 import pytest
+from alembic import command
+from alembic.config import Config
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _ORIGINAL_ENVIRONMENT = os.environ.copy()
@@ -79,22 +80,14 @@ def pytest_configure(config: pytest.Config) -> None:
         "RUN_LIVE_CONTRACT_TESTS", ""
     ).lower() == "true" and _explicit_live_marker(config.getoption("markexpr"))
     os.environ["RUN_LIVE_CONTRACT_TESTS"] = "true" if live else "false"
-    environment = {
-        key: value
-        for key, value in os.environ.items()
-        if not key.startswith("COV_CORE_") and key != "COVERAGE_PROCESS_START"
-    }
-    result = subprocess.run(  # noqa: S603 - fixed migration of the isolated global database
-        [sys.executable, "-m", "alembic", "upgrade", "head"],
-        cwd=_REPO_ROOT,
-        env=environment,
-        capture_output=True,
-        text=True,
-        timeout=90,
-        check=False,
-    )
-    if result.returncode:
-        raise pytest.UsageError("Falha ao preparar o banco temporário do pytest: " + result.stderr)
+    # The temporary settings already apply here. Use the same migration chain
+    # without starting a second interpreter or replacing pytest's logging.
+    migration = Config()
+    migration.set_main_option("script_location", str(_REPO_ROOT / "migrations").replace("%", "%%"))
+    try:
+        command.upgrade(migration, "head")
+    except Exception as exc:
+        raise pytest.UsageError(f"Falha ao preparar o banco temporário do pytest: {exc}") from exc
 
 
 def pytest_unconfigure(config: pytest.Config) -> None:

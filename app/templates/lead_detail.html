@@ -6,7 +6,7 @@
 {% if review_feedback == 'ok' and not next_href %}<p>Você chegou ao fim desta sequência de revisão. <a href="{{ return_to }}">Voltar aos resultados</a></p>{% endif %}
 <div class="page-heading"><div><p class="eyebrow">Prioridade {{ lead.score }}/100</p><h1>{{ lead.company_name }}</h1><p>{{ lead.cnpj_label }}{% if lead.cnpj %} · <a href="/empresas/{{ lead.cnpj }}">Visão completa da empresa</a>{% endif %}</p></div><span class="badge">{{ lead.lead_status }}</span></div>
 {% if integrity_notice %}<p class="alert warning" role="alert">{{ integrity_notice }}</p>{% endif %}
-<section class="panel"><h2>O que aconteceu?</h2><p class="opportunity-event">{{ lead.event_label }}</p><p>{{ lead.reason_summary or 'Motivo requer revisão manual.' }}</p>
+<section class="panel"><h2>O que aconteceu?</h2><p class="opportunity-event">{{ lead.event_label }}</p>{% if lead.event_scope %}<p>{{ lead.event_scope }}</p>{% endif %}<p>{{ lead.reason_summary or 'Motivo requer revisão manual.' }}</p>
 <dl class="facts"><div><dt>Contratação</dt><dd><a href="/procurements/{{ lead.procurement_id }}">{{ lead.process }}</a></dd></div><div><dt>Órgão</dt><dd>{{ lead.agency }}</dd></div><div><dt>Data do fato</dt><dd>{{ lead.event_at }}</dd></div></dl>
 <p><strong>Ação recomendada:</strong> {{ lead.recommended_action or 'Revisar evidências.' }}</p>
 <details><summary>Por que esta prioridade?</summary><p>A nota ajuda a ordenar a fila e não confirma, por si, a existência de uma medida jurídica cabível.</p><dl class="facts"><div><dt>Urgência</dt><dd>{{ lead.urgency_score }}</dd></div><div><dt>Força da evidência</dt><dd>{{ lead.evidence_score }}</dd></div><div><dt>Relevância jurídica</dt><dd>{{ lead.legal_relevance_score }}</dd></div><div><dt>Contatos</dt><dd>{{ lead.contact_score }}</dd></div><div><dt>Referência econômica</dt><dd>{{ lead.economic_value_score }}</dd></div><div><dt>Versão da pontuação</dt><dd>{{ lead.scoring_version }}</dd></div></dl></details></section>
@@ -14,7 +14,18 @@
 {% if deadline.trigger %}<p class="hint">Data-base do cálculo: {{ deadline.trigger }}. A data-base não é a data-limite.</p>{% endif %}
 {% if deadline.explanation %}<details><summary>Origem e cálculo do prazo</summary><p>{{ deadline.explanation }}</p><p class="hint">Situação registrada no último cálculo: {{ deadline.recorded_status }}. A indicação temporal acima considera a data atual, sem alterar esse registro.</p></details>{% endif %}
 {% if deadline.requires_review %}<p class="hint">O cálculo exige conferência humana.</p>{% endif %}</section>
-<section class="panel" id="evidencias"><h2>Onde está a prova?</h2>{% for evidence in evidences %}<article class="evidence"><blockquote>{{ evidence.text_excerpt }}</blockquote><a class="button secondary" href="/evidencias/{{ evidence.id }}">Conferir evidência{% if evidence.page_number %} · página {{ evidence.page_number }}{% endif %}</a></article>{% else %}<p class="empty">Nenhuma evidência vinculada. Consulte a contratação de origem antes de concluir a análise.</p>{% endfor %}<div class="action-row">{% if lead.official_url %}<a href="{{ lead.official_url }}" target="_blank" rel="noopener noreferrer">Abrir contratação na fonte oficial</a>{% endif %}{% if lead.origin_platform_url and lead.origin_platform_url != lead.official_url %}<a href="{{ lead.origin_platform_url }}" target="_blank" rel="noopener noreferrer">Abrir plataforma de origem</a>{% endif %}</div></section>
+<section class="panel" id="evidencias">
+  <h2>Onde está a prova?</h2>
+  {% for evidence in evidences %}<article class="evidence">
+    <blockquote>{{ evidence.text_excerpt }}</blockquote>
+    <a class="button secondary" href="/evidencias/{{ evidence.id }}">Conferir evidência{% if evidence.page_number %} · página {{ evidence.page_number }}{% endif %}</a>
+  </article>{% else %}<p class="empty">Nenhuma evidência vinculada. Consulte a contratação de origem antes de concluir a análise.</p>{% endfor %}
+  <div class="action-row">
+    {% if lead.official_url %}<a href="{{ lead.official_url }}" target="_blank" rel="noopener noreferrer">Abrir contratação na fonte oficial</a>{% endif %}
+    {% if lead.origin_platform_url and lead.origin_platform_url != lead.official_url %}<a href="{{ lead.origin_platform_url }}" target="_blank" rel="noopener noreferrer">Abrir plataforma de origem</a>{% endif %}
+    {% if lead.technical_url and lead.technical_url not in [lead.official_url, lead.origin_platform_url] %}<a href="{{ lead.technical_url }}" target="_blank" rel="noopener noreferrer">Consultar dados técnicos da fonte</a>{% endif %}
+  </div>
+</section>
 <section class="panel" id="revisao"><h2>Qual é a sua decisão?</h2><p class="hint">Revisão humana do fato e da evidência.</p>
 {% if review_error %}<p class="alert error" role="alert">{{ review_error }}</p>{% endif %}
 {% if not integrity_notice %}

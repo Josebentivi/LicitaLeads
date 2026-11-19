@@ -1,0 +1,30 @@
+{% set form_attr = target_form or '' %}
+{% set selected = values|default({}) %}
+<div class="filters">
+  <label>Esfera governamental
+    <select name="government_sphere"{% if form_attr %} form="{{ form_attr }}"{% endif %}>
+      <option value="">Todas</option>
+      {% for code, label in government_spheres.items() %}<option value="{{ code }}"{% if code == selected.get('government_sphere') %} selected{% endif %}>{{ label }}</option>{% endfor %}
+    </select>
+  </label>
+  <label>Objeto ou item publicado
+    <input type="search" name="object_query" maxlength="200" value="{{ selected.get('object_query', '') }}"{% if form_attr %} form="{{ form_attr }}"{% endif %}>
+  </label>
+  <label>Grupo de objetos
+    <select name="object_group"{% if form_attr %} form="{{ form_attr }}"{% endif %}>
+      <option value="">Todos</option>
+      {% for key, label in object_groups.items() %}<option value="{{ key }}"{% if key == selected.get('object_group') %} selected{% endif %}>{{ label }}</option>{% endfor %}
+    </select>
+  </label>
+  <label>Objetos predefinidos
+    <select name="object_preset" multiple size="5"{% if form_attr %} form="{{ form_attr }}"{% endif %}>
+      {% for preset in object_presets %}<option value="{{ preset.key }}"{% if preset.key in selected.get('object_preset', []) %} selected{% endif %}>{{ preset.label }}</option>{% endfor %}
+    </select>
+  </label>
+  <label>Formas e modalidades da coleta
+    <select name="modalities" multiple size="5"{% if form_attr %} form="{{ form_attr }}"{% endif %}>
+      {% for key, label in collection_modalities %}<option value="{{ key }}"{% if key in selected.get('modalities', []) %} selected{% endif %}>{{ label }}</option>{% endfor %}
+    </select>
+  </label>
+</div>
+<p class="hint">A busca consulta a descrição do objeto e dos itens publicados. Escolha as modalidades da consulta, especialmente ao pesquisar obras. Com modalidades em branco, valem as opções configuradas.</p>

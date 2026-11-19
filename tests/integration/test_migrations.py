@@ -38,6 +38,21 @@ def test_alembic_upgrade_head_creates_integrity_columns(tmp_path: Path) -> None:
             row[1] for row in connection.execute("PRAGMA table_info(participant_values)")
         }
         work_columns = {row[1] for row in connection.execute("PRAGMA table_info(llm_work_items)")}
+        contact_columns = {
+            row[1] for row in connection.execute("PRAGMA table_info(company_contacts)")
+        }
+        procurement_columns = {
+            row[1] for row in connection.execute("PRAGMA table_info(procurements)")
+        }
+        item_columns = {
+            row[1] for row in connection.execute("PRAGMA table_info(procurement_items)")
+        }
+        event_sql = connection.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='procurement_events'"
+        ).fetchone()[0]
+        contact_sql = connection.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='company_contacts'"
+        ).fetchone()[0]
         review_tables = {
             row[0]
             for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")
@@ -52,7 +67,20 @@ def test_alembic_upgrade_head_creates_integrity_columns(tmp_path: Path) -> None:
     assert "contract_control_number" in payment_columns
     assert {"llm_suggestions", "llm_event_citations"} <= review_tables
     assert "municipal_budget_entries" in review_tables
-    assert revision == "0028_municipal_spending"
+    assert "source_record_id" in contact_columns
+    assert "'address'" in contact_sql
+    assert "'APPEAL_WINDOW_OPENED'" in event_sql
+    assert {
+        "object_complement",
+        "object_description_search",
+        "object_complement_search",
+    } <= procurement_columns
+    assert {
+        "summary_description",
+        "description_search",
+        "summary_description_search",
+    } <= item_columns
+    assert revision == "0031_normalized_search_text"
 
 
 def test_upgrade_legacy_schema_keeps_raw_sentinel_and_unknown_completeness(tmp_path):
@@ -72,7 +100,7 @@ def test_upgrade_legacy_schema_keeps_raw_sentinel_and_unknown_completeness(tmp_p
         assert result.returncode == 0, result.stderr
 
     migrate("upgrade", "head")
-    migrate("downgrade", "0019_participant_cancelled")
+    migrate("downgrade", "0018_integrity_heartbeat")
     with closing(sqlite3.connect(database)) as connection:
         columns = {row[1] for row in connection.execute("PRAGMA table_info(source_records)")}
         assert "collection_complete" not in columns
@@ -90,6 +118,28 @@ def test_upgrade_legacy_schema_keeps_raw_sentinel_and_unknown_completeness(tmp_p
             VALUES (?, 'municipal:test', 'legacy', ?, ?, ?, 'unlinked', 1, '123')""",
             ("1" * 32, "c" * 64, "2026-01-01 00:00:00", "2026-01-01 00:00:00"),
         )
+        connection.execute(
+            """INSERT INTO procurements
+            (id, source, external_id, fingerprint, created_at, updated_at, current_phase)
+            VALUES (?, 'pncp', 'legacy', ?, ?, ?, 'unknown')""",
+            ("2" * 32, "d" * 64, "2026-01-01 00:00:00", "2026-01-01 00:00:00"),
+        )
+        connection.execute(
+            """INSERT INTO procurement_items (id, procurement_id, item_number, description, fingerprint)
+            VALUES (?, ?, '1', 'Descrição existente', ?)""",
+            ("3" * 32, "2" * 32, "e" * 64),
+        )
+        connection.execute(
+            """INSERT INTO companies (id, normalized_name, fingerprint, created_at, updated_at)
+            VALUES (?, 'EMPRESA', ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)""",
+            ("4" * 32, "f" * 64),
+        )
+        connection.execute(
+            """INSERT INTO participants (id, procurement_id, company_id, fingerprint,
+            participation_role, status_code, source, source_record_id, confidence, created_at)
+            VALUES (?, ?, ?, ?, 'participant', 'participant', 'pncp', ?, 1, CURRENT_TIMESTAMP)""",
+            ("5" * 32, "2" * 32, "4" * 32, "0" * 64, "0" * 32),
+        )
         connection.commit()
     migrate("upgrade", "head")
     with closing(sqlite3.connect(database)) as connection:
@@ -99,6 +149,19 @@ def test_upgrade_legacy_schema_keeps_raw_sentinel_and_unknown_completeness(tmp_p
         payment = connection.execute(
             "SELECT commitment_number, commitment_external_id, is_current FROM payments"
         ).fetchone()
+        procurement = connection.execute("SELECT object_complement FROM procurements").fetchone()
+        item = connection.execute(
+            "SELECT description, summary_description, description_search FROM procurement_items"
+        ).fetchone()
+        participant = connection.execute(
+            "SELECT id, status_code, source_record_id FROM participants"
+        ).fetchone()
+        assert (
+            connection.execute(
+                "UPDATE participants SET status_code = 'cancelled' WHERE id = ?", ("5" * 32,)
+            ).rowcount
+            == 1
+        )
         assert "resolved_url" in {r[1] for r in connection.execute("PRAGMA table_info(documents)")}
         for table in (
             "collection_sync_states",
@@ -122,3 +185,6 @@ def test_upgrade_legacy_schema_keeps_raw_sentinel_and_unknown_completeness(tmp_p
             assert connection.execute(f"SELECT count(*) FROM {table}").fetchone()[0] == 0  # noqa: S608 - fixed table allowlist
     assert row == ('{"sentinel": true}', None, None)
     assert payment == ("123", None, 1)
+    assert procurement == (None,)
+    assert item == ("Descrição existente", None, " descricao existente ")
+    assert participant == ("5" * 32, "participant", "0" * 32)

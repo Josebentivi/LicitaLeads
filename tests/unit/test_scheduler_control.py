@@ -48,6 +48,26 @@ async def test_leased_skips_jobs_while_paused(monkeypatch: pytest.MonkeyPatch) -
     assert called is False
 
 
+@pytest.mark.parametrize("configured", ["", "m"])
+async def test_scheduled_discovery_uses_the_optional_published_sphere(monkeypatch, configured):
+    from app.jobs import scheduler
+
+    monkeypatch.setenv("SCHEDULER_GOVERNMENT_SPHERE", configured)
+    settings = Settings(_env_file=None)
+    run = AsyncMock()
+    monkeypatch.setattr(scheduler, "_ScheduledPipeline", lambda _: SimpleNamespace(run=run))
+    monkeypatch.setattr(scheduler, "get_settings", lambda: settings)
+    await scheduler.discover_new_procurements()
+
+    request = run.await_args.args[0]
+    if not configured:
+        assert request.object_scope is None
+    else:
+        assert request.object_scope.government_sphere == "M"
+        assert request.object_scope.matches("M")
+        assert not request.object_scope.matches("F")
+
+
 @pytest.mark.asyncio
 async def test_refresh_active_uses_update_discovery(monkeypatch: pytest.MonkeyPatch) -> None:
     from app.jobs import scheduler

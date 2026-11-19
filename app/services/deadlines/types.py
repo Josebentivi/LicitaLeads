@@ -42,6 +42,7 @@ class DeadlineRequest:
     session_suspended: bool = False
     reopened_at: datetime | None = None
     now: datetime | None = None
+    document_deadline_estimated: bool = False
 
 
 @dataclass(frozen=True, slots=True)

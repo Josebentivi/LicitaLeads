@@ -54,6 +54,19 @@ licita-lead --help
   `all`), `--modality`, `--max-pages`, `--document-batch-size`,
   `--skip-documents`.
 
+`crawl` e `run-pipeline` aceitam `--start-date` e `--end-date` juntos no formato
+`AAAA-MM-DD`. Na descoberta por publicação, as datas são inclusivas e devem
+estar nos últimos dois anos. Períodos com mais de 31 dias são consultados por
+mês, com a possibilidade de continuar o mesmo lote em caso de interrupção.
+Use `--government-sphere F|E|M|D` para filtrar pela esfera publicada e `--object`
+para buscar termos no objeto e nos itens publicados. `--object-preset material-limpeza` é um
+exemplo de atalho repetível. `--object-group` aceita `bens`, `servicos`,
+`engenharia` e `obras`. O grupo direciona a pesquisa textual e a modalidade é
+selecionada separadamente com `--modality`.
+A coleta consulta os itens quando o cabeçalho sozinho não resolve o filtro.
+Uma resposta incompleta mantém pendente qualquer candidato cuja correspondência
+ainda precise ser confirmada.
+
 ### Piloto de pregões do TCE-MA
 
 ```powershell
@@ -239,6 +252,9 @@ o contêiner original completo e inalterado. Não há download ou reextração.
 respostas, arquivos e extrações armazenados. Não coleta, baixa, executa OCR ou IA.
 Verifica atos de minutas/legendas, marcadores sem homologação e vínculos derivados
 das identidades oficiais aceitas. Ausência de prova e conflitos exigem revisão.
+Também revalida o destinatário, o marco inicial e o escopo de prazos oficiais e
+recupera o texto para busca quando a resposta armazenada identifica exatamente
+a contratação ou o item.
 
 A aplicação é separada: acrescente `--apply --backup-dir CAMINHO`. Exige manutenção
 exclusiva e backup verificado; `--resume ID` retoma uma execução da mesma versão.

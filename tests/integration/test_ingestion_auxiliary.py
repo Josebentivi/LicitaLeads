@@ -2,17 +2,20 @@
 
 from __future__ import annotations
 
+import asyncio
+from decimal import Decimal
 from pathlib import Path
 
 import httpx
 import pytest
 import respx
-from sqlalchemy import func, select
+from sqlalchemy import event, func, select
 
 from app.config import Settings
-from app.models import Company, CompanyContact
+from app.models import Company, CompanyContact, ContactType, SourceRecord
 from app.services.contacts import CompanyContactCandidate
 from app.services.contacts import ContactType as CandidateType
+from app.services.contacts.manual import begin_corporate_write, save_corporate_contact
 from app.services.ingestion.audit import audit_sources
 from app.services.ingestion.contacts import ContactEnrichmentService
 
@@ -193,3 +196,113 @@ async def test_contact_enrichment_is_gated_and_idempotent(
     )
     failed = await failing.run()
     assert failed.errors == 1
+
+
+async def test_enrichment_waits_for_manual_contact_provenance(database: DatabaseContext):
+    address = "licitacoes@empresa.example"
+    manual_address = "licitacoes@EMPRESA.EXAMPLE"
+    manual_origin = "https://empresa.example/verificado"
+    async with database.sessions() as session, session.begin():
+        company = Company(
+            cnpj="00000000000191",
+            normalized_name="EMPRESA",
+            website="https://empresa.example",
+            domain="empresa.example",
+        )
+        session.add(company)
+        await session.flush()
+        company_id = company.id
+        session.add(
+            CompanyContact(
+                company_id=company_id,
+                contact_type=ContactType.EMAIL,
+                contact_value=address,
+                source_url="https://empresa.example/antigo",
+                is_corporate=True,
+                confidence=Decimal("0.8"),
+            )
+        )
+
+    service = ContactEnrichmentService(
+        Settings(app_env="test"),
+        session_factory=database.sessions,
+        provider=StaticContactProvider(),
+    )
+    database_attempted = asyncio.Event()
+
+    def before_write(connection, cursor, statement, parameters, context, executemany):
+        if statement == "BEGIN IMMEDIATE":
+            database_attempted.set()
+
+    def after_read(connection, cursor, statement, parameters, context, executemany):
+        if "FROM company_contacts" in statement:
+            database_attempted.set()
+
+    engine = database.engine.sync_engine
+    async with database.sessions() as manual:
+        await begin_corporate_write(manual)
+        company = await manual.get_one(Company, company_id)
+        assert not await save_corporate_contact(
+            manual, company, ContactType.EMAIL, manual_address, manual_origin
+        )
+        event.listen(engine, "before_cursor_execute", before_write)
+        event.listen(engine, "after_cursor_execute", after_read)
+        try:
+            automatic = asyncio.create_task(service.run(force=True))
+            await asyncio.wait_for(database_attempted.wait(), timeout=5)
+            await manual.commit()
+            result = await asyncio.wait_for(automatic, timeout=5)
+        finally:
+            event.remove(engine, "before_cursor_execute", before_write)
+            event.remove(engine, "after_cursor_execute", after_read)
+
+    assert result.errors == result.contacts_updated == result.contacts_created == 0
+    async with database.sessions() as session:
+        contact = (await session.scalars(select(CompanyContact))).one()
+        assert contact.source_record_id is not None
+        source = await session.get_one(SourceRecord, contact.source_record_id)
+        assert contact.source_url == source.endpoint == manual_origin
+        assert contact.contact_value == source.raw_payload["contact_value"] == manual_address
+        assert contact.confidence == 1
+
+
+async def test_enrichment_discards_results_after_manual_website_change(database: DatabaseContext):
+    async with database.sessions.begin() as db:
+        company = Company(
+            cnpj="00000000000191",
+            normalized_name="EMPRESA",
+            website="https://empresa.example",
+            domain="empresa.example",
+        )
+        db.add(company)
+        await db.flush()
+        company_id = company.id
+
+    class ProviderDuringEdit(StaticContactProvider):
+        async def find_contacts(self, target):
+            assert target.domain == "empresa.example"
+            async with database.sessions() as manual:
+                await begin_corporate_write(manual)
+                company = await manual.get_one(Company, company_id)
+                await save_corporate_contact(
+                    manual,
+                    company,
+                    ContactType.WEBSITE,
+                    "https://atual.example",
+                    "https://atual.example/registro",
+                )
+                await manual.commit()
+            return await super().find_contacts(target)
+
+    result = await ContactEnrichmentService(
+        Settings(app_env="test"), session_factory=database.sessions, provider=ProviderDuringEdit()
+    ).run(force=True)
+
+    assert result.companies_checked == 1
+    assert result.contacts_created == result.contacts_updated == result.errors == 0
+    async with database.sessions() as db:
+        company = await db.get_one(Company, company_id)
+        assert company.domain == "atual.example"
+        contact = (await db.scalars(select(CompanyContact))).one()
+        assert contact.contact_type == ContactType.WEBSITE
+        assert contact.source_record_id is not None

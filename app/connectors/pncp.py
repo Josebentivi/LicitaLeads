@@ -59,7 +59,9 @@ from app.connectors.http import (
     setting,
 )
 from app.connectors.page_window import PageWindow
+from app.services.collection_periods import normalize_discovery_kind
 from app.services.parallel import bounded_map
+from app.services.procurement_search import published_object_complement, published_sphere
 
 PNCP_MODALITY_CODES: dict[str, int] = {
     "leilao_eletronico": 1,
@@ -180,6 +182,15 @@ class PNCPConnector:
             combined.data = self._deduplicate(combined.data)
             return combined
 
+        if any(
+            isinstance(value, str) and _canonical_modality(value) in {"convite", "tomada_de_precos"}
+            for value in modality_values
+        ):
+            return ConnectorResult(
+                data=[],
+                availability=DataAvailability.NOT_SUPPORTED,
+                unsupported_modalities=[str(modality_values[0])],
+            )
         modalities = [self._modality_code(value) for value in modality_values]
         modalities = list(dict.fromkeys(modalities))
         kind = self._discovery_kind(filters.discovery_kind)
@@ -434,6 +445,9 @@ class PNCPConnector:
             diagnostic="partial result: item collection incomplete" if partial else None,
             partial=partial,
         )
+
+    def discard_cached_items(self, external_id: str) -> None:
+        self._item_cache.pop(external_id, None)
 
     async def fetch_documents(self, external_id: str) -> ConnectorResult[list[RawDocument]]:
         reference = parse_pncp_external_id(external_id)
@@ -1089,24 +1103,17 @@ class PNCPConnector:
 
     @staticmethod
     def _discovery_kind(value: str) -> str:
-        canonical = _canonical_modality(value)
-        aliases = {
+        return {
             "publication": "publicacao",
-            "publicacao": "publicacao",
             "update": "atualizacao",
-            "atualizacao": "atualizacao",
             "open_proposals": "proposta",
-            "proposals": "proposta",
-            "proposta": "proposta",
-        }
-        try:
-            return aliases[canonical]
-        except KeyError as exc:
-            raise ValueError(f"unsupported PNCP discovery kind: {value}") from exc
+        }[normalize_discovery_kind(value)]
 
     def _matches_client_filters(self, row: dict[str, Any], filters: ProcurementFilters) -> bool:
         agency = row.get("orgaoEntidade") or {}
         unit = row.get("unidadeOrgao") or {}
+        if filters.object_scope and not filters.object_scope.matches_sphere(agency.get("esferaId")):
+            return False
         if filters.agency and not contains_text(
             [agency.get("razaoSocial"), unit.get("nomeUnidade")], filters.agency
         ):
@@ -1158,9 +1165,10 @@ class PNCPConnector:
             )
             or None,
             "object_description": row.get("objetoCompra"),
+            "object_complement": published_object_complement(row),
             "agency_name": agency.get("razaoSocial") or unit.get("nomeUnidade"),
             "agency_cnpj": agency_cnpj,
-            "government_sphere": agency.get("esferaId"),
+            "government_sphere": published_sphere(agency.get("esferaId")) or agency.get("esferaId"),
             "government_branch": agency.get("poderId"),
             "uf": unit.get("ufSigla"),
             "municipality": unit.get("municipioNome"),

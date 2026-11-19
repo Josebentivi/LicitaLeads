@@ -12,7 +12,7 @@
     <li><a href="#o-que-e">O que é a plataforma</a></li>
     <li><a href="#palavras">Palavras que você vai ver</a></li>
     <li><a href="#telas">Passo a passo por tela</a></li>
-    <li><a href="#score">Como ler o score de um lead</a></li>
+    <li><a href="#score">Como ler a pontuação de prioridade</a></li>
     <li><a href="#cuidados">O que a plataforma não faz (e cuidados)</a></li>
     <li><a href="#faq">Perguntas frequentes</a></li>
     <li><a href="#operacao">Para quem opera as coletas</a></li>
@@ -39,13 +39,16 @@
     <tbody>
       <tr><td>Contratação</td><td>Compra ou contratação feita por um órgão público: um pregão, uma concorrência, uma dispensa etc.</td></tr>
       <tr><td>Órgão</td><td>Quem publica a compra: prefeitura, secretaria, tribunal, universidade...</td></tr>
-      <tr><td>Modalidade</td><td>A forma da licitação: pregão, concorrência, concurso, leilão, diálogo competitivo, dispensa ou inexigibilidade.</td></tr>
+      <tr><td>Forma de contratação</td><td>Licitação, contratação direta por dispensa ou contratação direta por inexigibilidade.</td></tr>
+      <tr><td>Modalidade de licitação</td><td>Pregão, concorrência, concurso, leilão ou diálogo competitivo.</td></tr>
       <tr><td>SRP / Ata (ARP)</td><td>Registro de preços. A ata guarda preços e fornecedores para compras futuras do órgão.</td></tr>
       <tr><td>Participação comprovada</td><td>Empresa que aparece em resultado oficial ou em documento, com um trecho que comprova. Não é suposição.</td></tr>
       <tr><td>Evento</td><td>Fato jurídico encontrado em documento oficial, por exemplo: empresa inabilitada ou recurso apresentado.</td></tr>
       <tr><td>Evidência</td><td>O trecho exato do documento que comprova o fato, com página e link para abrir.</td></tr>
       <tr><td>Lead</td><td>Oportunidade de atendimento criada a partir de um evento comprovado ou de participação em processo ativo.</td></tr>
-      <tr><td>Score</td><td>Nota de 0 a 100 que ajuda a priorizar os leads.</td></tr>
+      <tr><td>Pontuação de prioridade</td><td>Nota de 0 a 100 que ajuda a ordenar as oportunidades para análise.</td></tr>
+      <tr><td>Urgência do prazo</td><td>Parcela de até 30 pontos, calculada pela proximidade e origem da data. Prazo vencido recebe zero nesta parcela.</td></tr>
+      <tr><td>Situação da análise</td><td>Etapa da revisão humana, como Novo, Revisão pendente, Aprovado ou Ajustes solicitados.</td></tr>
       <tr><td>Revisão pendente</td><td>O lead precisa da conferência de uma pessoa antes de ser usado.</td></tr>
       <tr><td>Rascunho</td><td>Sugestão de mensagem para o cliente. O sistema nunca envia sozinho.</td></tr>
     </tbody>
@@ -56,13 +59,19 @@
 <section id="telas" class="panel">
   <h2>Passo a passo por tela</h2>
 
-  <h3>Dashboard</h3>
-  <p><strong>Para que serve:</strong> visão geral do dia — quantas contratações, eventos, empresas e leads existem, além dos prazos mais urgentes e dos últimos leads criados.</p>
-  <p><strong>O que fazer aqui:</strong> comece por esta tela para saber se há algo urgente (prazos em 24 horas, revisões pendentes) e depois siga para <a href="/leads">Leads</a>.</p>
+  <h3 id="indicadores">Minha agenda de análise</h3>
+  <p>Abra as filas de revisão, ajustes solicitados e prazos próximos de até 72 horas. Em <strong>Indicadores do acervo</strong>, os números medem itens diferentes.</p>
+  <dl class="facts">
+    <div><dt>Contratações monitoradas</dt><dd>Processos identificados no acervo.</dd></div>
+    <div><dt>Eventos detectados</dt><dd>Fatos com evidência vigente. Uma contratação pode ter vários eventos.</dd></div>
+    <div><dt>Prazos vencidos</dt><dd>Prazos do acervo, explícitos ou estimados, cuja data já passou. Confira a origem antes de decidir.</dd></div>
+    <div><dt>Pendências de revisão</dt><dd>Oportunidades atuais com situação Revisão pendente.</dd></div>
+    <div><dt>Erros de coleta</dt><dd>Execuções de coleta com situação Falhou. Em <a href="/crawls">Coletas</a> também aparecem execuções parciais e falhas por registro ou documento.</dd></div>
+  </dl>
 
   <h3>Contratações</h3>
   <p><strong>Para que serve:</strong> lista dos processos monitorados.</p>
-  <p><strong>O que fazer aqui:</strong> use os filtros para reduzir a lista — UF, município, órgão, <strong>CNPJ do órgão</strong>, <strong>CNPJ da empresa</strong>, modalidade, rota da contratação (licitação, contratação direta ou procedimento auxiliar), situação, SRP e faixa de valor. Clique em um processo para ver itens, documentos, participantes e eventos.</p>
+  <p>Use os filtros por período de publicação, UF, município, esfera, órgão, CNPJ, forma de contratação, modalidade de licitação, situação, SRP e faixa de valor. Abra o processo para ver itens, documentos, participantes, atos da sessão e a origem dos prazos. A fase apresentada para o processo é uma indicação operacional. Cada ato deve ser lido com sua própria evidência.</p>
   <p class="hint">Se um evento aparecer sem empresa identificada, você pode vinculá-lo manualmente a uma empresa que já participa do processo, no detalhe da contratação.</p>
 
   <h3>Empresas</h3>
@@ -70,17 +79,19 @@
   <p>Você pode revisar os leads e gerar ou consultar rascunhos nessa página. Novos leads usam a nota 2.0; os antigos conservam a versão até usar <strong>Recalcular pontuação</strong> ou <strong>Recalcular selecionados</strong>. O histórico registra notas e fontes, preservando decisões humanas. Os prazos continuam atualizados.</p>
   <p><strong>Para que serve:</strong> mostra as empresas identificadas e o histórico delas.</p>
   <p><strong>O que fazer aqui:</strong> filtre pelo <strong>período de publicação da contratação</strong> (empresas do período da coleta), por "somente com lead" e por "em processo ativo". Ao abrir uma empresa, você vê as participações comprovadas, os eventos (inabilitação, desclassificação, recursos) e os contatos corporativos, com a origem de cada informação.</p>
+  <p>Em <strong>Dados corporativos</strong>, confira razão social, CNPJ, endereço, telefone e e-mail. Registre informações públicas com a fonte e a confirmação de que se referem ao CNPJ exibido. No histórico, agrupe por semestre ou ano. A contagem usa contratações distintas pela publicação dentro dos últimos dois anos. Para abrir o processo, prefira a página pública do PNCP ou da plataforma de origem quando disponível.</p>
 
-  <h3>Atas (ARP)</h3>
+  <h3 id="atas">Atas (ARP)</h3>
   <p><strong>Para que serve:</strong> lista as atas de registro de preços publicadas oficialmente.</p>
   <p><strong>O que fazer aqui:</strong> busque a ata e abra o detalhe para ver itens, valores, fornecedores e histórico. <strong>Coletar dados</strong> consulta as unidades conhecidas da UF. Acompanhe a atualização em <a href="/crawls">Coletas</a>.</p>
+  <p>O PNCP fornece o cabeçalho da ata. O módulo ARP do Compras.gov.br pode acrescentar itens, fornecedores, unidades, quantidades, saldos, empenhos e adesões. “Não informado” indica um campo sem valor no acervo. Confira a origem e a execução de coleta para investigar uma seção sem registros.</p>
 
   <h3>Contratos e pagamentos</h3>
   <p>Em <a href="/contratos">Contratos</a>, busque por número, órgão ou CNPJ do fornecedor. Em <a href="/pagamentos">Pagamentos</a>, confira os vínculos e a origem ou importe CSV/JSON oficial. A coleta do topo atualiza ambos. Um pagamento sem vínculo precisa de conferência e não prova inadimplência.</p>
 
   <h3>Leads</h3>
   <p><strong>Para que serve:</strong> lista as oportunidades geradas para o escritório.</p>
-  <p><strong>O que fazer aqui:</strong> filtre por score mínimo, tipo de evento, data e "revisão pendente". Abra um lead para ver o motivo, a evidência (com link para o documento) e os contatos da empresa. Depois, registre sua decisão na revisão e, se quiser, gere um rascunho de mensagem.</p>
+  <p>Abra a fila <strong>Prazo aberto para diligência ou recurso</strong> para encontrar oportunidades imediatas. Use <strong>Todas</strong> para consultar também oportunidades com prazo estimado ou sem data confirmada. Nos filtros, use pontuação mínima, tipo de evento, data e situação da análise. Abra a oportunidade para ver o fato, a evidência e os contatos, então registre a revisão.</p>
   <p class="hint">O lead pode vir de um <strong>evento comprovado</strong> (ex.: inabilitação) ou de uma <strong>participação em processo ativo</strong> comprovada por documento.</p>
   <p class="hint">A participação, por si só, não indica irregularidade. A data de adição do lead não é necessariamente a data do ato. Confira a empresa, a fonte e o prazo antes de registrar sua revisão.</p>
 
@@ -92,18 +103,18 @@
   <p>Em <a href="/testes">Testes</a>, o diagnóstico rápido e a suíte completa têm relatórios separados. A suíte usa banco e arquivos temporários, testa também navegador e OCR quando disponíveis e apresenta verificações pendentes ou falhas. Relatórios antigos ou de outro código não comprovam a versão atual; fontes externas e serviços pagos não são verificados pela suíte offline.</p>
 
   <h3>Fontes e Configurações</h3>
-  <p><strong>Fontes:</strong> mostra, de forma auditada, o que cada fonte oficial publica e o que depende de documento.</p>
+  <p>Em <a href="/source-capabilities">Fontes</a>, confira o que cada integração consulta e o que depende de documento. A sessão pública do Compras.gov.br pode trazer informações para conferência manual além da cobertura da integração com Dados Abertos.</p>
   <p><strong>Configurações:</strong> mostra a configuração pública (sem senhas) e a zona de risco para apagar os dados coletados. O apagamento é irreversível e fica bloqueado enquanto houver coleta em andamento.</p>
 </section>
 
 <section id="score" class="panel">
-  <h2>Como ler o score de um lead</h2>
-  <p>O score vai de 0 a 100 e serve para <strong>priorizar</strong>. Na versão 2.0, soma cinco componentes e desconta as penalidades:</p>
+  <h2>Como ler a pontuação de prioridade</h2>
+  <p>A pontuação vai de 0 a 100. A versão 2.0 soma cinco componentes e desconta as penalidades.</p>
   <div class="table-wrap">
   <table>
     <thead><tr><th>O que entra na conta</th><th>Peso</th><th>Em palavras simples</th></tr></thead>
     <tbody>
-      <tr><td>Urgência do prazo</td><td>até 30</td><td>Quanto mais perto o prazo, maior a nota.</td></tr>
+      <tr><td>Urgência do prazo</td><td>até 30</td><td>Prazos abertos mais próximos aumentam a nota. Prazo estimado contribui com até 12 pontos.</td></tr>
       <tr><td>Força da prova</td><td>até 30</td><td>Confiança da detecção e existência de evidência direta.</td></tr>
       <tr><td>Relevância do evento</td><td>até 25</td><td>Inabilitação e recursos pesam mais; homologação pesa menos.</td></tr>
       <tr><td>Contato corporativo verificado</td><td>até 5</td><td>Ter e-mail ou telefone corporativo aumenta a nota.</td></tr>
@@ -144,7 +155,7 @@
   <p>Um registro com problema foi anotado (por exemplo, um dado inválido publicado pela fonte) e a coleta continuou. Os demais registros foram salvos normalmente; os detalhes técnicos ficam disponíveis na tela.</p>
 
   <h3>Para que servem os ícones "i"?</h3>
-  <p>Dão uma explicação curta e objetiva sobre a opção ao lado — filtros, status, score e páginas. Passe o mouse ou clique.</p>
+  <p>Dão uma explicação curta sobre filtros, situação, pontuação e páginas. Passe o mouse ou clique.</p>
 
   <h3>A plataforma envia e-mail ou mensagem ao cliente?</h3>
   <p>Não. Ela apenas gera rascunhos. O envio, se houver, é feito por você, fora do sistema.</p>

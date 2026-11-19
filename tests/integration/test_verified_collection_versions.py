@@ -2,6 +2,7 @@
 
 import asyncio
 import copy
+from urllib.parse import urlsplit
 
 import httpx
 import pytest
@@ -15,13 +16,19 @@ from app.models import (
     CrawlRun,
     CrawlRunStatus,
     FieldChange,
+    FieldObservation,
+    FieldState,
     Procurement,
     ProcurementItem,
     SourceRecord,
     SourceResponseValidator,
     VerifiedCollectionVersion,
 )
+from app.repositories.procurements import ProcurementRepository
 from app.services.ingestion.pipeline import IngestionPipeline, PipelineRequest
+from app.services.participation_reconciliation import IntegrityReport
+from app.services.procurement_search import ObjectScope
+from app.services.procurement_search_reconciliation import inspect_legacy_search_text
 
 
 def row():
@@ -73,6 +80,9 @@ def setup(database, *, etags=False):
             payload = []
         else:
             payload = copy.deepcopy(state["row"])
+            if state.get("detail_omits_scope"):
+                payload.pop("informacaoComplementar", None)
+                payload["orgaoEntidade"].pop("esferaId", None)
         return httpx.Response(200, json=payload, headers={"ETag": '"version-1"'} if etags else {})
 
     raw = httpx.AsyncClient(transport=httpx.MockTransport(handler))
@@ -118,6 +128,77 @@ async def test_same_official_version_avoids_details_and_force_refresh_fetches_ag
         assert len(state["requests"]) > 1 and forced.source_results["pncp"]["records_reused"] == 0
     finally:
         await raw.aclose()
+
+
+@pytest.mark.parametrize("legacy_action", ["recollect", "reconcile"])
+async def test_discovery_scope_projection_stays_auditable_and_recoverable(database, legacy_action):
+    state, client, pipeline = setup(database)
+    state["row"]["informacaoComplementar"] = "Fornecimento de CÂMERA"
+    state["row"]["orgaoEntidade"]["esferaId"] = "M"
+    state["detail_omits_scope"] = True
+    scope = ObjectScope.build("camera", government_sphere="M")
+    request = PipelineRequest(connector="pncp", process_documents=False, object_scope=scope)
+    try:
+        assert (await pipeline.run(request)).records_created == 1
+        async with database.sessions() as session, session.begin():
+            procurement = (
+                await ProcurementRepository(session).list_filtered(object_scope=scope)
+            ).items[0]
+            assert procurement.object_complement == "Fornecimento de CÂMERA"
+            assert procurement.government_sphere == "M"
+            for model in (FieldState, FieldObservation):
+                tracked = await session.execute(
+                    select(model.field_name, model.value, SourceRecord.endpoint)
+                    .join(SourceRecord, SourceRecord.id == model.source_record_id)
+                    .where(
+                        model.entity_id == procurement.id,
+                        model.field_name.in_(("object_complement", "government_sphere")),
+                    )
+                )
+                observations = tracked.all()
+                assert {(field, value) for field, value, _ in observations} == {
+                    ("object_complement", "Fornecimento de CÂMERA"),
+                    ("government_sphere", "M"),
+                }
+                assert all(
+                    urlsplit(endpoint).path.endswith("/contratacoes/publicacao")
+                    for _, _, endpoint in observations
+                )
+
+            assert await session.scalar(select(VerifiedCollectionVersion))
+            # Simulate a version certified before the header projection existed.
+            procurement.object_complement = None
+            await session.execute(
+                delete(FieldState).where(FieldState.field_name == "object_complement")
+            )
+        if legacy_action == "reconcile":
+            async with database.sessions() as session, session.begin():
+                procurement = (await session.scalars(select(Procurement))).one()
+                report = IntegrityReport()
+                await inspect_legacy_search_text(session, procurement, apply=False, report=report)
+                assert report.totals == {"search_text_requiring_repair": 1}
+                assert procurement.object_complement is None
+                await inspect_legacy_search_text(session, procurement, apply=True, report=report)
+        else:
+            state["requests"].clear()
+            summary = await pipeline.run(request)
+            assert summary.source_results["pncp"]["records_reused"] == 0
+            assert len(state["requests"]) > 1
+
+        async with database.sessions() as session:
+            assert (
+                await ProcurementRepository(session).list_filtered(object_scope=scope)
+            ).total == 1
+            evidence_endpoint = await session.scalar(
+                select(SourceRecord.endpoint)
+                .join(FieldState, FieldState.source_record_id == SourceRecord.id)
+                .where(FieldState.field_name == "object_complement")
+            )
+            assert evidence_endpoint and urlsplit(evidence_endpoint).path.endswith(
+                "/contratacoes/publicacao"
+            )
+    finally:
+        await client.aclose()
 
 
 async def test_direct_pncp_refresh_only_expands_when_the_official_version_changes(database):

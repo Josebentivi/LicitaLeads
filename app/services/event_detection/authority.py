@@ -38,17 +38,22 @@ def assertion_diagnostic(text: str, title: str | None = None) -> str | None:
     ):
         return "status_legend"
     if re.search(
-        r"\b(?:sera|serao|podera|poderao|devera|deverao)\s+(?:ser\s+)?(?:inabilitad|desclassificad|adjudicad|homologad|rejeitad)",
+        r"\b(?:sera|serao|podera|poderao|devera|deverao)\s+(?:ser\s+)?"
+        r"(?:inabilitad|desclassificad|classificad|adjudicad|homologad|rejeitad|declarad[ao]s?\s+vencedor)",
         value,
     ):
         return "future_rule"
     if re.search(
-        r"\b(?:caso|se)\s+(?:o |a )?(?:licitante|empresa|proposta).{0,90}\b(?:inabilitad|desclassificad)",
+        r"\b(?:caso|se)\s+(?:o |a )?(?:licitante|empresa|proposta).{0,90}\b(?:inabilitad|desclassificad|declarad[ao]\s+vencedor)",
+        value,
+    ) or re.search(
+        r"\b(?:se\s+(?:for|vier\s+a\s+ser)|caso\s+(?:seja|venha\s+a\s+ser))\s+"
+        r"(?:inabilitad|desclassificad|classificad|adjudicad|homologad|declarad[ao]s?\s+vencedor)",
         value,
     ):
         return "conditional_rule"
     if re.search(
-        r"\b(?:alega|alegou|sustenta|sustentou|requer|requereu)\b.{0,100}\b(?:inabilitacao|desclassificacao)\b",
+        r"\b(?:alega|alegou|sustenta|sustentou|requer|requereu)\b.{0,100}\b(?:inabilitacao|desclassificacao|declarad[ao]\s+vencedor[ao]?)\b",
         value,
     ) and not re.search(r"\b(?:decido|decidiu|indefiro|defiro|decisao)\b", value):
         return "unconfirmed_allegation"

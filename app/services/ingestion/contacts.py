@@ -9,14 +9,16 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.config import Settings, get_settings
-from app.database import async_session_factory
+from app.database import async_session_factory, write_session
 from app.models import Company, CompanyContact, ContactStatus, ContactType
 from app.services.contacts import (
     CompanyContactTarget,
     ContactEnrichmentProvider,
     PublicWebsiteContactProvider,
 )
+from app.services.contacts.identity import contact_identity
 from app.services.ingestion.pipeline import stable_fingerprint
+from app.services.write_admission import admit_before_row_lock
 
 
 @dataclass(frozen=True, slots=True)
@@ -70,43 +72,66 @@ class ContactEnrichmentService:
                         domain=company.domain,
                     )
                 )
-                async with self.session_factory() as session, session.begin():
+                company_created = company_updated = 0
+                async with write_session(self.session_factory) as session:
+                    await admit_before_row_lock(session)
+                    current = (
+                        await session.execute(
+                            select(Company.domain, Company.website)
+                            .where(Company.id == company.id)
+                            .with_for_update()
+                        )
+                    ).one_or_none()
+                    if current is None or (current.domain, current.website) != (
+                        company.domain,
+                        company.website,
+                    ):
+                        continue
+                    stored = await session.scalars(
+                        select(CompanyContact)
+                        .where(CompanyContact.company_id == company.id)
+                        .order_by(
+                            CompanyContact.source_record_id.is_not(None).desc(), CompanyContact.id
+                        )
+                    )
+                    contacts: dict[tuple[ContactType, str], CompanyContact] = {}
+                    for row in stored:
+                        contacts.setdefault(
+                            (
+                                row.contact_type,
+                                contact_identity(row.contact_type, row.contact_value),
+                            ),
+                            row,
+                        )
                     for candidate in candidates:
                         if not candidate.is_corporate or candidate.is_personal:
                             continue
-                        existing = await session.scalar(
-                            select(CompanyContact).where(
-                                CompanyContact.company_id == company.id,
-                                CompanyContact.contact_type
-                                == ContactType(candidate.contact_type.value),
-                                CompanyContact.contact_value == candidate.contact_value,
-                            )
-                        )
+                        kind = ContactType(candidate.contact_type.value)
+                        identity = contact_identity(kind, candidate.contact_value)
+                        key = kind, identity
+                        existing = contacts.get(key)
                         if existing is None:
-                            session.add(
-                                CompanyContact(
-                                    company_id=company.id,
-                                    contact_type=ContactType(candidate.contact_type.value),
-                                    contact_value=candidate.contact_value,
-                                    source_url=candidate.source_url,
-                                    is_corporate=True,
-                                    is_personal=False,
-                                    confidence=Decimal(str(candidate.confidence)),
-                                    status=(
-                                        ContactStatus.VERIFIED
-                                        if candidate.confidence >= 0.9
-                                        else ContactStatus.DISCOVERED
-                                    ),
-                                    fingerprint=stable_fingerprint(
-                                        "contact",
-                                        company.id,
-                                        candidate.contact_type.value,
-                                        candidate.contact_value.lower(),
-                                    ),
-                                )
+                            existing = CompanyContact(
+                                company_id=company.id,
+                                contact_type=kind,
+                                contact_value=candidate.contact_value,
+                                source_url=candidate.source_url,
+                                is_corporate=True,
+                                is_personal=False,
+                                confidence=Decimal(str(candidate.confidence)),
+                                status=(
+                                    ContactStatus.VERIFIED
+                                    if candidate.confidence >= 0.9
+                                    else ContactStatus.DISCOVERED
+                                ),
+                                fingerprint=stable_fingerprint(
+                                    "contact_identity", company.id, kind.value, identity
+                                ),
                             )
-                            created += 1
-                        else:
+                            session.add(existing)
+                            contacts[key] = existing
+                            company_created += 1
+                        elif existing.source_record_id is None:
                             existing.source_url = candidate.source_url
                             existing.confidence = max(
                                 existing.confidence,
@@ -114,7 +139,9 @@ class ContactEnrichmentService:
                             )
                             existing.is_corporate = True
                             existing.is_personal = False
-                            updated += 1
+                            company_updated += 1
+                created += company_created
+                updated += company_updated
             except Exception:
                 errors += 1
         return ContactEnrichmentSummary(checked, created, updated, errors)

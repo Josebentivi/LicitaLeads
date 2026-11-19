@@ -39,6 +39,7 @@
               <div class="source-result">
                 <span class="source-name">{{ source.label }}</span>
                 <span class="badge status-{{ source.status }}">{{ source.status_label }}</span>
+                {% if source.coverage_note %}<small>{{ source.coverage_note }}</small>{% endif %}
                 {% if source.records_found is not none %}
                 <small>{{ source.records_found }} registro(s)</small>
                 {% endif %}

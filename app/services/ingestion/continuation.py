@@ -90,6 +90,7 @@ async def create_continuation(
 def pipeline_request_from_filters(filters: dict[str, Any]) -> Any:
     from app.services.ingestion.pipeline import PipelineRequest
     from app.services.price_registry_scopes import restore_price_registry_scopes
+    from app.services.procurement_search import ObjectScope
 
     names = {item.name for item in fields(PipelineRequest)}
     values = {key: value for key, value in filters.items() if key in names}
@@ -102,6 +103,8 @@ def pipeline_request_from_filters(filters: dict[str, Any]) -> Any:
     if values.get("continuation_batch_id"):
         values["continuation_batch_id"] = UUID(str(values["continuation_batch_id"]))
     values["price_registry_scopes"] = restore_price_registry_scopes(filters)
+    if values.get("object_scope") is not None:
+        values["object_scope"] = ObjectScope.from_mapping(values["object_scope"])
     return PipelineRequest(**values)
 
 

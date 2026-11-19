@@ -16,6 +16,7 @@ from zoneinfo import ZoneInfo
 from apscheduler.schedulers.asyncio import AsyncIOScheduler  # type: ignore[import-untyped]
 from sqlalchemy import and_, func, or_, select, update
 
+from app.async_runtime import run_database_async
 from app.config import get_settings
 from app.database import async_session_factory, write_session
 from app.logging import configure_logging
@@ -33,6 +34,7 @@ from app.services.ingestion.processor import DocumentProcessingService
 from app.services.ingestion.recovery import reconcile_stale_crawls
 from app.services.ingestion.scheduled_collections import run_scheduled_collection
 from app.services.price_registry_scopes import known_price_registry_scopes
+from app.services.procurement_search import ObjectScope
 from app.services.scheduler_control import (
     clear_scheduler_heartbeat,
     component_paused,
@@ -135,6 +137,7 @@ async def discover_new_procurements() -> None:
             uf=settings.default_uf,
             days=settings.default_lookback_days,
             modalities=tuple(settings.default_modalities),
+            object_scope=ObjectScope.build(government_sphere=settings.scheduler_government_sphere),
             process_documents=False,
         )
     )
@@ -490,7 +493,7 @@ async def serve() -> None:
 
 def main() -> None:
     try:
-        asyncio.run(serve())
+        run_database_async(serve())
     except KeyboardInterrupt:
         pass
 

@@ -28,6 +28,12 @@ def test_calendar_shortcuts_and_mobile_layout(browser, runtime):
     options = browser.find_element(By.ID, "escopo")
     assert not options.get_attribute("open")
     options.find_element(By.TAG_NAME, "summary").click()
+    options.find_element(By.CSS_SELECTOR, "[data-period='two-years']").click()
+    start_input = options.find_element(By.NAME, "start_date")
+    assert start_input.get_attribute("value") == start_input.get_attribute("min")
+    procurements_only = options.find_element(By.NAME, "procurements_only")
+    assert procurements_only.is_selected()
+    procurements_only.click()
     options.find_element(By.CSS_SELECTOR, "[data-period='30']").click()
     start = date.fromisoformat(options.find_element(By.NAME, "start_date").get_attribute("value"))
     end = date.fromisoformat(options.find_element(By.NAME, "end_date").get_attribute("value"))
@@ -63,6 +69,7 @@ def test_calendar_shortcuts_and_mobile_layout(browser, runtime):
 
 def test_saved_search_review_context_and_copy_feedback(browser, runtime):
     from selenium.webdriver.common.by import By
+    from selenium.webdriver.support import expected_conditions as condition
     from selenium.webdriver.support.ui import Select, WebDriverWait
 
     from app.database import create_database_engine, create_session_factory
@@ -92,7 +99,11 @@ def test_saved_search_review_context_and_copy_feedback(browser, runtime):
     form.find_element(By.NAME, "reviewer").send_keys("Analista de teste")
     form.find_element(By.CSS_SELECTOR, "button[type=submit]").click()
     wait = WebDriverWait(browser, 15)
-    wait.until(lambda driver: "Revisão registrada" in driver.find_element(By.TAG_NAME, "body").text)
+    wait.until(
+        condition.text_to_be_present_in_element(
+            (By.CSS_SELECTOR, "p.alert.success[role=status]"), "Revisão registrada"
+        )
+    )
     assert (
         browser.execute_script("return localStorage.getItem('licitalead:reviewer')")
         == "Analista de teste"

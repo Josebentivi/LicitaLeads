@@ -107,7 +107,7 @@ def _compact(value: str) -> str:
     return re.sub(r"[^a-z0-9]", "", value.lower())
 
 
-def _valid_domain(domain: str) -> bool:
+def valid_dns_name(domain: str) -> bool:
     if not domain or len(domain) > 253 or "." not in domain:
         return False
     try:
@@ -120,9 +120,17 @@ def _valid_domain(domain: str) -> bool:
     except UnicodeError:
         return False
     labels = ascii_domain.split(".")
-    if len(labels) < 2:
+    if len(ascii_domain) > 253 or len(labels) < 2:
         return False
     return all(_DOMAIN_LABEL.fullmatch(label) for label in labels)
+
+
+def is_valid_email(value: str) -> bool:
+    """Check a single mailbox address without checking ownership or DNS."""
+    if len(value) > 254 or EMAIL_PATTERN.fullmatch(value) is None:
+        return False
+    local_part, _, domain = value.partition("@")
+    return len(local_part) <= 64 and all(local_part.split(".")) and valid_dns_name(domain.lower())
 
 
 def _is_blocked(domain: str) -> bool:
@@ -140,7 +148,7 @@ def derive_company_domain(
     """Return the evidenced domain only when the company name is inside it."""
 
     domain = candidate.domain
-    if not _valid_domain(domain) or _is_blocked(domain):
+    if not valid_dns_name(domain) or _is_blocked(domain):
         return None
     compact_name = _compact(normalized_company_name or "")
     if len(compact_name) < _MIN_NAME_CHARACTERS:

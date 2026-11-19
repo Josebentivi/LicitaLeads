@@ -306,7 +306,7 @@ async def test_price_registry_details_are_persisted_and_served(
     page = await api_client.get(f"/atas/{registry.id}")
     assert page.status_code == 200
     assert page.text.count("Unidades e saldos") == 1
-    assert page.text.count("Adesoes de outros orgaos") == 1
+    assert page.text.count("Adesões de outros órgãos") == 1
 
 
 @pytest.mark.asyncio

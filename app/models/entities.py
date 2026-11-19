@@ -52,6 +52,7 @@ from app.models.enums import (
     ReviewDecision,
     database_enum,
 )
+from app.services.procurement_search import indexed_search_text
 
 
 class Procurement(UUIDPrimaryKeyMixin, TimestampMixin, FingerprintMixin, Base):
@@ -89,6 +90,11 @@ class Procurement(UUIDPrimaryKeyMixin, TimestampMixin, FingerprintMixin, Base):
     legal_basis: Mapped[str | None] = mapped_column(String(255))
     title: Mapped[str | None] = mapped_column(String(500))
     object_description: Mapped[str | None] = mapped_column(Text)
+    object_complement: Mapped[str | None] = mapped_column(Text)
+    _object_description_search: Mapped[str | None] = mapped_column(
+        "object_description_search", Text
+    )
+    _object_complement_search: Mapped[str | None] = mapped_column("object_complement_search", Text)
     agency_name: Mapped[str | None] = mapped_column(String(500), index=True)
     agency_cnpj: Mapped[str | None] = mapped_column(String(14), index=True)
     government_sphere: Mapped[str | None] = mapped_column(String(100))
@@ -110,6 +116,11 @@ class Procurement(UUIDPrimaryKeyMixin, TimestampMixin, FingerprintMixin, Base):
     )
     phase_observed_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
     source_url: Mapped[str | None] = mapped_column(Text)
+
+    @validates("object_description", "object_complement")
+    def _sync_object_search_text(self, key: str, value: str | None) -> str | None:
+        setattr(self, f"_{key}_search", indexed_search_text(value))
+        return value
 
     @validates("modality")
     def _sync_modality_key(self, _key: str, value: str | None) -> str | None:
@@ -318,11 +329,21 @@ class ProcurementItem(UUIDPrimaryKeyMixin, FingerprintMixin, Base):
     external_item_id: Mapped[str | None] = mapped_column(String(255))
     item_number: Mapped[str] = mapped_column(String(100), nullable=False)
     description: Mapped[str | None] = mapped_column(Text)
+    summary_description: Mapped[str | None] = mapped_column(Text)
+    _description_search: Mapped[str | None] = mapped_column("description_search", Text)
+    _summary_description_search: Mapped[str | None] = mapped_column(
+        "summary_description_search", Text
+    )
     quantity: Mapped[Decimal | None] = mapped_column(Numeric(19, 4))
     unit: Mapped[str | None] = mapped_column(String(100))
     estimated_unit_value: Mapped[Decimal | None] = mapped_column(Numeric(19, 4))
     estimated_total_value: Mapped[Decimal | None] = mapped_column(Numeric(19, 2))
     result_status: Mapped[str | None] = mapped_column(String(100))
+
+    @validates("description", "summary_description")
+    def _sync_item_search_text(self, key: str, value: str | None) -> str | None:
+        setattr(self, f"_{key}_search", indexed_search_text(value))
+        return value
 
     procurement: Mapped[Procurement] = relationship(back_populates="items")
     participants: Mapped[list[Participant]] = relationship(back_populates="item")
@@ -636,6 +657,9 @@ class CompanyContact(UUIDPrimaryKeyMixin, FingerprintMixin, Base):
     contact_type: Mapped[ContactType] = mapped_column(database_enum(ContactType), nullable=False)
     contact_value: Mapped[str] = mapped_column(String(1000), nullable=False)
     source_url: Mapped[str | None] = mapped_column(Text)
+    source_record_id: Mapped[UUID | None] = mapped_column(
+        GUID(), ForeignKey("source_records.id", ondelete="SET NULL"), index=True
+    )
     is_corporate: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     is_personal: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     confidence: Mapped[Decimal] = mapped_column(Numeric(5, 4), nullable=False)

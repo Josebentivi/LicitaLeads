@@ -181,8 +181,8 @@ async def test_descendant_ends_when_its_parent_exits_first(tmp_path, exit_code):
     ("live_environment", "mark_expression", "expected_live"),
     [("true", "", "false"), ("false", "live", "false"), ("true", "live", "true")],
 )
-def test_plain_pytest_isolates_import_time_factory_and_hostile_dotenv(
-    tmp_path, live_environment, mark_expression, expected_live
+async def test_plain_pytest_isolates_import_time_factory_and_hostile_dotenv(
+    tmp_path, monkeypatch, live_environment, mark_expression, expected_live
 ):
     repository = Path(__file__).resolve().parents[2]
     operator = tmp_path / "operator.sqlite3"
@@ -237,31 +237,22 @@ def test_import_time_factory_is_isolated():
         environment.pop(key, None)
     environment["RUN_LIVE_CONTRACT_TESTS"] = live_environment
     environment["PYTHONPATH"] = str(repository)
-    environment = {
-        key: value for key, value in environment.items() if not key.startswith("COV_CORE_")
-    }
+    environment["PYTEST_DISABLE_PLUGIN_AUTOLOAD"] = "1"
+    environment.pop("PYTEST_ADDOPTS", None)
     command = [
         sys.executable,
         "-m",
         "pytest",
         "-q",
-        "--no-cov",
         "-p",
         "no:cacheprovider",
         "test_safety.py",
     ]
     if mark_expression:
         command.extend(["-m", mark_expression])
-    result = subprocess.run(  # noqa: S603 - fixed isolated pytest, no shell
-        command,
-        cwd=tmp_path,
-        env=environment,
-        check=False,
-        capture_output=True,
-        text=True,
-        timeout=90,
-        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-    )
-    assert result.returncode == 0, result.stdout + result.stderr
+    service = service_for(tmp_path)
+    monkeypatch.setattr(service, "_repo_root", lambda: tmp_path)
+    code, output = await service._run_process(command, environment, 90)
+    assert code == 0, output.decode(errors="replace")
     assert hashlib.sha256(operator.read_bytes()).hexdigest() == before
     assert marker.read_text(encoding="utf-8") == "preserve"

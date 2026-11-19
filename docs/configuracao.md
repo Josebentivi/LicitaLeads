@@ -201,6 +201,7 @@ qualquer citação, CNPJ ou nome não existir no documento.
 |---|---|---|
 | `SCHEDULER_ENABLED` | `true` | Liga o processo separado do scheduler |
 | `SCHEDULER_DISCOVERY_HOURS` | `6` | Descoberta de novas contratações |
+| `SCHEDULER_GOVERNMENT_SPHERE` | vazio | Filtra a descoberta automática pela esfera publicada. Aceita `F` (federal), `E` (estadual), `M` (municipal) ou `D` (distrital). Sem valor, consulta todas as esferas no escopo da UF. |
 | `SCHEDULER_PRICE_REGISTRY_HOURS` | `24` | Coleta de atas nas duas fontes, também executada ao iniciar o scheduler; respeita a pausa geral |
 | `PRICE_REGISTRY_LOOKBACK_DAYS` | herda `DEFAULT_LOOKBACK_DAYS` | Override opcional da janela inicial e da revisão semanal de atas (1–3650). Sem override, são 30 dias no padrão geral. A automática consulta somente órgãos/unidades conhecidos da UF e das respectivas fontes; sem unidades não há consulta nacional nem cobertura confirmada. PNCP usa vigência na carga inicial e atualização nas incrementais; Compras.gov.br usa início da vigência. O formulário manual permite escolher um período De/Até inclusivo apenas daquela execução, começando com o menor valor entre 7 dias e a janela automática. |
 | `SCHEDULER_ACTIVE_REFRESH_MINUTES` | `60` | Atualização de contratações ativas |

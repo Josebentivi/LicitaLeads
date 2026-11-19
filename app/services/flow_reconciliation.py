@@ -12,6 +12,8 @@ from app.database import write_session
 from app.models import (
     Company,
     Contract,
+    Deadline,
+    DeadlineStatus,
     Document,
     Evidence,
     FieldChange,
@@ -22,11 +24,19 @@ from app.models import (
     PriceRegistry,
     Procurement,
     ProcurementEvent,
+    ProcurementEventType,
+    ProcurementItem,
     ReconciliationRun,
     SourceRecord,
 )
+from app.services.deadlines.response import (
+    OFFICIAL_RESPONSE_DEADLINE_TYPES,
+    RESPONSE_INTERRUPTION_EVENT_TYPES,
+    RESPONSE_OPENING_EVENT_TYPES,
+)
 from app.services.event_detection.authority import assertion_diagnostic, nonaward_supplier
-from app.services.event_detection.types import DocumentEvidence
+from app.services.event_detection.detector import event_act_excerpt
+from app.services.event_detection.types import CompanyReference, DocumentEvidence
 from app.services.identifiers import is_valid_cnpj, normalize_cnpj
 from app.services.ingestion.field_updates import json_value
 from app.services.maintenance import fence_maintenance, run_blocking_maintenance
@@ -37,7 +47,16 @@ from app.services.participation_integrity import (
 )
 from app.services.participation_reconciliation import IntegrityReport, retained_pages
 
-VERSION = "flow-integrity-1"
+VERSION = "flow-integrity-3"
+
+_AWARD_EVENTS = frozenset(
+    {
+        ProcurementEventType.BEST_OFFER_DECLARED,
+        ProcurementEventType.WINNER_DECLARED,
+        ProcurementEventType.ADJUDICATED,
+        ProcurementEventType.HOMOLOGATED,
+    }
+)
 
 
 async def _proof(db, kind, entity, field):
@@ -184,13 +203,126 @@ async def inspect_links(db, entity, kind, *, apply, report, settings):
         )
 
 
-async def inspect_event(db, event, *, apply, report, material):
+async def _inspect_response_deadline(
+    db, event, company, document, proof, act, *, settings, apply, report, material
+):
+    from app.services.deadlines.response import verified_event_response_deadline
+    from app.services.ingestion.pipeline import stable_fingerprint
+    from app.services.opportunity_workspace import legacy_official_response_deadline_ids
+
+    deadline = await db.scalar(
+        select(Deadline).where(
+            Deadline.fingerprint == stable_fingerprint("deadline", event.id, "event_response"),
+            Deadline.deadline_type.in_(("event_response", *OFFICIAL_RESPONSE_DEADLINE_TYPES)),
+        )
+    )
+    if not deadline:
+        return
+    typed = deadline.deadline_type in OFFICIAL_RESPONSE_DEADLINE_TYPES
+    if typed and not await legacy_official_response_deadline_ids(db, [deadline.id]):
+        return
+    verified = await verified_event_response_deadline(
+        db, event, company, document, act, timezone=settings.timezone
+    )
+    if not verified and not typed:
+        return
+    report.add(
+        "legacy_response_deadlines_requiring_validation"
+        if verified
+        else "legacy_response_deadlines_requiring_review"
+    )
+    if not material or not any(proof.text_excerpt in page.text for page in material):
+        report.add("events_without_retained_material")
+        return
+    if not apply:
+        return
+
+    from app.services.ingestion.processor import DocumentProcessingService, event_document_is_active
+
+    procurement = await db.get(Procurement, event.procurement_id)
+    if not procurement or not await event_document_is_active(db, event):
+        return
+    fingerprint = stable_fingerprint(VERSION, "legacy_response_deadline", deadline.id)
+    if not await db.scalar(
+        select(FieldObservation.id).where(FieldObservation.fingerprint == fingerprint)
+    ):
+        db.add(
+            FieldObservation(
+                entity_type="deadline",
+                entity_id=deadline.id,
+                field_name="legacy_response_deadline",
+                value={
+                    field: json_value(getattr(deadline, field))
+                    for field in (
+                        "deadline_type",
+                        "trigger_at",
+                        "explicit_deadline_at",
+                        "estimated_deadline_at",
+                        "calculation_method",
+                        "status",
+                        "calculation_explanation",
+                        "requires_manual_review",
+                        "remaining_seconds",
+                    )
+                },
+                source=VERSION,
+                evidence_id=proof.id,
+                fingerprint=fingerprint,
+            )
+        )
+    if not verified:
+        deadline.status = DeadlineStatus.REQUIRES_REVIEW
+        deadline.requires_manual_review = True
+        deadline.remaining_seconds = None
+        return
+    service = DocumentProcessingService(settings)
+    try:
+        await service._deadline_and_lead(db, procurement, event, revalidate_legacy_response=True)
+    finally:
+        await service.aclose()
+
+
+async def inspect_event(db, event, *, settings, apply, report, material):
     proof = await db.get(Evidence, event.evidence_id) if event.evidence_id else None
     doc = await db.get(Document, proof.document_id) if proof and proof.document_id else None
     if not doc or not proof:
         report.add("events_without_documentary_proof")
         return
     reason = assertion_diagnostic(proof.text_excerpt, doc.title)
+    scoped_review = False
+    if (
+        reason is None
+        and event.company_id
+        and event.event_type in _AWARD_EVENTS | RESPONSE_OPENING_EVENT_TYPES
+    ):
+        company = await db.get(Company, event.company_id)
+        if company:
+            act = event_act_excerpt(
+                event.event_type.value,
+                proof.text_excerpt,
+                company=CompanyReference(
+                    str(company.id), company.legal_name or company.normalized_name, company.cnpj
+                ),
+                title=doc.title,
+                document_type=doc.document_type,
+                include_deadline=True,
+                locator=proof.locator,
+            )
+            if event.event_type in _AWARD_EVENTS and not act:
+                reason, scoped_review = "party_not_proven_in_act", True
+            elif event.event_type in RESPONSE_OPENING_EVENT_TYPES:
+                await _inspect_response_deadline(
+                    db,
+                    event,
+                    company,
+                    doc,
+                    proof,
+                    act,
+                    settings=settings,
+                    apply=apply,
+                    report=report,
+                    material=material,
+                )
     if reason is None and event.source == "llm" and event.company_id:
         from app.services.llm.analyzer import LLMEventAnalysis, attribution_status
 
@@ -207,6 +339,28 @@ async def inspect_event(db, event, *, apply, report, material):
             if attribution_status(analysis) in {"review", "contradictory"}:
                 reason = "party_not_proven"
     if not reason:
+        if (
+            event.event_type in RESPONSE_INTERRUPTION_EVENT_TYPES
+            and material
+            and any(proof.text_excerpt in page.text for page in material)
+        ):
+            from app.services.ingestion.processor import (
+                DocumentProcessingService,
+                event_document_is_active,
+            )
+
+            company = await db.get(Company, event.company_id) if event.company_id else None
+            if await event_document_is_active(
+                db, event
+            ) and await DocumentProcessingService.record_response_act_scope(
+                db,
+                event,
+                doc,
+                proof,
+                company,
+                apply=apply,
+            ):
+                report.add("legacy_response_act_scopes_requiring_validation")
         return
     report.add("events_requiring_invalidation")
     if len(report.diagnostics) < 100:
@@ -229,13 +383,17 @@ async def inspect_event(db, event, *, apply, report, material):
             "procurement_event",
             event.id,
             event.procurement_id,
-            "review" if manual else "invalidated",
+            "review" if manual or scoped_review else "invalidated",
             reason,
             evidence_id=proof.id,
         )
         event.requires_manual_review = True
         await _verify_event_dependents(
-            db, event, "review" if manual else "invalidated", reason, preserve_noncurrent=True
+            db,
+            event,
+            "review" if manual or scoped_review else "invalidated",
+            reason,
+            preserve_noncurrent=True,
         )
         from app.services.procurement_phase import refresh_procurement_phase
 
@@ -261,6 +419,8 @@ async def reconcile_flow(
         (Contract, "contract"),
         (PriceRegistry, "price_registry"),
         (Payment, "payment"),
+        (Procurement, "procurement_search"),
+        (ProcurementItem, "item_search"),
     ]
 
     async def fence(db):
@@ -297,6 +457,10 @@ async def reconcile_flow(
         while True:
             async with sessions() as db:
                 query = select(model.id).order_by(model.id).limit(20)
+                if kind == "procurement_search":
+                    query = query.where(Procurement.object_complement.is_(None))
+                elif kind == "item_search":
+                    query = query.where(ProcurementItem.summary_description.is_(None))
                 if checkpoint:
                     query = query.where(model.id > UUID(checkpoint))
                 ids = list((await db.scalars(query)).all())
@@ -322,6 +486,12 @@ async def reconcile_flow(
                             and proof
                             and (
                                 event.source == "llm"
+                                or (
+                                    event.company_id
+                                    and event.event_type
+                                    in _AWARD_EVENTS | RESPONSE_OPENING_EVENT_TYPES
+                                )
+                                or event.event_type in RESPONSE_INTERRUPTION_EVENT_TYPES
                                 or assertion_diagnostic(proof.text_excerpt, doc.title)
                             )
                         ):
@@ -334,8 +504,19 @@ async def reconcile_flow(
                         continue
                     if kind == "event":
                         await inspect_event(
-                            db, entity, apply=apply, report=report, material=material
+                            db,
+                            entity,
+                            settings=settings,
+                            apply=apply,
+                            report=report,
+                            material=material,
                         )
+                    elif kind in {"procurement_search", "item_search"}:
+                        from app.services.procurement_search_reconciliation import (
+                            inspect_legacy_search_text,
+                        )
+
+                        await inspect_legacy_search_text(db, entity, apply=apply, report=report)
                     elif kind == "participant":
                         source = (
                             await db.get(SourceRecord, entity.source_record_id)

@@ -42,7 +42,7 @@
     <thead><tr><th>Empresa</th><th>Motivo</th><th>Prioridade</th><th>Prazo</th><th>Ação</th></tr></thead>
     <tbody>{% for lead in leads %}<tr>
       <td><a href="{{ lead.href }}">{{ lead.company_name }}</a><small>{{ lead.lead_status }}</small><small>Adicionado em {{ lead.created_at }}</small></td>
-      <td>{{ lead.event_type }}</td>
+      <td>{{ lead.event_type }}{% if lead.event_scope %}<small>{{ lead.event_scope }}</small>{% endif %}</td>
       <td><span class="score">{{ lead.score }}/100</span></td>
       <td>{{ lead.deadline.when }}<small>{{ lead.deadline.kind }}</small></td>
       <td><a class="button compact secondary" href="{{ lead.href }}">Analisar</a></td>
@@ -52,7 +52,7 @@
   <div class="empty-state">
     {% if metrics['Leads'] %}
     <h3>Nenhuma oportunidade aguarda análise nesta fila</h3>
-    <a href="/leads">Consultar todas as oportunidades</a>
+    <a href="/leads?due=">Consultar todas as oportunidades</a>
     {% elif last_procurement_run %}
     <h3>Nenhuma oportunidade documentada no acervo</h3>
     <p>Confira quais fontes responderam e quantos documentos chegaram à análise na última coleta de contratações.</p>

@@ -244,9 +244,15 @@ document.addEventListener("htmx:sendError", function (event) {
       if (button.dataset.period === "custom") { start.focus(); return; }
       const today = new Date(shortcuts.dataset.today + "T12:00:00Z");
       end.value = shortcuts.dataset.today;
-      if (button.dataset.period === "month") today.setUTCDate(1);
-      else today.setUTCDate(today.getUTCDate() - Number(button.dataset.period) + 1);
-      start.value = today.toISOString().slice(0, 10);
+      if (button.dataset.period === "two-years") {
+        start.value = shortcuts.dataset.earliest;
+        const procurementsOnly = scope.querySelector("[name=procurements_only]");
+        if (procurementsOnly) procurementsOnly.checked = true;
+      } else {
+        if (button.dataset.period === "month") today.setUTCDate(1);
+        else today.setUTCDate(today.getUTCDate() - Number(button.dataset.period) + 1);
+        start.value = today.toISOString().slice(0, 10);
+      }
       describe();
     });
     start.addEventListener("input", describe);

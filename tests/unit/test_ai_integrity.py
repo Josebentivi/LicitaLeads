@@ -23,6 +23,12 @@ from app.services.scheduler_control import control_state, pause_file, set_compon
             "status_legend",
         ),
         ("A empresa será inabilitada se descumprir o edital.", "Anexo.pdf", "future_rule"),
+        ("A empresa Alfa será classificada em primeiro lugar.", "Anexo.pdf", "future_rule"),
+        (
+            "Se for declarada vencedora, a empresa Alfa deverá apresentar a certidão.",
+            "Ata.pdf",
+            "conditional_rule",
+        ),
         (
             "A recorrente alega a desclassificação da proposta.",
             "Recurso.pdf",

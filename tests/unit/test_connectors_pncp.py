@@ -10,6 +10,7 @@ import pytest
 from app.connectors import DataAvailability, ProcurementFilters
 from app.connectors.http import AsyncHTTPClient
 from app.connectors.pncp import PNCPConnector, parse_pncp_external_id
+from app.services.procurement_search import ObjectScope
 
 
 def _settings() -> SimpleNamespace:
@@ -95,6 +96,7 @@ async def test_pncp_discovery_paginates_filters_and_deduplicates() -> None:
             agency="SAO LUIS",
             keyword="cadeira",
             municipality="sao luis",
+            object_scope=ObjectScope.build("cadeiras escolares", government_sphere="M"),
         )
     )
 

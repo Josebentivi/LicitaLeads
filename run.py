@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import asyncio
 import shutil
 import subprocess
 import sys
@@ -14,6 +13,7 @@ from alembic.config import Config
 from alembic.script import ScriptDirectory
 from sqlalchemy import text
 
+from app.async_runtime import configure_uvicorn_loop, run_database_async
 from app.config import get_settings
 
 
@@ -70,17 +70,20 @@ def main() -> None:
         _run_migrations()
 
     try:
-        asyncio.run(_check_database_schema())
+        run_database_async(_check_database_schema())
     except Exception as exc:
         raise SystemExit(
             "Database is not ready. Run `alembic upgrade head` or `python run.py --migrate`. "
             f"Details: {exc}"
         ) from exc
 
+    loop = configure_uvicorn_loop(settings.database_url)
     if not args.reload:
         from app.main import app
 
-        server = uvicorn.Server(uvicorn.Config(app, host=settings.app_host, port=settings.app_port))
+        server = uvicorn.Server(
+            uvicorn.Config(app, host=settings.app_host, port=settings.app_port, loop=loop)
+        )
         app.state.request_server_exit = lambda: setattr(server, "should_exit", True)
         server.run()
         return
@@ -89,8 +92,13 @@ def main() -> None:
         host=settings.app_host,
         port=settings.app_port,
         reload=args.reload,
+        loop=loop,
     )
 
 
 if __name__ == "__main__":
     main()
+elif __name__ == "__mp_main__":
+    # Uvicorn reload uses spawn. The child needs the same loop policy before
+    # the server starts, since multiprocessing does not inherit the policy.
+    configure_uvicorn_loop(get_settings().database_url)

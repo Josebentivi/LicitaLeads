@@ -24,6 +24,8 @@ from app.models import (
     ProcurementEventType,
     ProcurementPhase,
 )
+from app.services.event_detection.authority import nonaward_supplier
+from app.services.event_detection.detector import describe_event_scope
 from app.services.procurement_status import (
     CANCELLED_TOKENS,
     CLOSED_TOKENS,
@@ -39,6 +41,7 @@ _EVENT_PHASES: tuple[tuple[ProcurementEventType, ProcurementPhase], ...] = (
     (ProcurementEventType.COUNTERARGUMENT_SUBMITTED, ProcurementPhase.COUNTERARGUMENT),
     (ProcurementEventType.COUNTERARGUMENT_OPENED, ProcurementPhase.COUNTERARGUMENT),
     (ProcurementEventType.APPEAL_SUBMITTED, ProcurementPhase.APPEAL),
+    (ProcurementEventType.APPEAL_WINDOW_OPENED, ProcurementPhase.APPEAL),
     (ProcurementEventType.INTENT_TO_APPEAL, ProcurementPhase.APPEAL),
     (ProcurementEventType.DILIGENCE_REQUESTED, ProcurementPhase.DILIGENCE),
     (ProcurementEventType.DOCUMENTATION_REQUESTED, ProcurementPhase.DILIGENCE),
@@ -52,7 +55,6 @@ _EVENT_PHASES: tuple[tuple[ProcurementEventType, ProcurementPhase], ...] = (
     (ProcurementEventType.PROPOSAL_REJECTED, ProcurementPhase.JUDGMENT),
     (ProcurementEventType.PROPOSAL_ACCEPTED, ProcurementPhase.QUALIFICATION),
     (ProcurementEventType.QUALIFIED, ProcurementPhase.QUALIFICATION),
-    (ProcurementEventType.WINNER_DECLARED, ProcurementPhase.ADJUDICATION),
 )
 _EVENT_PHASE_BY_TYPE = dict(_EVENT_PHASES)
 
@@ -72,6 +74,14 @@ _ACTIVE_PHASES = frozenset(
 def _contains(status: str | None, tokens: tuple[str, ...]) -> bool:
     text = (status or "").lower()
     return any(token in text for token in tokens)
+
+
+def _phase_from_event(event: ProcurementEvent | None) -> ProcurementPhase | None:
+    if event is None:
+        return None
+    if event.event_type == ProcurementEventType.WINNER_DECLARED:
+        return describe_event_scope(event, event.raw_description).stage
+    return _EVENT_PHASE_BY_TYPE.get(event.event_type)
 
 
 def derive_procurement_phase(
@@ -97,15 +107,13 @@ def derive_procurement_phase(
         return ProcurementPhase.SUSPENDED
     if _contains(status, ("desert", "fracass")):
         return ProcurementPhase.FAILED
-    if _contains(status, ("homolog",)):
+    if _contains(status, ("homolog",)) and not nonaward_supplier(status):
         return ProcurementPhase.HOMOLOGATION
-    if _contains(status, ("adjudic",)):
+    if _contains(status, ("adjudic",)) and not nonaward_supplier(status):
         return ProcurementPhase.ADJUDICATION
 
-    if last_event is not None:
-        mapped = _EVENT_PHASE_BY_TYPE.get(last_event.event_type)
-        if mapped is not None:
-            return mapped
+    if mapped := _phase_from_event(last_event):
+        return mapped
     if procurement.session_start_at is not None and procurement.session_start_at <= moment:
         if not _contains(status, CLOSED_TOKENS):
             return ProcurementPhase.DISPUTE
@@ -208,9 +216,7 @@ async def update_procurement_phase(
         return phase
 
     phase_without_event = derive_procurement_phase(procurement, last_event=None, now=moment)
-    event_phase = (
-        _EVENT_PHASE_BY_TYPE.get(last_event.event_type) if last_event is not None else None
-    )
+    event_phase = _phase_from_event(last_event)
     event_used = (
         last_event is not None
         and event_phase is not None

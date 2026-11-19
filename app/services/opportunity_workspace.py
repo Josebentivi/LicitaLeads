@@ -9,16 +9,21 @@ from urllib.parse import parse_qsl, urlsplit
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import and_, false, func, or_, select
+from sqlalchemy import and_, exists, false, func, literal, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import selectinload
+from sqlalchemy.orm import aliased, selectinload
+from sqlalchemy.sql.elements import ColumnElement
 
 from app.models import (
     Company,
     CrawlRun,
     Deadline,
+    DeadlineCalculationMethod,
+    DeadlineStatus,
     Document,
+    Evidence,
     FieldChange,
+    FieldObservation,
     Lead,
     LeadStatus,
     Procurement,
@@ -27,10 +32,305 @@ from app.models import (
     ProcurementSource,
     SourceRecord,
 )
+from app.repositories.current_evidence import evidence_current
+from app.services.deadlines.response import (
+    OFFICIAL_RESPONSE_EVENT_TYPES,
+    RESPONSE_ACT_OBSERVATION,
+    RESPONSE_CLOSING_EVENT_TYPES,
+    RESPONSE_PROOF_VERSION,
+    RESPONSE_SCOPE_OBSERVATION,
+)
 from app.services.identifiers import normalize_cnpj
-from app.services.participation_integrity import deadline_current, lead_current
+from app.services.participation_integrity import deadline_current, fact_current, lead_current
+from app.services.procurement_status import CANCELLED_TOKENS, SUSPENDED_TOKENS
 
 ACTIONABLE_STATUSES = (LeadStatus.NEW, LeadStatus.PENDING_REVIEW, LeadStatus.NEEDS_CHANGES)
+
+
+def _response_was_interrupted(now: datetime):
+    later = aliased(ProcurementEvent)
+    later_scope = aliased(FieldObservation)
+    opening_scope = aliased(FieldObservation)
+    later_evidence = aliased(Evidence)
+    opening_evidence = aliased(Evidence)
+    occurrence = func.coalesce(later.occurred_at, later.published_at)
+    same_party = later.company_id == Deadline.company_id
+    later_kind = later_scope.value["scope"].as_string()
+    opening_kind = opening_scope.value["scope"].as_string()
+    opening_item = opening_scope.value["item"].as_string()
+    opening_lot = opening_scope.value["lote"].as_string()
+    later_lot = later_scope.value["lote"].as_string()
+    same_scope = and_(
+        later_kind != "unknown",
+        later_kind == opening_kind,
+        later_scope.value["item"].as_string() == opening_item,
+        later_lot == opening_lot,
+    )
+
+    def packed(field):
+        return func.coalesce(later_scope.value[field].as_string(), "")
+
+    def includes(field, identifier):
+        return and_(
+            identifier != "",
+            packed(field).contains(literal("|").concat(identifier).concat("|")),
+        )
+
+    listed = or_(
+        and_(later_kind == "lot_list", includes("lots", opening_lot)),
+        and_(
+            later_kind == "item_list",
+            later_lot == opening_lot,
+            includes("items", opening_item),
+        ),
+    )
+    limited = or_(
+        same_scope,
+        listed,
+        and_(later_kind == "lot", opening_kind == "item", later_lot == opening_lot),
+    )
+    covered = or_(
+        later_kind == "procurement",
+        limited,
+        and_(
+            later_kind == "procurement_except",
+            opening_kind.in_(("item", "lot")),
+            or_(
+                packed("excluded_items") == "",
+                and_(opening_item != "", ~includes("excluded_items", opening_item)),
+            ),
+            or_(
+                packed("excluded_lots") == "",
+                and_(opening_lot != "", ~includes("excluded_lots", opening_lot)),
+            ),
+        ),
+    )
+    return exists(
+        select(later.id)
+        .join(later_scope, later_scope.entity_id == later.id)
+        .join(opening_scope, opening_scope.entity_id == Deadline.id)
+        .join(later_evidence, later_evidence.id == later.evidence_id)
+        .join(opening_evidence, opening_evidence.id == ProcurementEvent.evidence_id)
+        .where(
+            later.procurement_id == Deadline.procurement_id,
+            later.id != ProcurementEvent.id,
+            later_scope.entity_type == "procurement_event",
+            later_scope.field_name == RESPONSE_ACT_OBSERVATION,
+            later_scope.evidence_id == later.evidence_id,
+            later_scope.value["version"].as_integer() == RESPONSE_PROOF_VERSION,
+            opening_scope.entity_type == "deadline",
+            opening_scope.field_name == RESPONSE_SCOPE_OBSERVATION,
+            opening_scope.evidence_id == ProcurementEvent.evidence_id,
+            opening_scope.value["version"].as_integer() == RESPONSE_PROOF_VERSION,
+            or_(
+                ~later.requires_manual_review,
+                and_(
+                    later.event_type.in_(
+                        (ProcurementEventType.SESSION_SUSPENDED, ProcurementEventType.HOMOLOGATED)
+                    ),
+                    later.company_id.is_(None),
+                    later.confidence >= 0.75,
+                ),
+            ),
+            fact_current("procurement_event", later.id),
+            evidence_current(later.evidence_id),
+            occurrence <= now,
+            occurrence <= Deadline.explicit_deadline_at,
+            or_(
+                occurrence > Deadline.trigger_at,
+                and_(
+                    occurrence == Deadline.trigger_at,
+                    later_evidence.document_id == opening_evidence.document_id,
+                    later_scope.value["follows_previous"].as_boolean().is_(True),
+                    later_scope.value["position"].as_integer()
+                    > opening_scope.value["position"].as_integer(),
+                ),
+            ),
+            or_(
+                and_(
+                    later.event_type.in_(
+                        (ProcurementEventType.SESSION_SUSPENDED, ProcurementEventType.HOMOLOGATED)
+                    ),
+                    covered,
+                ),
+                and_(
+                    later.event_type == ProcurementEventType.APPEAL_DECIDED,
+                    same_party,
+                    or_(same_scope, listed),
+                ),
+                *(
+                    and_(
+                        Deadline.deadline_type == kind,
+                        later.event_type.in_(event_types),
+                        same_party,
+                        or_(same_scope, listed),
+                    )
+                    for kind, event_types in RESPONSE_CLOSING_EVENT_TYPES.items()
+                ),
+            ),
+        )
+        .correlate(Deadline, ProcurementEvent)
+    )
+
+
+def _response_was_superseded(now: datetime):
+    replacement = aliased(Deadline)
+    replacement_act = aliased(ProcurementEvent)
+    original_scope = aliased(FieldObservation)
+    replacement_scope = aliased(FieldObservation)
+    return exists(
+        select(replacement.id)
+        .join(replacement_act, replacement_act.id == replacement.event_id)
+        .join(replacement_scope, replacement_scope.entity_id == replacement.id)
+        .join(original_scope, original_scope.entity_id == Deadline.id)
+        .where(
+            replacement.deadline_type == Deadline.deadline_type,
+            replacement.company_id == Deadline.company_id,
+            replacement.procurement_id == Deadline.procurement_id,
+            replacement_act.procurement_id == replacement.procurement_id,
+            replacement_act.company_id == replacement.company_id,
+            replacement.trigger_at > Deadline.trigger_at,
+            replacement.trigger_at <= now,
+            replacement.trigger_at <= Deadline.explicit_deadline_at,
+            replacement.explicit_deadline_at.is_not(None),
+            ~replacement.requires_manual_review,
+            ~replacement_act.requires_manual_review,
+            fact_current("deadline", replacement.id),
+            fact_current("procurement_event", replacement_act.id),
+            evidence_current(replacement_act.evidence_id),
+            original_scope.entity_type == "deadline",
+            original_scope.field_name == RESPONSE_SCOPE_OBSERVATION,
+            original_scope.evidence_id == ProcurementEvent.evidence_id,
+            original_scope.value["version"].as_integer() == RESPONSE_PROOF_VERSION,
+            replacement_scope.entity_type == "deadline",
+            replacement_scope.field_name == RESPONSE_SCOPE_OBSERVATION,
+            replacement_scope.evidence_id == replacement_act.evidence_id,
+            replacement_scope.value["version"].as_integer() == RESPONSE_PROOF_VERSION,
+            replacement_scope.value["extension"].as_boolean().is_(True),
+            replacement_scope.value["scope"].as_string() != "unknown",
+            replacement_scope.value["scope"].as_string()
+            == original_scope.value["scope"].as_string(),
+            replacement_scope.value["item"].as_string() == original_scope.value["item"].as_string(),
+            replacement_scope.value["lote"].as_string() == original_scope.value["lote"].as_string(),
+        )
+        .correlate(Deadline, ProcurementEvent)
+    )
+
+
+def official_response_proof_current() -> ColumnElement[bool]:
+    scope = aliased(FieldObservation)
+    event = aliased(ProcurementEvent)
+    return exists(
+        select(scope.id)
+        .join(event, event.evidence_id == scope.evidence_id)
+        .where(
+            event.id == Deadline.event_id,
+            scope.entity_type == "deadline",
+            scope.entity_id == Deadline.id,
+            scope.field_name == RESPONSE_SCOPE_OBSERVATION,
+            scope.value["version"].as_integer() == RESPONSE_PROOF_VERSION,
+        )
+        .correlate(Deadline)
+    )
+
+
+async def legacy_official_response_deadline_ids(session: AsyncSession, deadline_ids) -> set[UUID]:
+    if not deadline_ids:
+        return set()
+    return set(
+        await session.scalars(
+            select(Deadline.id).where(
+                Deadline.id.in_(deadline_ids),
+                Deadline.deadline_type.in_(OFFICIAL_RESPONSE_EVENT_TYPES),
+                ~official_response_proof_current(),
+            )
+        )
+    )
+
+
+def _official_response_deadline_valid(now: datetime) -> ColumnElement[bool]:
+    status = func.lower(func.coalesce(Procurement.status, ""))
+    closed = or_(
+        *(status.contains(token) for token in CANCELLED_TOKENS + SUSPENDED_TOKENS),
+        status.in_(("encerrada", "encerrado", "homologada", "homologado", "fracassada", "deserta")),
+    )
+    return and_(
+        official_response_proof_current(),
+        Deadline.calculation_method.in_(
+            (DeadlineCalculationMethod.EXPLICIT, DeadlineCalculationMethod.DOCUMENT_EXTRACTED)
+        ),
+        ~Deadline.requires_manual_review,
+        Deadline.status != DeadlineStatus.REQUIRES_REVIEW,
+        Deadline.explicit_deadline_at.is_not(None),
+        Deadline.company.has(Company.cnpj.is_not(None)),
+        Deadline.procurement.has(~closed),
+        Deadline.event.has(
+            and_(
+                ProcurementEvent.company_id == Deadline.company_id,
+                ProcurementEvent.procurement_id == Deadline.procurement_id,
+                ProcurementEvent.evidence_id.is_not(None),
+                exists(
+                    select(Evidence.id)
+                    .where(
+                        Evidence.id == ProcurementEvent.evidence_id,
+                        Evidence.procurement_id == ProcurementEvent.procurement_id,
+                        Evidence.document_id.is_not(None),
+                    )
+                    .correlate(ProcurementEvent)
+                ),
+                or_(
+                    *(
+                        and_(
+                            Deadline.deadline_type == kind,
+                            ProcurementEvent.event_type.in_(event_types),
+                        )
+                        for kind, event_types in OFFICIAL_RESPONSE_EVENT_TYPES.items()
+                    )
+                ),
+                ~ProcurementEvent.requires_manual_review,
+                ~_response_was_interrupted(now),
+                ~_response_was_superseded(now),
+            )
+        ),
+    )
+
+
+def deadline_usable(now: datetime) -> ColumnElement[bool]:
+    """Only active evidence and unsuperseded official windows can drive time-based decisions."""
+    return and_(
+        deadline_current(),
+        or_(
+            Deadline.deadline_type.not_in(OFFICIAL_RESPONSE_EVENT_TYPES),
+            _official_response_deadline_valid(now),
+        ),
+    )
+
+
+def _open_official_response_deadline(now: datetime):
+    return and_(
+        deadline_current(),
+        Deadline.deadline_type.in_(OFFICIAL_RESPONSE_EVENT_TYPES),
+        Deadline.trigger_at <= now,
+        Deadline.explicit_deadline_at >= now,
+        _official_response_deadline_valid(now),
+    )
+
+
+def procurement_has_open_response_deadline(now: datetime):
+    return exists(
+        select(Deadline.id)
+        .where(Deadline.procurement_id == Procurement.id, _open_official_response_deadline(now))
+        .correlate(Procurement)
+    )
+
+
+def _lead_deadline_at():
+    return (
+        select(Deadline.explicit_deadline_at)
+        .where(Deadline.id == Lead.deadline_id)
+        .correlate(Lead)
+        .scalar_subquery()
+    )
 
 
 def safe_list_url(value: str | None, *, path: str = "/leads") -> str:
@@ -78,7 +378,9 @@ class OpportunityFilters:
 
     @classmethod
     def from_url(cls, value: str, *, timezone: str) -> OpportunityFilters:
-        params = dict(parse_qsl(urlsplit(safe_list_url(value)).query))
+        params = dict(parse_qsl(urlsplit(safe_list_url(value)).query, keep_blank_values=True))
+        if params.keys() <= {"page"}:
+            params["due"] = "open"
         return cls.from_params(params, timezone=timezone)
 
     @classmethod
@@ -115,7 +417,7 @@ class OpportunityFilters:
 def opportunity_query(filters: OpportunityFilters, *, now: datetime | None = None):
     """Keep cards, lists and next-item navigation on the very same predicates."""
     statement = select(Lead)
-    if not filters.include_history:
+    if not filters.include_history or filters.due == "open":
         statement = statement.where(lead_current())
     if filters.status == "actionable":
         statement = statement.where(Lead.lead_status.in_(ACTIONABLE_STATUSES))
@@ -167,7 +469,20 @@ def opportunity_query(filters: OpportunityFilters, *, now: datetime | None = Non
         statement = statement.where(
             Lead.created_at <= datetime.combine(filters.created_to, time.max, tz).astimezone(UTC)
         )
-    if filters.due:
+    if filters.due == "open":
+        moment = now or datetime.now(UTC)
+        statement = statement.where(
+            Lead.lead_status.not_in((LeadStatus.REJECTED, LeadStatus.ARCHIVED)),
+            Lead.deadline.has(
+                and_(
+                    Deadline.company_id == Lead.company_id,
+                    Deadline.event_id == Lead.triggering_event_id,
+                    Deadline.procurement_id == Lead.procurement_id,
+                    _open_official_response_deadline(moment),
+                )
+            ),
+        ).order_by(_lead_deadline_at())
+    elif filters.due:
         moment = now or datetime.now(UTC)
         end = moment + timedelta(hours=72)
         if filters.due == "today":
@@ -176,7 +491,13 @@ def opportunity_query(filters: OpportunityFilters, *, now: datetime | None = Non
             end = moment + timedelta(hours=24)
         effective = func.coalesce(Deadline.explicit_deadline_at, Deadline.estimated_deadline_at)
         statement = statement.where(
-            Lead.deadline.has(and_(deadline_current(), effective >= moment, effective <= end))
+            Lead.deadline.has(
+                and_(
+                    deadline_usable(moment),
+                    effective >= moment,
+                    effective <= end,
+                )
+            )
             if filters.due in {"today", "24h", "72h"}
             else false()
         )
@@ -196,10 +517,14 @@ def loaded_opportunities(statement):
     )
 
 
-async def opportunity_count(session: AsyncSession, filters: OpportunityFilters) -> int:
+async def opportunity_count(
+    session: AsyncSession, filters: OpportunityFilters, *, now: datetime | None = None
+) -> int:
     return int(
         await session.scalar(
-            select(func.count()).select_from(opportunity_query(filters).order_by(None).subquery())
+            select(func.count()).select_from(
+                opportunity_query(filters, now=now).order_by(None).subquery()
+            )
         )
         or 0
     )
@@ -210,19 +535,22 @@ async def next_opportunity(
 ):
     filters = await resolve_queue_filters(session, filters)
     statement = opportunity_query(filters)
-    if for_review or (not filters.include_history and not filters.status):
+    if for_review or (filters.due != "open" and not filters.include_history and not filters.status):
         statement = statement.where(Lead.lead_status.in_(ACTIONABLE_STATUSES), lead_current())
-    return await session.scalar(
-        statement.where(
-            or_(
-                Lead.score < lead.score,
-                and_(Lead.score == lead.score, Lead.created_at < lead.created_at),
-                and_(
-                    Lead.score == lead.score, Lead.created_at == lead.created_at, Lead.id > lead.id
-                ),
-            )
-        ).limit(1)
+    after = or_(
+        Lead.score < lead.score,
+        and_(Lead.score == lead.score, Lead.created_at < lead.created_at),
+        and_(Lead.score == lead.score, Lead.created_at == lead.created_at, Lead.id > lead.id),
     )
+    if filters.due == "open":
+        previous_due = await session.scalar(
+            select(Deadline.explicit_deadline_at).where(Deadline.id == lead.deadline_id)
+        )
+        if previous_due is None:
+            return None
+        due = _lead_deadline_at()
+        after = or_(due > previous_due, and_(due == previous_due, after))
+    return await session.scalar(statement.where(after).limit(1))
 
 
 def deadline_indication(

@@ -3,6 +3,7 @@
 <div class="company-detail-data" id="company-detail-data-{{ item.section }}-{{ item.id }}">
 <h3>{{ item.title }}</h3>
 <p class="hint">{{ item.historical_notice }}</p>
+ {% if item.public_source_links %}<p class="action-row">{% for title, url in item.public_source_links %}<a href="{{ url }}" target="_blank" rel="noopener noreferrer">{{ title }}</a>{% endfor %}</p>{% endif %}
 {{ record_values(item) }}
 {% if item.text_excerpt %}<h4>Trecho extraído</h4><pre class="company-excerpt">{{ item.text_excerpt }}</pre>{% endif %}
 {% if item.section == 'documents' %}<p><a href="/api/documents/{{ item.id }}/view" download>Baixar documento armazenado</a></p>{% endif %}

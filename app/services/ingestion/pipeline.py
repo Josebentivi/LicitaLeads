@@ -21,6 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import load_only
 
 from app.config import Settings, get_settings
+from app.connectors._common import combine_discoveries
 from app.connectors.base import (
     ConnectorResult,
     ContractConnector,
@@ -79,6 +80,7 @@ from app.models import (
 )
 from app.repositories.crawls import JobLeaseRepository
 from app.repositories.procurements import ProcurementRepository
+from app.services.collection_periods import calendar_month_slices, normalize_discovery_kind
 from app.services.crawl_progress import STAGE_LABELS, CrawlProgressRecorder
 from app.services.identifiers import (
     canonical_modality,
@@ -104,6 +106,11 @@ from app.services.ingestion.verified_versions import (
 from app.services.parallel import SerialWriter, bounded_map
 from app.services.price_registry_scopes import PriceRegistryScope
 from app.services.procurement_phase import refresh_procurement_phase
+from app.services.procurement_search import (
+    ObjectScope,
+    published_object_complement,
+    published_scope_header,
+)
 
 
 def stable_fingerprint(*parts: object) -> str:
@@ -189,6 +196,8 @@ class PipelineRequest:
     recheck_key: str | None = None
     price_registry_scopes: tuple[PriceRegistryScope, ...] = ()
     parent_run_id: UUID | None = None
+    object_scope: ObjectScope | None = None
+    calendar_months: bool = False
 
     def filters(self) -> ProcurementFilters:
         return ProcurementFilters(
@@ -201,6 +210,7 @@ class PipelineRequest:
             agency_cnpj=self.agency_cnpj,
             unit_code=self.unit_code,
             keyword=self.keyword,
+            object_scope=self.object_scope,
             modalities=list(self.modalities),
             max_pages=self.max_pages,
             discovery_kind=self.discovery_kind,
@@ -221,6 +231,8 @@ class PipelineRequest:
                 "agency_cnpj": self.agency_cnpj,
                 **({"unit_code": self.unit_code} if self.unit_code is not None else {}),
                 "keyword": self.keyword,
+                **({"object_scope": self.object_scope.as_json()} if self.object_scope else {}),
+                **({"calendar_months": True} if self.calendar_months else {}),
                 "max_pages": self.max_pages,
                 "process_documents": self.process_documents,
                 "document_batch_size": self.document_batch_size,
@@ -282,6 +294,15 @@ class _RecordWork:
     details_failed: bool = False
     outcome: RecordOutcome = field(default_factory=RecordOutcome)
     verification: dict[str, Any] | None = None
+
+
+@dataclass(slots=True)
+class _PreparedRecord:
+    values: dict[str, ConnectorResult[Any]] = field(default_factory=dict)
+    error: Exception | None = None
+    reused_id: UUID | None = None
+    # None means that the item response has not established whether the record matches.
+    scope_match: bool | None = True
 
 
 class IngestionPipeline:
@@ -769,9 +790,25 @@ class IngestionPipeline:
                 else None
             )
             discovery = (
-                pending if pending is not None else await connector.discover_procurements(filters)
+                pending
+                if pending is not None
+                else await self._discover_procurements(connector, request, filters, summary.run_id)
             )
         discovery_record_ids = await self._persist_source_records(summary.run_id, discovery)
+        if discovery.unclassified_modality_rows:
+            summary.source_results[connector.name]["unclassified_modality_rows"] = (
+                discovery.unclassified_modality_rows
+            )
+        if discovery.unsupported_modalities:
+            entry = summary.source_results[connector.name]
+            entry["unsupported_modalities"] = discovery.unsupported_modalities
+            if (
+                discovery.availability is ConnectorAvailability.NOT_SUPPORTED
+                and not discovery.partial
+                and discovery.diagnostic is None
+            ):
+                entry["availability"] = ConnectorAvailability.NOT_SUPPORTED.value
+                return
         self._note_partial_discovery(summary, connector.name, discovery)
         if discovery.availability not in {
             ConnectorAvailability.AVAILABLE,
@@ -814,6 +851,40 @@ class IngestionPipeline:
             discovery_record_ids,
             details_by_id,
         )
+
+    async def _discover_procurements(
+        self,
+        connector: ProcurementSourceConnector,
+        request: PipelineRequest,
+        filters: ProcurementFilters,
+        run_id: UUID,
+    ) -> ConnectorResult[list[RawProcurement]]:
+        if (
+            not request.calendar_months
+            or normalize_discovery_kind(request.discovery_kind) != "publication"
+        ):
+            return await connector.discover_procurements(filters)
+
+        start, end = filters.resolved_period(lookback_days=self.settings.default_lookback_days)
+        results = []
+        for first, last in calendar_month_slices(start, end):
+            if await self._cancellation_requested(run_id):
+                raise PipelineCancelled
+            await self._checkpoint()
+            await self._report_activity(
+                ProgressEvent(
+                    stage="discovery",
+                    source=connector.name,
+                    message=f"Consultando publicações de {first:%d/%m/%Y} a {last:%d/%m/%Y}",
+                )
+            )
+            month = filters.model_copy(update={"start_date": first, "end_date": last})
+            results.append(await connector.discover_procurements(month))
+        result = combine_discoveries(results)
+        by_identity: dict[str, RawProcurement] = {}
+        for row in result.data:
+            by_identity.setdefault(row.external_id, row)
+        return result.model_copy(update={"data": list(by_identity.values())})
 
     async def _discover_price_registry_scopes(
         self,
@@ -1123,21 +1194,56 @@ class IngestionPipeline:
         }
         await self._update_progress(summary)
 
-        async def prepare(
-            raw: Any,
-        ) -> tuple[dict[str, ConnectorResult[Any]], Exception | None, UUID | None]:
+        async def prepare(raw: Any) -> _PreparedRecord:
             if await self._cancellation_requested(summary.run_id):
                 raise PipelineCancelled
             await self._checkpoint()
+            scoped_items: ConnectorResult[list[RawProcurementItem]] | None = None
             try:
-                if not request.force_refresh:
+                scope = request.object_scope if request.mode == "procurements" else None
+                if scope is not None:
+                    header = (
+                        raw.object_description,
+                        raw.object_complement or published_object_complement(raw.raw_payload),
+                    )
+                    if not scope.matches_sphere(raw.government_sphere):
+                        progress["ready"] += 1
+                        return _PreparedRecord(scope_match=False)
+                    if not scope.matches_text(*header):
+                        await self._report_activity(
+                            ProgressEvent(
+                                stage="details",
+                                source=connector.name,
+                                subject=raw.external_id,
+                                message="Consultando itens para conferir o filtro de objeto",
+                            )
+                        )
+                        scoped_items = await connector.fetch_items(raw.external_id)
+                        item_texts = (
+                            text
+                            for item in scoped_items.data
+                            for text in (item.description, item.detailed_description)
+                        )
+                        if not scope.matches_text(*header, *item_texts):
+                            # A partial response can establish a match, but cannot rule one out.
+                            discard = getattr(connector, "discard_cached_items", None)
+                            if callable(discard):
+                                discard(raw.external_id)
+                            progress["ready"] += 1
+                            return _PreparedRecord(
+                                values={"items": scoped_items},
+                                scope_match=False if scoped_items.is_complete else None,
+                            )
+
+                # Persist the item response that established a match even if a verified version exists.
+                if not request.force_refresh and scoped_items is None:
                     async with self.session_factory() as session:
                         proof = await find_reusable(
                             session, connector, request.mode, raw, timezone=self.settings.timezone
                         )
                     if proof is not None:
                         progress["ready"] += 1
-                        return {}, None, proof.id
+                        return _PreparedRecord(reused_id=proof.id)
                 await self._report_activity(
                     ProgressEvent(
                         stage="details",
@@ -1146,20 +1252,25 @@ class IngestionPipeline:
                         message="Consultando detalhes na fonte oficial",
                     )
                 )
-                values = await self._fetch_bundle(connector, request, raw, details_by_id)
+                values = await self._fetch_bundle(
+                    connector, request, raw, details_by_id, preloaded_items=scoped_items
+                )
                 progress["ready"] += 1
-                return values, None, None
+                return _PreparedRecord(values=values)
             except (asyncio.CancelledError, PipelineCancelled):
                 raise
             except Exception as exc:
-                return {}, exc, None
+                return _PreparedRecord(
+                    values={"items": scoped_items} if scoped_items else {}, error=exc
+                )
 
         stream = bounded_map(records, prepare, capacity=2 * self.settings.http_max_concurrency)
         try:
-            async for raw, (values, error, reused_id) in stream:
+            async for raw, prepared in stream:
                 if await self._cancellation_requested(summary.run_id):
                     raise PipelineCancelled
                 await self._checkpoint()
+                values = prepared.values
                 coordinator = self._execution().coordinator
                 state = _RecordWork(
                     work_id=coordinator.items.get(row_identity(raw)) if coordinator else None,
@@ -1167,9 +1278,8 @@ class IngestionPipeline:
                     details_failed=any(_detail_failed(value) for value in values.values()),
                 )
                 try:
-                    if error is not None:
-                        raise error
-                    progress["ready"] -= 1
+                    if prepared.error is None:
+                        progress["ready"] -= 1
                     persisted: dict[str, list[UUID]] = {}
                     saved_results: dict[int, list[UUID]] = {}
                     for key, result in values.items():
@@ -1184,6 +1294,8 @@ class IngestionPipeline:
                                 summary, connector.name, raw.external_id, key, result
                             )
                         persisted[key] = saved_results[identity]
+                    if prepared.error is not None:
+                        raise prepared.error
                     raw_source_id = self._source_id_for(raw, discovery, discovery_record_ids)
 
                     async def commit(
@@ -1192,8 +1304,22 @@ class IngestionPipeline:
                         values: dict[str, ConnectorResult[Any]] = values,
                         persisted: dict[str, list[UUID]] = persisted,
                         raw_source_id: UUID | None = raw_source_id,
-                        reused_id: UUID | None = reused_id,
-                    ) -> bool:
+                        reused_id: UUID | None = prepared.reused_id,
+                        scope_match: bool | None = prepared.scope_match,
+                        coordinator: CollectionCoordinator | None = coordinator,
+                    ) -> bool | None:
+                        if scope_match is not True:
+                            if coordinator is not None:
+                                async with write_session(self.session_factory) as session:
+                                    await self._assert_fence(session)
+                                    await coordinator.confirm(
+                                        session,
+                                        raw,
+                                        work_id=state.work_id,
+                                        details_pending=scope_match is None,
+                                        outside_scope=scope_match is False,
+                                    )
+                            return None
                         token = self._record_context.set(state)
                         try:
                             if reused_id is not None:
@@ -1224,15 +1350,25 @@ class IngestionPipeline:
                             self._record_context.reset(token)
 
                     created = await self._execution().writer.submit(commit)
-                    if reused_id is not None:
+                    if created is None:
+                        entry = summary.source_results[connector.name]
+                        if prepared.scope_match is None:
+                            entry["scope_pending"] = entry.get("scope_pending", 0) + 1
+                            summary.diagnostics.append(
+                                f"{connector.name}/{raw.external_id}: itens incompletos para verificar o filtro de objeto"
+                            )
+                        else:
+                            entry["outside_scope"] = entry.get("outside_scope", 0) + 1
+                    elif prepared.reused_id is not None:
                         entry = summary.source_results[connector.name]
                         entry["records_reused"] += 1
                         entry["operations_reused"] += 4
-                    state.outcome.count(summary, created)
-                    if created:
-                        summary.records_created += 1
-                    else:
-                        summary.records_updated += 1
+                    if created is not None:
+                        state.outcome.count(summary, created)
+                        if created:
+                            summary.records_created += 1
+                        else:
+                            summary.records_updated += 1
                 except (asyncio.CancelledError, PipelineCancelled):
                     raise
                 except Exception as exc:
@@ -1265,10 +1401,16 @@ class IngestionPipeline:
         request: PipelineRequest,
         raw: Any,
         cached: dict[str, ConnectorResult[Any]],
+        *,
+        preloaded_items: ConnectorResult[list[RawProcurementItem]] | None = None,
     ) -> dict[str, ConnectorResult[Any]]:
         async def procurement_items_results() -> dict[str, ConnectorResult[Any]]:
             # PNCP results reuse the audited items cached by fetch_items.
-            items = await connector.fetch_items(raw.external_id)
+            items = (
+                preloaded_items
+                if preloaded_items is not None
+                else await connector.fetch_items(raw.external_id)
+            )
             results = await connector.fetch_results(raw.external_id)
             return {"items": items, "results": results}
 
@@ -1432,6 +1574,16 @@ class IngestionPipeline:
             )
             enriched = detail.data if detail.is_available and detail.data is not None else raw
             persisted = [stored[key] for key in ("detail", "items", "documents", "results")]
+            discovery_projection = None
+            if enriched is not raw and raw_source_id is not None:
+                detail_header = published_scope_header(enriched)
+                missing = {
+                    name: value
+                    for name, value in published_scope_header(raw).items()
+                    if value is not None and detail_header[name] is None
+                }
+                if missing:
+                    discovery_projection = (raw.model_copy(update=missing), raw_source_id, missing)
             created = await self._persist_procurement_bundle(
                 run_id,
                 enriched,
@@ -1448,6 +1600,7 @@ class IngestionPipeline:
                     else None
                 )
                 or raw_source_id,
+                discovery_projection=discovery_projection,
                 item_source_record_ids=self._source_id_map(items.raw_records, persisted[1]),
                 document_source_record_ids=self._source_id_map(documents.raw_records, persisted[2]),
                 result_source_record_ids=self._source_id_map(results.raw_records, persisted[3]),
@@ -2175,6 +2328,7 @@ class IngestionPipeline:
         results: list[RawResult],
         *,
         source_record_id: UUID | None,
+        discovery_projection: tuple[RawProcurement, UUID, dict[str, str]] | None = None,
         item_source_record_ids: dict[str, UUID] | None = None,
         document_source_record_ids: dict[str, UUID] | None = None,
         result_source_record_ids: dict[str, UUID] | None = None,
@@ -2215,6 +2369,13 @@ class IngestionPipeline:
                 session.add(procurement)
                 await session.flush()
             self._apply_procurement(procurement, raw)
+            fallback_observations = {}
+            if discovery_projection:
+                discovery, discovery_source_id, missing = discovery_projection
+                for name, value in missing.items():
+                    tracker.register_field(procurement, name, discovery, discovery_source_id)
+                    setattr(procurement, name, value)
+                    fallback_observations[name] = (value, discovery_source_id)
             # Derive the phase from accepted fields, after rejecting older source values.
             await session.flush()
             await refresh_procurement_phase(session, procurement)
@@ -2245,7 +2406,9 @@ class IngestionPipeline:
                 source.source_url = raw.source_url or source.source_url
                 source.collected_at = datetime.now(UTC)
             await session.flush()
-            await self._observe_fields(session, procurement, raw, source_record_id)
+            await self._observe_fields(
+                session, procurement, raw, source_record_id, fallback_observations
+            )
             item_map = await self._upsert_items(
                 session,
                 procurement,
@@ -2297,6 +2460,8 @@ class IngestionPipeline:
             "legal_basis": str(raw.legal_basis)[:255] if raw.legal_basis else None,
             "title": raw.title,
             "object_description": raw.object_description,
+            "object_complement": raw.object_complement
+            or published_object_complement(raw.raw_payload),
             "agency_name": raw.agency_name,
             "agency_cnpj": normalize_cnpj(raw.agency_cnpj),
             "government_sphere": raw.government_sphere,
@@ -2322,6 +2487,7 @@ class IngestionPipeline:
         procurement: Procurement,
         raw: RawProcurement,
         source_record_id: UUID | None,
+        fallback_observations: dict[str, tuple[str, UUID]],
     ) -> None:
         observed = {
             "pncp_control_number": raw.pncp_control_number,
@@ -2334,6 +2500,9 @@ class IngestionPipeline:
             "is_srp": raw.is_srp,
             "legal_basis": raw.legal_basis,
             "object_description": raw.object_description,
+            "object_complement": raw.object_complement
+            or published_object_complement(raw.raw_payload),
+            "government_sphere": raw.government_sphere,
             "agency_name": raw.agency_name,
             "agency_cnpj": normalize_cnpj(raw.agency_cnpj),
             "estimated_value": raw.estimated_value,
@@ -2341,6 +2510,9 @@ class IngestionPipeline:
             "status": raw.status,
         }
         for field_name, value in observed.items():
+            observed_source_id: UUID | None = source_record_id
+            if fallback := fallback_observations.get(field_name):
+                value, observed_source_id = fallback
             status = FieldValueStatus.OBSERVED if value is not None else FieldValueStatus.UNKNOWN
             normalized = _json_value(value)
             fingerprint = stable_fingerprint(
@@ -2363,7 +2535,7 @@ class IngestionPipeline:
                         value=normalized,
                         value_status=status,
                         source=raw.source,
-                        source_record_id=source_record_id,
+                        source_record_id=observed_source_id,
                         confidence=Decimal("1") if value is not None else None,
                         collected_at=datetime.now(UTC),
                         fingerprint=fingerprint,
@@ -2412,6 +2584,9 @@ class IngestionPipeline:
             entity.external_item_id = raw.external_id
             entity.source_record_id = source_record_id
             entity.description = raw.detailed_description or raw.description
+            summary_description = raw.summary_description
+            if summary_description and summary_description.strip():
+                entity.summary_description = summary_description
             entity.quantity = raw.quantity
             entity.unit = raw.unit
             entity.estimated_unit_value = raw.estimated_unit_value
@@ -2919,6 +3094,12 @@ class IngestionPipeline:
                 from app.services.ingestion.scheduled_collections import finish_sync
 
                 batch = await session.get_one(CollectionBatch, coordinator.batch_id)
+                if summary.status is CrawlRunStatus.COMPLETED and batch.status in {
+                    "limited",
+                    "failed",
+                }:
+                    summary.status = CrawlRunStatus.PARTIAL
+                    summary.diagnostics.append("O lote ainda tem páginas ou registros pendentes.")
                 await finish_sync(session, run, batch, summary.status)
                 validations = (
                     await session.execute(

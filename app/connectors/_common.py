@@ -43,11 +43,22 @@ def combine_discoveries(results: list[ConnectorResult[Any]]) -> ConnectorResult[
     """Combine independent official partitions without claiming missing coverage."""
     data = [row for result in results for row in result.data]
     pages = [result.pagination for result in results if result.pagination is not None]
-    incomplete = any(not result.is_complete for result in results)
+    supported = [
+        result
+        for result in results
+        if result.availability is not DataAvailability.NOT_SUPPORTED
+        or not result.unsupported_modalities
+        or result.partial
+        or result.diagnostic is not None
+    ]
+    unsupported = list(
+        dict.fromkeys(key for result in results for key in result.unsupported_modalities)
+    )
+    incomplete = any(not result.is_complete for result in supported)
     failure = next(
         (
             result
-            for result in results
+            for result in supported
             if result.availability
             not in {
                 DataAvailability.AVAILABLE,
@@ -62,11 +73,16 @@ def combine_discoveries(results: list[ConnectorResult[Any]]) -> ConnectorResult[
         if data
         else failure.availability
         if failure
+        else DataAvailability.NOT_SUPPORTED
+        if not supported and unsupported
         else DataAvailability.EMPTY,
         raw_records=[raw for result in results for raw in result.raw_records],
         source_urls=list(dict.fromkeys(url for result in results for url in result.source_urls)),
         partial=incomplete,
-        diagnostic="; ".join(result.diagnostic for result in results if result.diagnostic) or None,
+        diagnostic="; ".join(result.diagnostic for result in supported if result.diagnostic)
+        or None,
+        unsupported_modalities=unsupported,
+        unclassified_modality_rows=sum(result.unclassified_modality_rows for result in results),
         pagination=PaginationInfo(
             fetched_pages=sum(page.fetched_pages for page in pages),
             total_pages=sum(page.total_pages or 0 for page in pages),

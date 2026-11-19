@@ -141,9 +141,10 @@ python -m app.cli export-leads leads.csv
 
 O exemplo de atas escolhe 30 dias explicitamente. Sem `--days`, a CLI usa 365.
 Na interface, **Coletar dados** consulta contratações, documentos, atas,
-contratos e pagamentos disponíveis. A página **Coletas** permite ajustar a UF e
-o período inclusivo e acompanha as etapas. Atas usam as unidades já conhecidas;
-a cobertura pode ser menor que a UF.
+contratos e pagamentos disponíveis. A página **Coletas** permite ajustar a UF,
+os filtros de contratações e o período inclusivo. O atalho **Últimos 2 anos de
+contratações** preenche o período e seleciona a coleta de contratações e documentos.
+Atas usam as unidades já conhecidas e a cobertura pode ser menor que a UF.
 
 O scheduler é deliberadamente separado da API:
 
@@ -187,9 +188,9 @@ para disco local ou use PostgreSQL.
   registro de preços (cabeçalho).
 - Compras.gov.br fornece contratações, itens, resultados, fornecedores, atas de registro de preços
   (com itens e fornecedores) e contratos, mas não documentos da sessão.
-- Filtros de contratações usam a rota da Lei 14.133/2021 (licitação, contratação
-  direta e procedimentos auxiliares), SRP, amparo legal e faixa de valor;
-  `python -m app.cli backfill-fields` recupera esses campos de coletas antigas.
+- Contratações permite filtrar por esfera do órgão, objeto ou item, forma de
+  contratação, modalidade de licitação, procedimento auxiliar, SRP e faixa de valor.
+  `python -m app.cli backfill-fields` recupera campos de coletas antigas.
 - A página `/empresas` consolida participações e eventos por CNPJ; desclassificação,
   inabilitação e recursos dependem de documentos oficiais e podem exigir revisão.
 - Empresas podem ser recortadas pelo período de publicação da contratação, por
@@ -197,6 +198,8 @@ para disco local ou use PostgreSQL.
   corporativos aparecem nas páginas de empresa e de lead.
 - Participação comprovada por documento em processo que ainda recebe propostas
   gera o evento `PARTICIPATION_DETECTED` e um lead (cobertura documental).
+- A página de Oportunidades abre na fila de diligências e recursos com prazo
+  oficial vigente. Use **Todas** para consultar as demais oportunidades.
 - Os rótulos e filtros das telas têm ícones "i" com explicações objetivas.
 - Resultado homologado não equivale à lista de participantes.
 - Inabilitação, desclassificação e recursos normalmente dependem de documentos.

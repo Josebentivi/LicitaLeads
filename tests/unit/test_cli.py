@@ -5,6 +5,7 @@ from __future__ import annotations
 import csv
 import json
 from contextlib import asynccontextmanager
+from datetime import date
 from pathlib import Path
 from types import SimpleNamespace
 from uuid import UUID
@@ -129,6 +130,29 @@ def test_cli_rejects_unknown_connector() -> None:
     result = CliRunner().invoke(app, ["crawl", "unknown", "--days", "1"])
     assert result.exit_code != 0
     assert "pncp" in result.output
+
+
+@pytest.mark.parametrize("spelling", ["publication", "PUBLICATION", "publicação"])
+def test_publication_aliases_share_the_two_year_limit_and_month_plan(monkeypatch, spelling):
+    FakePipeline.requests.clear()
+    monkeypatch.setattr("app.cli.main.IngestionPipeline", FakePipeline)
+    monkeypatch.setattr(
+        "app.services.collection_periods.collection_today", lambda _: date(2026, 11, 18)
+    )
+    runner = CliRunner()
+    command = ["crawl", "pncp", "--discovery-kind", spelling]
+    too_old = runner.invoke(
+        app, [*command, "--start-date", "2024-11-17", "--end-date", "2025-02-01"]
+    )
+    assert too_old.exit_code != 0 and "últimos dois anos" in too_old.output
+    assert FakePipeline.requests == []
+
+    accepted = runner.invoke(
+        app, [*command, "--start-date", "2024-11-18", "--end-date", "2025-02-01"]
+    )
+    assert accepted.exit_code == 0, accepted.output
+    assert FakePipeline.requests[0].discovery_kind == "publication"
+    assert FakePipeline.requests[0].calendar_months
 
 
 @pytest.mark.parametrize("command", ["crawl", "crawl-atas", "crawl-contracts", "run-pipeline"])

@@ -15,11 +15,11 @@
   <label>Número da ata <input name="registry_number" value="{{ filters.registry_number or '' }}"></label>
   <label>CNPJ do fornecedor <input name="supplier_cnpj" value="{{ filters.supplier_cnpj or '' }}"></label>
   <label>A vencer em (dias) <input name="expiring_within_days" type="number" min="1" max="365" value="{{ filters.expiring_within_days or '' }}"></label>
-  <label>Permite adesao
+  <label>Permite adesão
     <select name="allows_adhesion">
       <option value="">Todas</option>
       <option value="true"{% if filters.allows_adhesion == 'true' %} selected{% endif %}>Sim</option>
-      <option value="false"{% if filters.allows_adhesion == 'false' %} selected{% endif %}>Nao</option>
+      <option value="false"{% if filters.allows_adhesion == 'false' %} selected{% endif %}>Não</option>
     </select>
   </label>
   </div></details></form>
@@ -40,6 +40,6 @@
 </tr>{% endfor %}</tbody></table>
 </section>
 {% else %}<div class="panel empty">Nenhuma ata de registro de preços encontrada. Ajuste os filtros ou acompanhe a atualização em <a href="/crawls">Coletas</a>.</div>{% endif %}
-<p class="hint">Dados publicados oficialmente pelo PNCP (cabeçalho da ata) e pelo módulo ARP do Compras.gov.br (itens e fornecedores). Itens podem estar ausentes quando a fonte não os publica.</p>
+<p class="hint">O PNCP fornece o cabeçalho da ata. O módulo ARP do Compras.gov.br pode complementar com itens, fornecedores, unidades, saldos, empenhos e adesões. Campos sem valor no acervo aparecem como “Não informado”. <a href="/ajuda#atas">Entenda os dados das atas</a>.</p>
 {{ pagination_nav(request, pagination.page, pagination.page_size, pagination.total) }}
 {% endblock %}

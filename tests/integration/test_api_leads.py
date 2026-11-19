@@ -235,7 +235,7 @@ async def test_procurement_evidence_and_web_pages(
         await api_client.get("/dashboard"),
         await api_client.get("/procurements"),
         await api_client.get(f"/procurements/{ids.procurement}"),
-        await api_client.get("/leads"),
+        await api_client.get("/leads?due="),
         await api_client.get(f"/leads/{ids.lead}"),
         await api_client.get("/crawls"),
         await api_client.get("/settings"),

@@ -11,7 +11,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.connectors._common import to_datetime
 from app.connectors.base import ConnectorResult, DataAvailability
-from app.models import ProcurementSource, SourceRecord, VerifiedCollectionVersion
+from app.models import Procurement, ProcurementSource, SourceRecord, VerifiedCollectionVersion
+from app.services.procurement_search import published_scope_header, published_sphere
 
 ADAPTER_VERSION = 1
 PROCUREMENT_OPERATIONS = {"detail", "items", "documents", "results", "version_check"}
@@ -95,13 +96,26 @@ async def find_reusable(
         or not PROCUREMENT_OPERATIONS.issubset(proof.operations)
     ):
         return None
-    exists = await session.scalar(
-        select(ProcurementSource.id).where(
-            ProcurementSource.source == connector.name,
-            ProcurementSource.external_id == raw.external_id,
+    projection = (
+        await session.execute(
+            select(Procurement.object_complement, Procurement.government_sphere)
+            .join(ProcurementSource, ProcurementSource.procurement_id == Procurement.id)
+            .where(
+                ProcurementSource.source == connector.name,
+                ProcurementSource.external_id == raw.external_id,
+            )
         )
-    )
-    return proof if exists is not None and await evidence_exists(session, proof) else None
+    ).one_or_none()
+    if projection is None:
+        return None
+    header = published_scope_header(raw)
+    if (header["object_complement"] and not (projection.object_complement or "").strip()) or (
+        header["government_sphere"] and not published_sphere(projection.government_sphere)
+    ):
+        # Versions recorded before those fields were captured cannot certify
+        # that a newly observed discovery match is searchable in the acervo.
+        return None
+    return proof if await evidence_exists(session, proof) else None
 
 
 async def record_verified(

@@ -19,6 +19,7 @@ from app.dependencies import get_db
 from app.models import (
     Company,
     CompanyContact,
+    ContactType,
     Deadline,
     DeadlineStatus,
     Lead,
@@ -31,6 +32,10 @@ from app.models import (
     ReviewDecision,
 )
 from app.schemas import LeadPatch, LeadReviewRequest, OutreachRequest
+from app.services.opportunity_workspace import (
+    deadline_usable,
+    legacy_official_response_deadline_ids,
+)
 from app.services.outreach import OutreachContext, OutreachDraftService
 from app.services.participation_integrity import lead_current
 
@@ -105,6 +110,8 @@ async def list_leads(
         )
     if deadline_status:
         statement = statement.join(Lead.deadline).where(Deadline.status == deadline_status)
+        if deadline_status in {DeadlineStatus.OPEN, DeadlineStatus.EXPIRED}:
+            statement = statement.where(deadline_usable(datetime.now(UTC)))
     if pending_review is not None:
         condition = Lead.lead_status == LeadStatus.PENDING_REVIEW
         statement = statement.where(condition if pending_review else ~condition)
@@ -117,6 +124,7 @@ async def list_leads(
             select(CompanyContact.id).where(
                 CompanyContact.company_id == Lead.company_id,
                 CompanyContact.is_corporate.is_(True),
+                CompanyContact.contact_type != ContactType.ADDRESS,
             )
         )
         statement = statement.where(corporate_contact if has_contact else ~corporate_contact)
@@ -154,7 +162,13 @@ async def list_leads(
 
 @router.get("/{lead_id}")
 async def get_lead(lead_id: UUID, db: AsyncSession = Depends(get_db)) -> dict[str, object]:
-    result = _lead_dict(await _lead(lead_id, db), nested=True)
+    lead = await _lead(lead_id, db)
+    result = _lead_dict(lead, nested=True)
+    if lead.deadline_id and await legacy_official_response_deadline_ids(db, {lead.deadline_id}):
+        deadline = result["deadline"]
+        if isinstance(deadline, dict):
+            deadline["requires_manual_review"] = True
+            deadline["revalidation_pending"] = True
     result["is_operational"] = (
         await db.scalar(select(Lead.id).where(Lead.id == lead_id, lead_current())) is not None
     )
@@ -232,12 +246,28 @@ async def generate_outreach(
         raise HTTPException(status_code=409, detail="Lead has no traceable public source URL")
     due_at = None
     estimated = False
-    if deadline:
+    revalidation_pending = bool(
+        deadline and await legacy_official_response_deadline_ids(db, {deadline.id})
+    )
+    usable = bool(
+        deadline
+        and not revalidation_pending
+        and await db.scalar(
+            select(Deadline.id).where(
+                Deadline.id == deadline.id, deadline_usable(datetime.now(UTC))
+            )
+        )
+    )
+    if deadline and usable:
         due_at = deadline.explicit_deadline_at or deadline.estimated_deadline_at
         estimated = deadline.explicit_deadline_at is None and due_at is not None
     deadline_label = (
         due_at.astimezone(UTC).strftime("prazo em %d/%m/%Y às %H:%M UTC")
         if due_at
+        else "prazo pendente de revalidação na fonte oficial"
+        if revalidation_pending
+        else "prazo registrado cuja vigência precisa ser conferida na fonte oficial"
+        if deadline and not usable
         else "prazo não publicado, que precisa ser confirmado na fonte oficial"
     )
     context = OutreachContext(

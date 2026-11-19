@@ -1,3 +1,11 @@
-<label>De <input name="start_date" type="date" value="{{ period.start_date }}"{% if target_form %} form="{{ target_form }}"{% endif %} required></label>
-<label>Até <input name="end_date" type="date" value="{{ period.end_date }}"{% if target_form %} form="{{ target_form }}"{% endif %} required></label>
-<div class="period-shortcuts" data-period-shortcuts data-today="{{ period.end_date }}"><span>Período rápido:</span><button type="button" class="button secondary compact" data-period="7">Últimos 7 dias</button><button type="button" class="button secondary compact" data-period="30">Últimos 30 dias</button><button type="button" class="button secondary compact" data-period="month">Este mês</button><button type="button" class="button secondary compact" data-period="custom">Personalizado</button><small data-period-summary role="status" aria-live="polite"></small></div>
+<label>De <input name="start_date" type="date" value="{{ period.start_date }}"{% if min_collection_date %} min="{{ min_collection_date }}" max="{{ period.end_date }}"{% endif %}{% if target_form %} form="{{ target_form }}"{% endif %} required></label>
+<label>Até <input name="end_date" type="date" value="{{ period.end_date }}"{% if min_collection_date %} min="{{ min_collection_date }}" max="{{ period.end_date }}"{% endif %}{% if target_form %} form="{{ target_form }}"{% endif %} required></label>
+<div class="period-shortcuts" data-period-shortcuts data-today="{{ period.end_date }}"{% if min_collection_date %} data-earliest="{{ min_collection_date }}"{% endif %}>
+  <span>Período rápido</span>
+  <button type="button" class="button secondary compact" data-period="7">Últimos 7 dias</button>
+  <button type="button" class="button secondary compact" data-period="30">Últimos 30 dias</button>
+  <button type="button" class="button secondary compact" data-period="month">Este mês</button>
+  {% if min_collection_date %}<button type="button" class="button secondary compact" data-period="two-years">Últimos 2 anos de contratações</button>{% endif %}
+  <button type="button" class="button secondary compact" data-period="custom">Personalizado</button>
+  <small data-period-summary role="status" aria-live="polite"></small>
+</div>

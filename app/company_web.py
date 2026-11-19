@@ -1,5 +1,6 @@
 """HTML dossier fragments. All membership decisions live in the read service."""
 
+from typing import Literal, cast
 from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request
@@ -8,7 +9,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.routes.company_overview import RescoreRequest, rescore
 from app.api.routes.leads import generate_outreach, review_lead
+from app.config import get_settings
 from app.dependencies import get_db
+from app.models import ContactType, Procurement
 from app.schemas import LeadReviewRequest, OutreachRequest
 from app.services.company_overview import (
     SECTION_LABELS,
@@ -16,7 +19,19 @@ from app.services.company_overview import (
     Section,
     find_company,
 )
+from app.services.contacts.manual import (
+    begin_corporate_write,
+    save_corporate_contact,
+    save_corporate_name,
+)
 from app.services.opportunity_workspace import safe_list_url
+from app.services.public_source_links import (
+    origin_platform_url,
+    procurement_public_url,
+    procurement_source_page,
+    public_link,
+    source_link_label,
+)
 
 router = APIRouter(include_in_schema=False)
 
@@ -118,6 +133,13 @@ LABELS = {
     "economic_value": "Valor econômico",
     "penalties": "Reduções",
     "status": "Situação publicada",
+    "availability": "Disponibilidade",
+    "available": "Disponível",
+    "empty": "Consulta sem registros",
+    "not_supported": "Sem cobertura nesta integração",
+    "not_published": "Não publicado",
+    "access_restricted": "Acesso restrito",
+    "temporary_error": "Falha temporária",
 }
 
 
@@ -150,6 +172,7 @@ def visible(key):
         "title",
         "groups",
         "origins",
+        "public_source_links",
         "historical_notice",
         "detail_page",
         "inputs",
@@ -177,18 +200,7 @@ def visible(key):
 
 
 def safe_url(value):
-    from urllib.parse import urlsplit
-
-    try:
-        parsed = urlsplit(str(value))
-        return (
-            parsed.scheme.lower() in {"https", "http"}
-            and bool(parsed.hostname)
-            and not parsed.username
-            and not parsed.password
-        )
-    except ValueError:
-        return False
+    return bool(public_link(str(value))) if value else False
 
 
 def display_value(value, key):
@@ -211,12 +223,14 @@ def display_value(value, key):
         _DEADLINE_STATUS_LABELS,
         _EXTRACTION_STATUS_LABELS,
         _PROCUREMENT_PHASE_LABELS,
+        _SOURCE_LABELS,
     )
 
     contextual = {
         "contact_type": _CONTACT_TYPE_LABELS,
         "extraction_status": _EXTRACTION_STATUS_LABELS,
         "current_phase": _PROCUREMENT_PHASE_LABELS,
+        "source": _SOURCE_LABELS,
     }
     if key in contextual:
         return contextual[key].get(str(value), value)
@@ -253,6 +267,7 @@ def display_value(value, key):
         "previous_status",
         "participation_role",
         "status_code",
+        "availability",
     }:
         return label(value)
     if key.endswith("_at") or key in {"valid_from", "valid_until", "new_valid_until"}:
@@ -274,6 +289,7 @@ def render(request, template, context):
         company_label=label,
         company_visible=visible,
         company_safe_url=safe_url,
+        company_source_link_label=source_link_label,
         company_value=display_value,
     )
     return templates.TemplateResponse(request, template, context)
@@ -288,6 +304,9 @@ async def company_page(
     section = request.query_params.get("section", "leads")
     if section not in SECTION_LABELS:
         raise HTTPException(422, "Seção inválida")
+    history = request.query_params.get("history", "semestre")
+    if history != "semestre" and history != "ano":
+        raise HTTPException(422, "Informe semestre ou ano para o histórico")
     initial = await service.page(
         section,
         status=status if section == "procurements" else None,
@@ -298,6 +317,11 @@ async def company_page(
         "company_detail.html",
         {
             "overview": overview,
+            "contact_profile": await service.contact_profile(),
+            "participation_history": await service.participation_history(
+                cast(Literal["semestre", "ano"], history), timezone=get_settings().timezone
+            ),
+            "history_mode": history,
             "company": company,
             "section_labels": SECTION_LABELS,
             "initial": initial,
@@ -312,6 +336,30 @@ async def company_page(
             ),
         },
     )
+
+
+@router.post("/empresas/{cnpj}/contatos")
+async def save_company_contact(
+    cnpj: str,
+    field: Literal["legal_name", "address", "phone", "email"] = Form(...),
+    value: str = Form(..., max_length=1000),
+    source_url: str = Form(..., max_length=2048),
+    corporate: bool = Form(False),
+    db: AsyncSession = Depends(get_db),
+):
+    if not corporate:
+        raise HTTPException(422, "Confirme que o dado é público e corporativo.")
+    await begin_corporate_write(db)
+    company = await find_company(db, cnpj, lock=True)
+    try:
+        if field == "legal_name":
+            await save_corporate_name(db, company, value, source_url)
+        else:
+            await save_corporate_contact(db, company, ContactType(field), value, source_url)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    await db.commit()
+    return RedirectResponse(f"/empresas/{company.cnpj}#dados-corporativos", status_code=303)
 
 
 @router.get("/empresas/{cnpj}/summary")
@@ -365,6 +413,17 @@ async def company_detail(
 ):
     company = await find_company(db, cnpj)
     data = await CompanyOverviewService(db, company).detail(section, identifier, page=page)
+    if section == "procurements" and (procurement := await db.get(Procurement, identifier)):
+        pncp_url = procurement_public_url(procurement.pncp_control_number)
+        links: list[tuple[str, str | None]] = (
+            [("Abrir no PNCP", pncp_url)]
+            if pncp_url
+            else [("Abrir página da contratação", procurement_source_page(procurement))]
+        )
+        platform_url = await origin_platform_url(db, procurement)
+        if platform_url != links[0][1]:
+            links.append(("Abrir na plataforma de origem", platform_url))
+        data["public_source_links"] = [(title, url) for title, url in links if url]
     return render(
         request,
         "_company_detail.html"

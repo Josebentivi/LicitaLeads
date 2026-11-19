@@ -2,12 +2,20 @@
 
 ## Agenda e fila de análise
 
-`/dashboard` abre a **Minha agenda de análise**. Os cartões Aguardando revisão,
+`/dashboard` abre a **Minha agenda de análise**. O cartão **Prazo aberto para
+diligência ou recurso** abre a fila inicial de Oportunidades. Ela exige prazo
+vigente comprovado em fonte oficial e ordena pelos vencimentos mais próximos.
+Use **Todas** para consultar as demais oportunidades. Os cartões Aguardando revisão,
 Prazos próximos, Novas oportunidades e Ajustes solicitados consultam o mesmo
 serviço de filtros usado em `/leads`. Cada cartão abre sua lista correspondente.
 Prazos próximos consideram datas expressas ou estimadas nas próximas 72 horas para
 oportunidades novas, pendentes de revisão ou com ajustes solicitados. A lista da
 agenda usa esses três estados e atribuições atuais. A nota ordena a fila.
+
+Prazos oficiais armazenados com a regra anterior aparecem como pendentes de
+revalidação. A fila imediata exige a comprovação atual do marco inicial, do
+destinatário e do ato. O relatório `reconcile-data --flow-integrity` avalia os
+documentos preservados para recuperar os casos comprováveis.
 
 O início também mostra a última consulta HTTP bem-sucedida às fontes e o estado
 das atualizações automáticas. Esse horário é de consulta, não uma afirmação de
@@ -56,8 +64,13 @@ restritos às listas locais correspondentes.
 
 ## Coletas
 
-De/Até são inclusivos. Há atalhos Últimos 7 dias, Últimos 30 dias, Este mês e
-Personalizado. Os atalhos usam o dia local da aplicação exibido ao abrir a página.
+De/Até são inclusivos. Há atalhos Últimos 7 dias, Últimos 30 dias, Este mês,
+Últimos 2 anos de contratações e Personalizado. O atalho de dois anos preenche o
+período e seleciona **Somente contratações e documentos**. Os atalhos usam o dia
+local da aplicação exibido ao abrir a página. Uma carga longa por publicação
+percorre meses do mais recente ao mais antigo e pode ser retomada.
+Os filtros podem combinar modalidade, esfera, objetos sugeridos e busca livre.
+Os grupos de objetos consultam termos do objeto e dos itens publicados.
 O escopo também permite pedir nova consulta de detalhes já verificados. O JavaScript
 previne submissões repetidas enquanto o formulário navega e restaura os botões
 ao voltar pelo histórico. A execução continua protegida pelas leases do pipeline.

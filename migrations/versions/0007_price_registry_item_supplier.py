@@ -34,6 +34,10 @@ def _unique_constraints() -> set[str]:
 def upgrade() -> None:
     """Replace the item-only unique key with (registry, item, supplier)."""
 
+    if op.get_bind().dialect.name == "postgresql":
+        # Alembic stores this revision after upgrade() returns. This is the
+        # first revision ID longer than the default VARCHAR(32).
+        op.alter_column("alembic_version", "version_num", type_=sa.Text())
     existing = _unique_constraints()
     if _NEW_CONSTRAINT in existing:
         return

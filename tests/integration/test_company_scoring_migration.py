@@ -5,9 +5,12 @@ import os
 import sqlite3
 import subprocess
 import sys
+from uuid import uuid4
+
+from sqlalchemy import text
 
 from app.database import create_database_engine, create_session_factory
-from app.models import Company, Lead, LeadReview, Procurement, ProcurementEvent
+from app.models import Company, Lead, LeadReview, ProcurementEvent
 
 
 def test_scoring_upgrade_preserves_existing_reviews(tmp_path):
@@ -34,11 +37,19 @@ def test_scoring_upgrade_preserves_existing_reviews(tmp_path):
         try:
             async with create_session_factory(engine)() as db, db.begin():
                 company = Company(cnpj="04252011000110", normalized_name="EMPRESA")
-                procurement = Procurement(source="pncp", external_id="legacy")
-                db.add_all([company, procurement])
+                db.add(company)
                 await db.flush()
+                procurement_id = uuid4()
+                await db.execute(
+                    text(
+                        """INSERT INTO procurements
+                        (id, source, external_id, current_phase, created_at, updated_at)
+                        VALUES (:id, 'pncp', 'legacy', 'unknown', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"""
+                    ),
+                    {"id": str(procurement_id)},
+                )
                 event = ProcurementEvent(
-                    procurement_id=procurement.id,
+                    procurement_id=procurement_id,
                     company_id=company.id,
                     event_type="DISQUALIFIED",
                     source="document",
@@ -48,7 +59,7 @@ def test_scoring_upgrade_preserves_existing_reviews(tmp_path):
                 db.add(event)
                 await db.flush()
                 lead = Lead(
-                    procurement_id=procurement.id,
+                    procurement_id=procurement_id,
                     company_id=company.id,
                     triggering_event_id=event.id,
                     score=95,

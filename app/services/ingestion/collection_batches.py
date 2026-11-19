@@ -644,6 +644,7 @@ class CollectionCoordinator:
         *,
         details_pending: bool = False,
         details_failed: bool = False,
+        outside_scope: bool = False,
         work_id: UUID | None = None,
     ) -> None:
         identifier = work_id or self.current_item_id or self.items.get(row_identity(raw))
@@ -667,6 +668,8 @@ class CollectionCoordinator:
                 if getattr(raw, "collection_stage", False)
                 else "details_pending"
                 if details_pending
+                else "outside_scope"
+                if outside_scope
                 else "succeeded"
             )
             item.attempts += 1

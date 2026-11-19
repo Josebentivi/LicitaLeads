@@ -82,22 +82,22 @@ Ou tudo de uma vez com `python -m app.cli run-pipeline --uf MA --days 7`.
 
 | Tela | Uso |
 |---|---|
-| **Minha agenda / Dashboard** | Filas de prioridades, atualização das fontes, oportunidades e acesso à coleta; indicadores técnicos expansíveis |
+| **Minha agenda de análise** | Filas de prioridades, atualização das fontes, oportunidades, acesso à coleta e indicadores do acervo |
 | **Contratações** | Filtros por UF, município e órgão; detalhe com itens, documentos, participantes, eventos e origem de cada dado |
-| **Empresas** | CNPJ, participações comprovadas, eventos e contatos corporativos com origem |
+| **Empresas** | Dados corporativos com origem, histórico semestral ou anual, participações comprovadas e eventos |
 | **Atas (ARP)** | Busca no acervo; unidades, itens e fornecedores registrados |
 | **Contratos** | Busca por número, órgão ou CNPJ do fornecedor; itens, termos e pagamentos conciliados |
 | **Pagamentos** | Pagamentos conciliados ou para revisão e importação CSV/JSON de arquivos oficiais |
 | **Oportunidades** | Busca por empresa/CNPJ/processo, filas por situação, prazo, filtros avançados, evidências legíveis e revisão contínua |
 | **Coletas** | Progresso, histórico, fontes, continuação, repetição, falhas documentais e fila de IA |
 | **Configurações** | Configuração pública sem segredos, pausa do scheduler e manutenção |
-| **Fontes** | Matriz de capacidades auditadas |
+| **Fontes** | Matriz em português com a cobertura de cada integração e acesso à consulta oficial |
 | **Testes** | Diagnóstico rápido e suíte local com etapas e relatórios identificados |
 | **Ajuda** | Orientações de uso e operação dentro da aplicação |
 
 Clique em **Coletar dados** no topo de qualquer página. Para mudar a UF ou o
 período, abra **Coletas → Escopo da próxima coleta** e use o mesmo botão.
-O período inclui as duas datas. O padrão usa `DEFAULT_UF` e
+O período inclui as duas datas e pode recuar até dois anos. O padrão usa `DEFAULT_UF` e
 `DEFAULT_LOOKBACK_DAYS`; os atalhos de calendário permitem trocar a janela.
 Em **Coletas**, cada etapa mostra o estado e as pendências. Assim que a etapa
 de contratações e documentos terminar, o atalho **Ver oportunidades vinculadas**
@@ -125,6 +125,11 @@ quando disponível, é vinculado ao portal de origem. Sem ele, uma linha alterad
 pode gerar outro registro. Empenho, contrato, aditivo e pagamento são fatos
 distintos; pagamento não conciliado não prova inadimplência.
 
+Nas atas, o PNCP fornece o cabeçalho e o módulo ARP do Compras.gov.br pode
+complementar com itens, fornecedores, unidades, saldos, empenhos e adesões.
+**Não informado** representa campo sem valor no acervo. Confira a fonte e a
+execução da coleta para investigar seções vazias.
+
 O **TCE-MA** complementa os pregões eletrônicos da Prefeitura de São Luís
 (UASG 980921) com vínculo confirmado pelo controle PNCP. No detalhe do
 pregão, consulte a plataforma de origem, quando o PNCP publica o link, e a
@@ -134,7 +139,7 @@ automaticamente.
 
 ## Revisão de leads
 
-- O score **2.0** (0–100) vem de urgência (0–30), evidência (0–30), relevância jurídica
+- A pontuação de prioridade **2.0** (0–100) vem de urgência (0–30), evidência (0–30), relevância jurídica
   (0–25), contato (0–5) e valor econômico (0–10), menos penalidades
   (empresa não confirmada, CNPJ ausente, evidência fraca, motivo desconhecido,
   prazo estimado, OCR pendente, processo encerrado, prazo vencido).
@@ -198,6 +203,14 @@ Abra **Empresas** e selecione o CNPJ, ou use **Visão completa da empresa** no
 lead, na ata ou no contrato. A página reúne o acervo coletado em seções
 expansíveis: leads, licitações e participações, atas, contratos, pagamentos,
 eventos, prazos, documentos e contatos corporativos.
+
+Em **Dados corporativos**, confira razão social, CNPJ, endereço, telefone e
+e-mail, além da origem e da situação da verificação das informações disponíveis.
+Use **Registrar um dado corporativo** para completar o cadastro com um dado
+público referente ao CNPJ exibido. O CSV de contatos também aceita o tipo
+`address`. Em **Histórico de participações**, selecione semestre ou ano. Os
+totais contam contratações distintas pela data de publicação dos últimos dois
+anos. Abra um total para consultar as respectivas contratações.
 
 Leads abrem inicialmente. As demais listas carregam quando expandidas, em
 páginas de 20 registros; os detalhes também abrem na mesma tela. Os links

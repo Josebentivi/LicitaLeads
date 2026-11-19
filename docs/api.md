@@ -4,9 +4,12 @@
 
 `GET /dashboard` mostra a agenda do analista e o estado das atualizações.
 Na interface, `GET /leads` aceita `q` (empresa, CNPJ ou processo), `lead_status`,
-`due` (`today`, `24h`, `72h`), `event_type`, `min_score`, `requires_review`,
+`due` (`open`, `today`, `24h`, `72h`), `event_type`, `min_score`, `requires_review`,
 `created_from`, `created_to`, `include_history`, `run` (UUID da coleta) e `page`.
-Esses filtros web não alteram o contrato de `GET /api/leads`.
+`/leads` abre a fila de prazos oficiais vigentes (`due=open`). Use `due=` para
+consultar todas as oportunidades atuais. A exportação usa os mesmos filtros.
+O detalhe `GET /api/leads/{id}` sinaliza `deadline.revalidation_pending=true`
+quando um prazo oficial armazenado ainda exige revalidação da evidência.
 
 `GET /procurements` também oferece `q`, `published_from`, `published_to` e `run`.
 O recorte por coleta usa vínculos de origem e documentos do lote; pode incluir
@@ -100,9 +103,18 @@ Filtros de `GET /api/procurements`: `page`, `page_size` (1–200), `uf`,
 `municipality`, `agency`, `agency_cnpj`, `company_cnpj`, `modality` (repetível;
 chave canônica ou rótulo da fonte), `published_from`, `published_to`, `status`
 (alias de `procurement_status`), `status_category` (`aberta`, `encerrada`,
-`cancelada`, `suspensa`, `desconhecida`), `procurement_type` (`licitacao`,
+`cancelada`, `suspensa`, `desconhecida`, `prazo_resposta_aberto`), `procurement_type` (`licitacao`,
 `contratacao_direta`, `procedimento_auxiliar`), `is_srp` (`true`/`false`) e
 `value_min`/`value_max` (valor estimado).
+
+`contracting_form` aceita `licitacao`, `dispensa` ou `inexigibilidade`.
+`licitation_modality` agrupa as variantes das modalidades em `pregao`,
+`concorrencia`, `concurso`, `leilao` e `dialogo_competitivo`. Use
+`auxiliary_procedure` para procedimentos como `credenciamento` e `is_srp` para
+registro de preços. `government_sphere` usa `F`, `E`, `M` ou `D`.
+`object_query`, `object_preset` (repetível) e `object_group` buscam no texto do
+objeto e dos itens. `company_participation_only=true` restringe o recorte por
+CNPJ a participações comprovadas.
 
 `agency_cnpj` casa o CNPJ do órgão que publica a contratação (aceita pontuação;
 exige 14 posições alfanuméricas). `company_cnpj` retorna contratações
@@ -244,10 +256,13 @@ sem repetir descoberta ou coleta de processos. A pausa do scheduler é preservad
 Corpo de `POST /api/crawls/run`: `connector` (`pncp`, `compras_gov`, `all`),
 `mode` (`procurements`, `price_registries` ou `contracts`), `uf`, `days` (ou
 `start_date`+`end_date`), `modalities`, `municipality`, `agency`, `agency_cnpj`,
-`unit_code`, `keyword`, `document_batch_size`, `discovery_kind` (`publication`,
+`unit_code`, `keyword`, `object_query`, `object_preset` (lista), `object_group`,
+`government_sphere`, `document_batch_size`, `discovery_kind` (`publication`,
 `update` ou `open_proposals`) e `force_refresh` (padrão `false`). As datas
 explícitas devem ser fornecidas em conjunto e em ordem e, quando presentes,
-têm prioridade sobre `days`. Os formulários web enviam `start_date`/`end_date`
+têm prioridade sobre `days`. Novas consultas de contratações por publicação
+aceitam datas dentro dos últimos dois anos até hoje, no fuso da aplicação.
+Os formulários web enviam `start_date`/`end_date`
 pelos campos De/Até. O corpo aceito não
 contém um campo `process_documents`; a opção documental da interface pertence
 ao formulário web. Campos extras são ignorados pelo modelo atual: enviar
@@ -272,8 +287,9 @@ incluem `llm` quando houver dados, e `POST /api/crawls/{id}/retry-llm` responde
 | `POST /api/contacts/import` | Importa CSV UTF-8 (multipart) de contatos corporativos |
 
 Colunas obrigatórias: `cnpj`, `contact_type`, `contact_value`, `source_url`,
-`is_corporate`. Limite de 2 MB; apenas contatos explicitamente corporativos são
-aceitos; `source_url` deve ser HTTP(S). Resposta:
+`is_corporate`. O limite é de 2 MB, o contato deve ser explicitamente
+corporativo e `source_url` deve ser público e usar HTTP(S). Valores dos tipos
+`email`, `phone` e `whatsapp` passam por validação de formato. A resposta é
 `{created, updated, skipped, errors[]}`.
 
 ## Evidências e documentos

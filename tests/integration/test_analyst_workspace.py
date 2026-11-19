@@ -14,14 +14,19 @@ from app.models import (
     DeadlineCalculationMethod,
     Document,
     Evidence,
+    FieldObservation,
     Lead,
     LeadReview,
     LeadStatus,
     PriceRegistry,
+    Procurement,
+    ProcurementEvent,
+    ProcurementEventType,
     ProcurementSource,
     SourceRecord,
 )
 from app.models.participation import FactVerification
+from app.services.deadlines.response import RESPONSE_PROOF_VERSION, RESPONSE_SCOPE_OBSERVATION
 
 from .test_api_leads import _full_graph
 
@@ -108,7 +113,8 @@ async def test_dashboard_cards_link_to_identically_filtered_queues(api_client, d
     page = await api_client.get("/dashboard")
     soup = BeautifulSoup(page.text, "html.parser")
     cards = soup.select(".agenda-metrics a")
-    assert len(cards) == 4
+    assert len(cards) == 5
+    assert cards[0]["href"] == "/leads?due=open"
     for card in cards:
         listing = await api_client.get(card["href"])
         assert listing.status_code == 200
@@ -116,6 +122,125 @@ async def test_dashboard_cards_link_to_identically_filtered_queues(api_client, d
         assert f"{count} oportunidade(s) encontrada(s)" in listing.text
     assert "Última consulta bem-sucedida" in page.text
     assert "atualizar-dados" in page.text
+
+
+async def test_open_response_default_has_same_scope_in_agenda_procurements_and_csv(
+    api_client, database
+):
+    async def dashboard_24h():
+        response = await api_client.get("/dashboard")
+        assert response.status_code == 200
+        soup = BeautifulSoup(response.text, "html.parser")
+        counts = {
+            metric.span.get_text(strip=True): int(metric.strong.get_text(strip=True))
+            for metric in soup.select('section[aria-label="Indicadores"] article.metric')
+        }
+        return counts["Prazos em 24 horas"]
+
+    ids = await _full_graph(database)
+    now = datetime.now(UTC)
+    async with database.sessions() as session, session.begin():
+        lead = await session.get_one(Lead, ids.lead)
+        lead.lead_status = LeadStatus.APPROVED
+        event = await session.get_one(ProcurementEvent, ids.event)
+        event.event_type = ProcurementEventType.DILIGENCE_REQUESTED
+        deadline = await session.get_one(Deadline, lead.deadline_id)
+        deadline.deadline_type = "diligence_response"
+        deadline.trigger_at = now - timedelta(minutes=30)
+        deadline.explicit_deadline_at = now + timedelta(hours=3)
+
+    assert str(ids.lead) not in (await api_client.get("/leads")).text
+    assert await dashboard_24h() == 0
+    all_opportunities = await api_client.get("/leads?due=")
+    assert str(ids.lead) in all_opportunities.text
+    assert "Prazo pendente de revalidação" in all_opportunities.text
+    api_detail = await api_client.get(f"/api/leads/{ids.lead}")
+    assert api_detail.json()["deadline"]["revalidation_pending"] is True
+    draft = await api_client.post(
+        f"/api/leads/{ids.lead}/generate-outreach", json={"channel": "email"}
+    )
+    assert "prazo pendente de revalidação" in draft.json()["draft"]["message"]
+
+    async with database.sessions() as session, session.begin():
+        session.add(
+            FieldObservation(
+                entity_type="deadline",
+                entity_id=deadline.id,
+                evidence_id=ids.evidence,
+                field_name=RESPONSE_SCOPE_OBSERVATION,
+                value={
+                    "version": RESPONSE_PROOF_VERSION,
+                    "scope": "unknown",
+                    "item": "",
+                    "lote": "",
+                    "extension": False,
+                },
+                source="document",
+            )
+        )
+
+    listing = await api_client.get("/leads")
+    soup = BeautifulSoup(listing.text, "html.parser")
+    assert f"/leads/{ids.lead}" in listing.text
+    assert "/leads/exportar.csv?due=open" in listing.text
+    export = await api_client.get(soup.select_one('a[href*="exportar.csv"]')["href"])
+    assert export.status_code == 200
+    assert str(ids.lead) in export.text
+    list_path = "/procurements?status_category=prazo_resposta_aberto"
+    assert str(ids.procurement) in (await api_client.get(list_path)).text
+    assert await dashboard_24h() == 1
+
+    async with database.sessions() as session, session.begin():
+        procurement = await session.get_one(Procurement, ids.procurement)
+        procurement.status = "Suspensa"
+    assert str(ids.lead) not in (await api_client.get("/leads")).text
+    assert str(ids.procurement) not in (await api_client.get(list_path)).text
+    assert str(ids.lead) in (await api_client.get("/leads?due=")).text
+    assert "Prazo histórico" in (await api_client.get(f"/leads/{ids.lead}")).text
+    assert await dashboard_24h() == 0
+
+
+async def test_object_item_scope_and_legal_filters_share_web_and_api(api_client, database):
+    ids = await _full_graph(database)
+    async with database.sessions() as session, session.begin():
+        procurement = await session.get_one(Procurement, ids.procurement)
+        procurement.government_sphere = "M"
+    scope = {
+        "object_query": "instalacao tecnica especializada",
+        "government_sphere": "M",
+        "contracting_form": "licitacao",
+        "licitation_modality": "pregao",
+    }
+    html = await api_client.get("/procurements", params=scope)
+    assert html.status_code == 200 and str(ids.procurement) in html.text
+    payload = await api_client.get("/api/procurements", params=scope)
+    assert payload.json()["total"] == 1
+    assert payload.json()["items"][0]["id"] == str(ids.procurement)
+    wrong_sphere = await api_client.get(
+        "/api/procurements", params={**scope, "government_sphere": "E"}
+    )
+    assert wrong_sphere.json()["total"] == 0
+    wrong_form = await api_client.get(
+        "/api/procurements", params={**scope, "contracting_form": "dispensa"}
+    )
+    assert wrong_form.json()["total"] == 0
+
+
+async def test_lead_keeps_public_or_technical_source_without_pncp_control(api_client, database):
+    ids = await _full_graph(database)
+    urls = (
+        ("https://compras.example/compra/123", "Abrir contratação na fonte oficial"),
+        ("https://dadosabertos.compras.gov.br/modulo-contratacoes/123", "Consultar dados técnicos"),
+    )
+    for url, label in urls:
+        async with database.sessions() as session, session.begin():
+            procurement = await session.get_one(Procurement, ids.procurement)
+            procurement.pncp_control_number = None
+            procurement.source_url = url
+        reply = await api_client.get(f"/leads/{ids.lead}")
+        soup = BeautifulSoup(reply.text, "html.parser")
+        link = soup.select_one(f'a[href="{url}"]')
+        assert link is not None and label in link.text
 
 
 async def test_search_and_review_continue_keep_the_same_queue(api_client, database):

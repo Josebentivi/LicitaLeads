@@ -88,6 +88,7 @@ class LeadScorer:
                 "DISQUALIFIED",
                 "PROPOSAL_REJECTED",
                 "INTENT_TO_APPEAL",
+                "APPEAL_WINDOW_OPENED",
                 "APPEAL_SUBMITTED",
                 "COUNTERARGUMENT_OPENED",
             },

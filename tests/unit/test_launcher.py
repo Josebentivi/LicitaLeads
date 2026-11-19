@@ -11,6 +11,8 @@ from contextlib import closing
 from pathlib import Path
 from types import SimpleNamespace
 
+from app.runtime_control import RuntimeChannel, atomic_json
+
 LAUNCHER_PATH = Path(__file__).resolve().parents[2] / "scripts" / "launcher.py"
 
 
@@ -23,6 +25,74 @@ def _load_launcher() -> object:
 
 
 launcher = _load_launcher()
+
+
+def test_control_file_retries_windows_reader_conflict(monkeypatch, tmp_path):
+    path = tmp_path / "launcher.json"
+    atomic_json(path, {"phase": "cancelling"})
+    replace = os.replace
+    attempts = 0
+
+    def conflicting_replace(source, target):
+        nonlocal attempts
+        if target == path:
+            attempts += 1
+            if attempts == 1:
+                error = PermissionError("arquivo aberto por um leitor")
+                error.winerror = 5
+                raise error
+        replace(source, target)
+
+    monkeypatch.setattr(os, "replace", conflicting_replace)
+    atomic_json(path, {"phase": "complete"})
+
+    assert attempts == 2
+    assert json.loads(path.read_text(encoding="utf-8")) == {"phase": "complete"}
+    assert not list(tmp_path.glob(".control-*"))
+
+
+def test_shutdown_supervisor_keeps_request_and_writes_only_phase_changes(monkeypatch, tmp_path):
+    channel = RuntimeChannel(tmp_path, "instance")
+    receipt = tmp_path / "receipt.json"
+    channel.write("manifest", {"receipt": str(receipt)})
+    channel.write("request", {"requested_at": 100})
+    channel.write("api", {"phase": "drained"})
+    atomic_json(receipt, {"cleanup_complete": True})
+    read, write = channel.read, channel.write
+    request_reads = 0
+    phases = []
+    clock = 100.0
+
+    def read_once(name):
+        nonlocal request_reads
+        if name == "request":
+            request_reads += 1
+            if request_reads > 1:
+                return {}
+        return read(name)
+
+    def record(name, value):
+        phases.append(value["phase"])
+        write(name, value)
+
+    def sleep(seconds):
+        nonlocal clock
+        clock += seconds
+
+    monkeypatch.setattr(channel, "read", read_once)
+    monkeypatch.setattr(channel, "write", record)
+    monkeypatch.setattr(
+        launcher, "time", SimpleNamespace(time=lambda: clock, monotonic=lambda: clock, sleep=sleep)
+    )
+    process = SimpleNamespace(
+        poll=lambda: 0 if channel.read("launcher").get("phase") == "exit" else None
+    )
+
+    assert launcher._wait_for_server(process, SimpleNamespace(channel=channel), None) == 0
+    assert request_reads == 1
+    assert phases == ["complete", "exit"]
+    stored = channel.receipt()
+    assert stored["cleanup_complete"] and stored["forced"] == [] and stored["finished_at"] > 100
 
 
 def test_venv_python_path_matches_platform() -> None:

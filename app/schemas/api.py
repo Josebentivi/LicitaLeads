@@ -39,6 +39,10 @@ class CrawlRunRequest(ApiModel):
     agency_cnpj: str | None = None
     unit_code: str | None = Field(default=None, min_length=1, max_length=30)
     keyword: str | None = None
+    object_query: str | None = Field(default=None, max_length=200)
+    object_preset: list[str] = Field(default_factory=list, max_length=30)
+    object_group: str | None = None
+    government_sphere: Literal["F", "E", "M", "D"] | None = None
     document_batch_size: int | None = Field(default=None, ge=1, le=500)
     discovery_kind: Literal["publication", "update", "open_proposals"] = "publication"
     force_refresh: bool = False

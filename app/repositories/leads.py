@@ -18,7 +18,7 @@ from app.models import (
     OutreachDraft,
     ProcurementEvent,
 )
-from app.models.enums import DeadlineStatus, LeadStatus, ProcurementEventType
+from app.models.enums import ContactType, DeadlineStatus, LeadStatus, ProcurementEventType
 from app.repositories.base import BaseRepository, Page
 from app.services.participation_integrity import lead_current
 
@@ -79,6 +79,7 @@ class LeadRepository(BaseRepository[Lead]):
                 select(CompanyContact.id).where(
                     CompanyContact.company_id == Lead.company_id,
                     CompanyContact.is_corporate.is_(True),
+                    CompanyContact.contact_type != ContactType.ADDRESS,
                 )
             )
             statement = statement.where(contact_exists if has_contact else ~contact_exists)

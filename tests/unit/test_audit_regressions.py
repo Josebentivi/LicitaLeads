@@ -184,6 +184,7 @@ async def test_discovery_uses_remaining_page_metadata():
             "orgaoEntidadeCnpj": "00000000000191",
             "unidadeOrgaoUfSigla": "MA",
             "codigoModalidade": 5,
+            "modalidadeIdPncp": 6,
         }
         return httpx.Response(
             200, json={"resultado": [row], "paginasRestantes": 2 - page, "totalRegistros": 2}

@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from datetime import UTC, datetime
+from datetime import datetime
 from decimal import Decimal
 from typing import Any, Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.serialization import model_dict
@@ -24,15 +24,17 @@ from app.models import (
 )
 from app.models.enums import ContractingType
 from app.repositories.procurements import (
-    _status_category_condition,
-    company_cnpj_condition,
+    ProcurementRepository,
     participant_evidence_is_current,
 )
-from app.services.identifiers import canonical_modality, is_valid_cnpj, normalize_cnpj
+from app.services.identifiers import is_valid_cnpj, normalize_cnpj
+from app.services.procurement_search import ObjectScope
 
 router = APIRouter(prefix="/procurements", tags=["procurements"])
 
-StatusCategory = Literal["aberta", "encerrada", "cancelada", "suspensa", "desconhecida"]
+StatusCategory = Literal[
+    "aberta", "encerrada", "cancelada", "suspensa", "desconhecida", "prazo_resposta_aberto"
+]
 
 
 def _normalized_agency_cnpj(value: str | None) -> str | None:
@@ -53,63 +55,6 @@ def _normalized_company_cnpj(value: str | None) -> str | None:
     return normalized
 
 
-def _filters(
-    statement,
-    *,
-    uf: str | None,
-    municipality: str | None,
-    agency: str | None,
-    modality: list[str] | None,
-    published_from,
-    published_to,
-    agency_cnpj: str | None = None,
-    company_cnpj: str | None = None,
-    procurement_type: ContractingType | None = None,
-    is_srp: bool | None = None,
-    value_min: Decimal | None = None,
-    value_max: Decimal | None = None,
-    status_category: StatusCategory | None = None,
-    status: str | None = None,
-    phase: str | None = None,
-):
-    if uf:
-        statement = statement.where(Procurement.uf == uf.upper())
-    if municipality:
-        statement = statement.where(Procurement.municipality.ilike(f"%{municipality}%"))
-    if agency:
-        statement = statement.where(Procurement.agency_name.ilike(f"%{agency}%"))
-    if agency_cnpj:
-        statement = statement.where(Procurement.agency_cnpj == agency_cnpj)
-    if company_cnpj:
-        statement = statement.where(company_cnpj_condition(company_cnpj))
-    modality_keys = [
-        key for key in (canonical_modality(value) for value in (modality or [])) if key is not None
-    ]
-    if modality_keys:
-        statement = statement.where(Procurement.modality_key.in_(modality_keys))
-    if published_from:
-        statement = statement.where(Procurement.publication_at >= published_from)
-    if published_to:
-        statement = statement.where(Procurement.publication_at <= published_to)
-    if status:
-        statement = statement.where(Procurement.status == status)
-    if status_category:
-        statement = statement.where(
-            *_status_category_condition(status_category, now=datetime.now(UTC))
-        )
-    if phase:
-        statement = statement.where(Procurement.current_phase == phase)
-    if procurement_type:
-        statement = statement.where(Procurement.procurement_type == procurement_type.value)
-    if is_srp is not None:
-        statement = statement.where(Procurement.is_srp.is_(is_srp))
-    if value_min is not None:
-        statement = statement.where(Procurement.estimated_value >= value_min)
-    if value_max is not None:
-        statement = statement.where(Procurement.estimated_value <= value_max)
-    return statement
-
-
 @router.get("")
 async def list_procurements(
     page: int = Query(1, ge=1),
@@ -119,7 +64,21 @@ async def list_procurements(
     agency: str | None = None,
     agency_cnpj: str | None = None,
     company_cnpj: str | None = None,
+    company_participation_only: bool = False,
     modality: list[str] | None = Query(None),
+    contracting_form: Literal["licitacao", "dispensa", "inexigibilidade"] | None = None,
+    licitation_modality: Literal[
+        "pregao", "concorrencia", "concurso", "leilao", "dialogo_competitivo"
+    ]
+    | None = None,
+    auxiliary_procedure: Literal[
+        "credenciamento", "pre_qualificacao", "manifestacao_de_interesse", "registro_cadastral"
+    ]
+    | None = None,
+    government_sphere: str | None = None,
+    object_query: str | None = Query(None, max_length=200),
+    object_preset: list[str] | None = Query(None),
+    object_group: str | None = None,
     published_from: datetime | None = None,
     published_to: datetime | None = None,
     procurement_status: str | None = Query(None, alias="status"),
@@ -134,55 +93,41 @@ async def list_procurements(
     """List canonical procurements with common operational filters."""
     normalized_agency_cnpj = _normalized_agency_cnpj(agency_cnpj)
     normalized_company_cnpj = _normalized_company_cnpj(company_cnpj)
-    base = _filters(
-        select(Procurement),
-        uf=uf,
-        municipality=municipality,
-        agency=agency,
-        modality=modality,
-        published_from=published_from,
-        published_to=published_to,
-        agency_cnpj=normalized_agency_cnpj,
-        company_cnpj=normalized_company_cnpj,
-        procurement_type=procurement_type,
-        is_srp=is_srp,
-        value_min=value_min,
-        value_max=value_max,
-        status_category=status_category,
-        status=procurement_status,
-        phase=phase,
-    )
-    count_statement = _filters(
-        select(func.count()).select_from(Procurement),
-        uf=uf,
-        municipality=municipality,
-        agency=agency,
-        modality=modality,
-        published_from=published_from,
-        published_to=published_to,
-        agency_cnpj=normalized_agency_cnpj,
-        company_cnpj=normalized_company_cnpj,
-        procurement_type=procurement_type,
-        is_srp=is_srp,
-        value_min=value_min,
-        value_max=value_max,
-        status_category=status_category,
-        status=procurement_status,
-        phase=phase,
-    )
-    total = int((await db.scalar(count_statement)) or 0)
-    rows = (
-        await db.scalars(
-            base.order_by(Procurement.publication_at.desc().nullslast())
-            .offset((page - 1) * page_size)
-            .limit(page_size)
+    try:
+        scope = ObjectScope.build(
+            object_query, object_preset or (), object_group, government_sphere
         )
-    ).all()
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    result = await ProcurementRepository(db).list_filtered(
+        page=page,
+        page_size=page_size,
+        uf=uf,
+        municipality=municipality,
+        agency=agency,
+        modalities=modality,
+        published_from=published_from,
+        published_to=published_to,
+        agency_cnpj=normalized_agency_cnpj,
+        company_cnpj=normalized_company_cnpj,
+        company_participation_only=company_participation_only,
+        contracting_form=contracting_form,
+        licitation_modality=licitation_modality,
+        auxiliary_procedure=auxiliary_procedure,
+        object_scope=scope,
+        procurement_type=procurement_type,
+        is_srp=is_srp,
+        value_min=value_min,
+        value_max=value_max,
+        status_category=status_category,
+        status=procurement_status,
+        phase=phase,
+    )
     return {
-        "items": [model_dict(row) for row in rows],
-        "page": page,
-        "page_size": page_size,
-        "total": total,
+        "items": [model_dict(row) for row in result.items],
+        "page": result.page,
+        "page_size": result.page_size,
+        "total": result.total,
     }
 
 

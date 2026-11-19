@@ -496,8 +496,17 @@ async def review_suggestion(
             .limit(1)
         ):
             raise ValueError("Escolha uma participante comprovada desta contratação")
-        from app.services.event_detection.detector import EventDetector
-        from app.services.event_detection.types import DetectedEvent, DocumentEvidence
+        from app.services.deadlines.response import RESPONSE_OPENING_EVENT_TYPES
+        from app.services.event_detection.detector import (
+            EventDetector,
+            event_act_excerpt,
+            scope_numbers,
+        )
+        from app.services.event_detection.types import (
+            CompanyReference,
+            DetectedEvent,
+            DocumentEvidence,
+        )
         from app.services.ingestion.processor import DocumentProcessingService
         from app.services.llm.analyzer import LLMEventAnalysis
 
@@ -506,6 +515,14 @@ async def review_suggestion(
         proc = await db.get(Procurement, row.procurement_id)
         if not doc or not proc:
             raise ValueError("Evidência indisponível")
+        target = None
+        if analysis.event_type.value in RESPONSE_OPENING_EVENT_TYPES:
+            recipient = await db.get(Company, company_id)
+            if recipient is None:
+                raise ValueError("Empresa destinatária indisponível")
+            target = CompanyReference(
+                str(recipient.id), recipient.legal_name or recipient.normalized_name, recipient.cnpj
+            )
 
         proofs = list(
             (
@@ -521,36 +538,38 @@ async def review_suggestion(
         )
         if len(proofs) != len(set(row.evidence_ids)):
             raise ValueError("Evidência indisponível ou inativa")
-        detector = EventDetector()
-        proof = next(
+        selection = next(
             (
-                p
+                (p, act)
                 for p in proofs
-                if any(
-                    event.event_type == analysis.event_type
-                    for event in detector.detect(
-                        DocumentEvidence(
-                            text=p.text_excerpt,
-                            document_type=doc.document_type,
-                            document_title=doc.title,
-                        )
+                if (
+                    act := event_act_excerpt(
+                        analysis.event_type.value,
+                        p.text_excerpt,
+                        company=target,
+                        title=doc.title,
+                        document_type=doc.document_type,
+                        locator=p.locator,
                     )
                 )
             ),
             None,
         )
-        if proof is None:
+        if selection is None:
             raise ValueError("Nenhuma citação comprova o ato sugerido")
+        proof, act = selection
         if proof.document_chunk_id is None:
             raise ValueError("Evidência indisponível")
         chunk = await db.get(DocumentChunk, proof.document_chunk_id)
         if chunk is None or chunk.document_id != doc.id:
             raise ValueError("Evidência indisponível")
+        category = EventDetector.classify_reason(act)
+        items = scope_numbers(act, "item")
         detected = DetectedEvent(
             event_type=analysis.event_type,
             raw_description=proof.text_excerpt or "",
-            normalized_reason=analysis.reason_summary,
-            reason_category=analysis.reason_category,
+            normalized_reason=EventDetector.extract_reason(act, category),
+            reason_category=category,
             evidence=DocumentEvidence(
                 text=proof.text_excerpt or "",
                 source_url=proof.source_url,
@@ -563,7 +582,7 @@ async def review_suggestion(
             ),
             confidence=min(analysis.confidence, 0.9),
             requires_manual_review=True,
-            item_number=analysis.item_number,
+            item_number=next(iter(items)) if len(items) == 1 else None,
             occurred_at=analysis.event_date,
         )
         service = DocumentProcessingService(settings)

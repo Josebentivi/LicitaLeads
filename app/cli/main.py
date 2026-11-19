@@ -4,17 +4,25 @@ from __future__ import annotations
 
 import asyncio
 import json
+from dataclasses import replace
 from datetime import date
 from pathlib import Path
 from typing import Annotated
 
 import typer
 
+from app.async_runtime import run_database_async
 from app.config import get_settings
 from app.database import async_session_factory
+from app.services.collection_periods import (
+    normalize_discovery_kind,
+    use_calendar_slices,
+    validate_collection_period,
+)
 from app.services.ingestion import (
     IngestionPipeline,
     PipelineRequest,
+    PipelineSummary,
     backfill_procurement_fields,
 )
 from app.services.ingestion.audit import audit_sources as run_source_audit
@@ -23,6 +31,7 @@ from app.services.ingestion.municipal_payments import run_selected_municipal_sou
 from app.services.ingestion.payment_import import PaymentImportService
 from app.services.ingestion.payments import PaymentIngestionService
 from app.services.ingestion.processor import DocumentProcessingService
+from app.services.procurement_search import ObjectScope
 
 app = typer.Typer(
     name="licita-lead",
@@ -89,7 +98,7 @@ def piloto_tce_ma_command(
         ) from exc
     output = saida.resolve()
     try:
-        report = asyncio.run(
+        report = run_database_async(
             run_tce_ma_pilot(
                 settings=get_settings(),
                 output=output,
@@ -122,7 +131,7 @@ def enqueue_llm_command(
         raise typer.BadParameter("Informe --all-extracted")
     from app.services.llm.queue import LLMQueueService
 
-    result = asyncio.run(LLMQueueService().backfill())
+    result = run_database_async(LLMQueueService().backfill())
     typer.echo(json.dumps(result, ensure_ascii=False))
 
 
@@ -136,17 +145,44 @@ def _request(
     document_batch_size: int | None = None,
     discovery_kind: str = "publication",
     force_refresh: bool = False,
+    start_date: str | None = None,
+    end_date: str | None = None,
+    object_query: str | None = None,
+    object_preset: list[str] | None = None,
+    object_group: str | None = None,
+    government_sphere: str | None = None,
 ) -> PipelineRequest:
     settings = get_settings()
+    try:
+        start = date.fromisoformat(start_date) if start_date else None
+        end = date.fromisoformat(end_date) if end_date else None
+    except ValueError as exc:
+        raise typer.BadParameter("Informe as datas no formato AAAA-MM-DD.") from exc
+    try:
+        discovery_kind = normalize_discovery_kind(discovery_kind)
+        publication = discovery_kind == "publication"
+        if publication:
+            validate_collection_period(start, end, timezone=settings.timezone, days=days)
+        elif (start is None) != (end is None) or (start and end and start > end):
+            raise ValueError("Informe as duas datas em ordem crescente.")
+        scope = ObjectScope.build(
+            object_query, object_preset or (), object_group, government_sphere
+        )
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
     return PipelineRequest(
         connector=connector,
         uf=uf.upper(),
         days=days,
+        start_date=start,
+        end_date=end,
         modalities=tuple(modalities or settings.default_modalities),
         process_documents=process_documents,
         document_batch_size=document_batch_size,
         discovery_kind=discovery_kind,
         force_refresh=force_refresh,
+        object_scope=scope,
+        calendar_months=publication and use_calendar_slices(start, end, days),
     )
 
 
@@ -337,7 +373,7 @@ def reconcile_data_command(
         except MaintenanceBlocked as exc:
             raise typer.BadParameter("reconciliação bloqueada: " + str(exc)) from exc
 
-    result = asyncio.run(run())
+    result = run_database_async(run())
     typer.echo(json.dumps(result, ensure_ascii=False, indent=2))
 
 
@@ -345,9 +381,25 @@ def reconcile_data_command(
 def audit_sources() -> None:
     """Compare live official OpenAPI documents with the known contract."""
 
-    result = asyncio.run(run_source_audit())
+    result = run_database_async(run_source_audit())
     typer.echo(f"Relatório: {result.report_path}")
     typer.echo(f"Rotas ausentes: {result.missing_paths}; avisos: {len(result.warnings)}")
+
+
+def _echo_procurement_diagnostics(result: PipelineSummary) -> None:
+    if result.diagnostics:
+        typer.echo("Diagnósticos: " + " | ".join(result.diagnostics), err=True)
+    for name, source in result.source_results.items():
+        label = {"compras_gov": "Compras.gov.br", "pncp": "PNCP"}.get(name, name)
+        if missing := source.get("unclassified_modality_rows"):
+            typer.echo(
+                f"{label} excluiu {missing} registro(s) sem a variante de modalidade publicada.",
+                err=True,
+            )
+        if unsupported := source.get("unsupported_modalities"):
+            typer.echo(
+                f"{label} tem cobertura indisponível para {', '.join(unsupported)}.", err=True
+            )
 
 
 @app.command()
@@ -361,6 +413,12 @@ def crawl(
     discovery_kind: Annotated[
         str, typer.Option("--discovery-kind", help="publication, update ou open_proposals")
     ] = "publication",
+    start_date: Annotated[str | None, typer.Option("--start-date")] = None,
+    end_date: Annotated[str | None, typer.Option("--end-date")] = None,
+    object_query: Annotated[str | None, typer.Option("--object")] = None,
+    object_preset: Annotated[list[str] | None, typer.Option("--object-preset")] = None,
+    object_group: Annotated[str | None, typer.Option("--object-group")] = None,
+    government_sphere: Annotated[str | None, typer.Option("--government-sphere")] = None,
 ) -> None:
     """Collect structured records without downloading documents."""
 
@@ -372,25 +430,21 @@ def crawl(
         process_documents=False,
         discovery_kind=discovery_kind,
         force_refresh=force_refresh,
+        start_date=start_date,
+        end_date=end_date,
+        object_query=object_query,
+        object_preset=object_preset,
+        object_group=object_group,
+        government_sphere=government_sphere,
     )
     if max_pages is not None:
-        request = PipelineRequest(
-            connector=request.connector,
-            uf=request.uf,
-            days=request.days,
-            modalities=request.modalities,
-            max_pages=max_pages,
-            process_documents=False,
-            discovery_kind=request.discovery_kind,
-            force_refresh=request.force_refresh,
-        )
-    result = asyncio.run(IngestionPipeline().run(request))
+        request = replace(request, max_pages=max_pages)
+    result = run_database_async(IngestionPipeline().run(request))
     typer.echo(
         f"run={result.run_id} status={result.status.value} encontrados={result.records_found} "
         f"criados={result.records_created} atualizados={result.records_updated}"
     )
-    if result.diagnostics:
-        typer.echo("Diagnósticos: " + " | ".join(result.diagnostics), err=True)
+    _echo_procurement_diagnostics(result)
 
 
 @app.command("crawl-atas")
@@ -413,7 +467,7 @@ def crawl_atas(
         process_documents=False,
         max_pages=max_pages,
     )
-    result = asyncio.run(IngestionPipeline().run(request))
+    result = run_database_async(IngestionPipeline().run(request))
     typer.echo(
         f"run={result.run_id} status={result.status.value} encontrados={result.records_found} "
         f"criados={result.records_created} atualizados={result.records_updated}"
@@ -466,7 +520,7 @@ def crawl_contracts(
         contract_details=not skip_details,
         max_pages=max_pages,
     )
-    result = asyncio.run(IngestionPipeline().run(request))
+    result = run_database_async(IngestionPipeline().run(request))
     typer.echo(
         f"run={result.run_id} status={result.status.value} encontrados={result.records_found} "
         f"criados={result.records_created} atualizados={result.records_updated}"
@@ -487,7 +541,7 @@ def import_payments(
     """Importa pagamentos federais do Portal da Transparencia."""
 
     typer.echo("Consultando o Portal da Transparencia...")
-    result = asyncio.run(
+    result = run_database_async(
         PaymentIngestionService().run(company_cnpj=company_cnpj, year=year, phase=phase)
     )
     typer.echo(
@@ -511,11 +565,11 @@ def import_payments_csv(
     content = arquivo.read_bytes()
     service = PaymentImportService()
     try:
-        result = asyncio.run(
+        result = run_database_async(
             service.import_bytes(content, filename=arquivo.name, source_name=fonte)
         )
     finally:
-        asyncio.run(service.aclose())
+        run_database_async(service.aclose())
     typer.echo(
         f"criados={result.created} atualizados={result.updated} conciliados={result.linked} "
         f"nao_conciliados={result.unlinked} erros={len(result.errors)}"
@@ -555,7 +609,7 @@ def crawl_payments_municipal(
             source_ids = [get_municipal_source(normalized).id]
         except ValueError as exc:
             raise typer.BadParameter(str(exc)) from exc
-    results = asyncio.run(
+    results = run_database_async(
         run_selected_municipal_sources(
             year=year,
             source_ids=source_ids,
@@ -588,7 +642,7 @@ def backfill_fields(
 ) -> None:
     """Recupera SRP/amparo legal/rota de contratação dos payloads já coletados."""
 
-    result = asyncio.run(backfill_procurement_fields(limit=limit))
+    result = run_database_async(backfill_procurement_fields(limit=limit))
     typer.echo(
         f"respostas={result.scanned_records} contratações_atualizadas="
         f"{result.updated_procurements} ignoradas={result.skipped}"
@@ -603,7 +657,7 @@ def process_documents(
 ) -> None:
     """Download and extract pending official documents."""
 
-    result = asyncio.run(DocumentProcessingService().process_pending(limit=limit))
+    result = run_database_async(DocumentProcessingService().process_pending(limit=limit))
     typer.echo(
         f"processados={result.documents_processed} falhas={result.documents_failed} "
         f"eventos={result.events_created} participantes={result.participants_created} "
@@ -624,7 +678,7 @@ def detect_events(
         finally:
             await service.aclose()
 
-    result = asyncio.run(execute())
+    result = run_database_async(execute())
     typer.echo(
         f"documentos={result.documents_processed} eventos={result.events_created} "
         f"participantes={result.participants_created} leads={result.leads_created}"
@@ -642,7 +696,7 @@ def calculate_deadlines() -> None:
         finally:
             await service.aclose()
 
-    result = asyncio.run(execute())
+    result = run_database_async(execute())
     typer.echo(f"leads novos={result.leads_created}; prazos existentes foram atualizados")
 
 
@@ -655,7 +709,7 @@ def enrich_contacts(
 ) -> None:
     """Visit only pre-evidenced corporate domains and respect robots.txt."""
 
-    result = asyncio.run(ContactEnrichmentService().run(force=force))
+    result = run_database_async(ContactEnrichmentService().run(force=force))
     typer.echo(
         f"empresas={result.companies_checked} criados={result.contacts_created} "
         f"atualizados={result.contacts_updated} erros={result.errors}"
@@ -673,7 +727,7 @@ def create_leads() -> None:
         finally:
             await service.aclose()
 
-    result = asyncio.run(execute())
+    result = run_database_async(execute())
     typer.echo(f"leads novos={result.leads_created}; demais candidatos atualizados")
 
 
@@ -687,6 +741,12 @@ def run_pipeline(
     document_batch_size: Annotated[int | None, typer.Option("--document-batch-size", min=1)] = None,
     skip_documents: Annotated[bool, typer.Option("--skip-documents")] = False,
     force_refresh: Annotated[bool, typer.Option("--force-refresh")] = False,
+    start_date: Annotated[str | None, typer.Option("--start-date")] = None,
+    end_date: Annotated[str | None, typer.Option("--end-date")] = None,
+    object_query: Annotated[str | None, typer.Option("--object")] = None,
+    object_preset: Annotated[list[str] | None, typer.Option("--object-preset")] = None,
+    object_group: Annotated[str | None, typer.Option("--object-group")] = None,
+    government_sphere: Annotated[str | None, typer.Option("--government-sphere")] = None,
 ) -> None:
     """Run collection through document/event/deadline/lead creation."""
 
@@ -701,25 +761,21 @@ def run_pipeline(
         process_documents=not skip_documents,
         document_batch_size=document_batch_size,
         force_refresh=force_refresh,
+        start_date=start_date,
+        end_date=end_date,
+        object_query=object_query,
+        object_preset=object_preset,
+        object_group=object_group,
+        government_sphere=government_sphere,
     )
     if max_pages is not None:
-        request = PipelineRequest(
-            connector=request.connector,
-            uf=request.uf,
-            days=request.days,
-            modalities=request.modalities,
-            max_pages=max_pages,
-            process_documents=request.process_documents,
-            document_batch_size=request.document_batch_size,
-            force_refresh=request.force_refresh,
-        )
-    result = asyncio.run(IngestionPipeline().run(request))
+        request = replace(request, max_pages=max_pages)
+    result = run_database_async(IngestionPipeline().run(request))
     typer.echo(
         f"run={result.run_id} status={result.status.value} encontrados={result.records_found} "
         f"criados={result.records_created} atualizados={result.records_updated}"
     )
-    if result.diagnostics:
-        typer.echo("Diagnósticos: " + " | ".join(result.diagnostics), err=True)
+    _echo_procurement_diagnostics(result)
 
 
 @app.command("export-leads")
@@ -762,7 +818,7 @@ def export_leads(
             if temporary is not None:
                 temporary.unlink(missing_ok=True)
 
-    count = asyncio.run(write())
+    count = run_database_async(write())
     typer.echo(f"{count} lead(s) exportados para {destination.resolve()}")
 
 
@@ -781,6 +837,6 @@ def continue_crawl_command(run_id: str) -> None:
         typer.echo(f"run={child.id} lote={child.batch_id}")
 
     try:
-        asyncio.run(run())
+        run_database_async(run())
     except (ValueError, LookupError) as exc:
         raise typer.BadParameter(str(exc)) from exc

@@ -59,9 +59,13 @@ class DeadlineEngine:
             trigger_was_naive = trigger_was_naive or deadline_naive
         elif request.document_deadline_at:
             deadline_local, deadline_naive = _aware(request.document_deadline_at, timezone)
-            explicit_local = deadline_local
             method = DeadlineMethod.DOCUMENT_EXTRACTED
-            confidence = 0.90
+            if request.document_deadline_estimated:
+                estimated_local = deadline_local
+                confidence = 0.65
+            else:
+                explicit_local = deadline_local
+                confidence = 0.90
             trigger_was_naive = trigger_was_naive or deadline_naive
         elif request.edital_business_days is not None and trigger_local:
             business_days = request.edital_business_days
@@ -92,6 +96,8 @@ class DeadlineEngine:
         review_reasons: list[str] = []
         if method is DeadlineMethod.LEGAL_ESTIMATE:
             review_reasons.append("prazo é estimativa jurídica")
+        if method is DeadlineMethod.DOCUMENT_EXTRACTED and request.document_deadline_estimated:
+            review_reasons.append("horário ou marco inicial do documento exige conferência")
         if (
             method in {DeadlineMethod.EDITAL_RULE, DeadlineMethod.LEGAL_ESTIMATE}
             and not request.local_holiday_calendar_complete
@@ -179,7 +185,11 @@ class DeadlineEngine:
         if method is DeadlineMethod.EXPLICIT:
             lines.append("Regra utilizada: prazo explicitamente publicado.")
         elif method is DeadlineMethod.DOCUMENT_EXTRACTED:
-            lines.append("Regra utilizada: prazo extraído de documento oficial.")
+            lines.append(
+                "Regra utilizada: estimativa a partir de trecho de documento."
+                if request.document_deadline_estimated
+                else "Regra utilizada: prazo extraído de documento oficial."
+            )
         elif method is DeadlineMethod.EDITAL_RULE:
             lines.append(f"Regra utilizada: {business_days} dias úteis previstos no edital.")
         elif method is DeadlineMethod.LEGAL_ESTIMATE:
@@ -195,6 +205,10 @@ class DeadlineEngine:
             label = (
                 "Prazo estimado"
                 if method in {DeadlineMethod.EDITAL_RULE, DeadlineMethod.LEGAL_ESTIMATE}
+                or (
+                    method is DeadlineMethod.DOCUMENT_EXTRACTED
+                    and request.document_deadline_estimated
+                )
                 else "Prazo"
             )
             lines.append(f"{label}: {_pt_datetime(deadline, timezone)}.")

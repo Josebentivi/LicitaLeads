@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from datetime import UTC, datetime
 from decimal import Decimal
 from uuid import UUID
@@ -9,6 +10,7 @@ from uuid import UUID
 from sqlalchemy import Select, and_, case, exists, false, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
+from sqlalchemy.sql.elements import ColumnElement
 
 from app.models import (
     Company,
@@ -20,13 +22,24 @@ from app.models import (
     PriceRegistryItem,
     Procurement,
     ProcurementEvent,
+    ProcurementItem,
     ProcurementSource,
     SourceRecord,
 )
 from app.models.enums import ParticipantStatus, ProcurementEventType
 from app.repositories.base import BaseRepository, Page
 from app.repositories.company_origins import companies_with_activity, page_activity
-from app.services.identifiers import canonical_modality
+from app.services.identifiers import (
+    AUXILIARY_PROCEDURES,
+    DIRECT_CONTRACTING_MODALITIES,
+    LICITATION_MODALITIES,
+    canonical_modality,
+)
+from app.services.procurement_search import (
+    GOVERNMENT_SPHERES,
+    ObjectScope,
+    normalized_search_text,
+)
 from app.services.procurement_status import (
     CANCELLED_TOKENS as _STATUS_CANCELLED_TOKENS,
 )
@@ -54,7 +67,7 @@ def participant_evidence_is_current():
     return participant_current()
 
 
-def company_cnpj_condition(company_cnpj: str):
+def company_cnpj_condition(company_cnpj: str, *, participation_only: bool = False):
     """Match procurements linked to a company by participation or ARP supply.
 
     Participations cover awarded results and document-derived facts; the price
@@ -71,6 +84,8 @@ def company_cnpj_condition(company_cnpj: str):
             participant_evidence_is_current(),
         )
     )
+    if participation_only:
+        return participant_link
     price_registry_link = exists(
         select(PriceRegistryItem.id)
         .join(
@@ -94,6 +109,10 @@ def company_cnpj_condition(company_cnpj: str):
 def _status_category_condition(category: str, *, now: datetime):
     """Translate an operational status category into honest SQL conditions."""
 
+    if category == "prazo_resposta_aberto":
+        from app.services.opportunity_workspace import procurement_has_open_response_deadline
+
+        return (procurement_has_open_response_deadline(now),)
     cancelled = _status_tokens_condition(_STATUS_CANCELLED_TOKENS)
     suspended = _status_tokens_condition(_STATUS_SUSPENDED_TOKENS)
     closed_tokens = _status_tokens_condition(_STATUS_CLOSED_TOKENS)
@@ -134,6 +153,53 @@ def _status_category_condition(category: str, *, now: datetime):
             ~closed_tokens,
         )
     raise ValueError(f"unsupported status category: {category}")
+
+
+def procurement_classification_conditions(
+    *,
+    contracting_form: str | None = None,
+    licitation_modality: str | None = None,
+    auxiliary_procedure: str | None = None,
+):
+    conditions: list[ColumnElement[bool]] = []
+    if contracting_form == "licitacao":
+        keys = tuple(key for _, variants in LICITATION_MODALITIES.values() for key in variants)
+        conditions.append(
+            or_(Procurement.procurement_type == "licitacao", Procurement.modality_key.in_(keys))
+        )
+    elif contracting_form:
+        conditions.append(
+            Procurement.modality_key.in_(DIRECT_CONTRACTING_MODALITIES.get(contracting_form, ()))
+        )
+    if licitation_modality:
+        _, keys = LICITATION_MODALITIES.get(licitation_modality, ("", ()))
+        conditions.append(Procurement.modality_key.in_(keys))
+    if auxiliary_procedure:
+        conditions.append(
+            Procurement.modality_key == auxiliary_procedure
+            if auxiliary_procedure in AUXILIARY_PROCEDURES
+            else false()
+        )
+    return conditions
+
+
+def _object_text_condition(terms: tuple[str, ...]):
+    # Stored projections use the exact same normalization as the collector.
+    # Plain spaces enforce word boundaries independently of the database locale.
+    pattern = " (?:" + "|".join(re.escape(term) for term in terms) + ") "
+    return or_(
+        Procurement._object_description_search.regexp_match(pattern),
+        Procurement._object_complement_search.regexp_match(pattern),
+        exists(
+            select(ProcurementItem.id).where(
+                ProcurementItem.procurement_id == Procurement.id,
+                or_(
+                    ProcurementItem._description_search.regexp_match(pattern),
+                    ProcurementItem._summary_description_search.regexp_match(pattern),
+                ),
+            )
+        ),
+    )
 
 
 class ProcurementRepository(BaseRepository[Procurement]):
@@ -245,8 +311,13 @@ class ProcurementRepository(BaseRepository[Procurement]):
         agency: str | None = None,
         agency_cnpj: str | None = None,
         company_cnpj: str | None = None,
+        company_participation_only: bool = False,
         modality: str | None = None,
         modalities: list[str] | None = None,
+        contracting_form: str | None = None,
+        licitation_modality: str | None = None,
+        auxiliary_procedure: str | None = None,
+        object_scope: ObjectScope | None = None,
         published_from: datetime | None = None,
         published_to: datetime | None = None,
         status: str | None = None,
@@ -288,7 +359,9 @@ class ProcurementRepository(BaseRepository[Procurement]):
         if agency_cnpj:
             statement = statement.where(Procurement.agency_cnpj == agency_cnpj)
         if company_cnpj:
-            statement = statement.where(company_cnpj_condition(company_cnpj))
+            statement = statement.where(
+                company_cnpj_condition(company_cnpj, participation_only=company_participation_only)
+            )
         selected_modalities = [
             key
             for key in (canonical_modality(value) for value in (modalities or []))
@@ -301,6 +374,28 @@ class ProcurementRepository(BaseRepository[Procurement]):
             statement = statement.where(
                 Procurement.modality_key == modality_key if modality_key is not None else false()
             )
+        statement = statement.where(
+            *procurement_classification_conditions(
+                contracting_form=contracting_form,
+                licitation_modality=licitation_modality,
+                auxiliary_procedure=auxiliary_procedure,
+            )
+        )
+        if object_scope:
+            sphere = object_scope.government_sphere
+            if sphere:
+                statement = statement.where(
+                    func.upper(func.trim(Procurement.government_sphere)).in_(
+                        (sphere, GOVERNMENT_SPHERES[sphere].upper())
+                    )
+                )
+            for terms in (
+                (normalized_search_text(object_scope.query),) if object_scope.query else (),
+                object_scope.preset_terms,
+                object_scope.group_terms,
+            ):
+                if terms:
+                    statement = statement.where(_object_text_condition(terms))
         if published_from:
             statement = statement.where(Procurement.publication_at >= published_from)
         if published_to:
@@ -320,7 +415,9 @@ class ProcurementRepository(BaseRepository[Procurement]):
             statement = statement.where(Procurement.estimated_value >= value_min)
         if value_max is not None:
             statement = statement.where(Procurement.estimated_value <= value_max)
-        statement = statement.order_by(Procurement.publication_at.desc(), Procurement.id)
+        statement = statement.order_by(
+            Procurement.publication_at.desc().nullslast(), Procurement.id
+        )
         return await self.page(statement, page=page, page_size=page_size)
 
 

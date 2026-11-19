@@ -61,6 +61,16 @@ from app.services.contacts.domains import (
     extract_email_candidates,
 )
 from app.services.deadlines import BrazilBusinessCalendar, DeadlineEngine, DeadlineRequest
+from app.services.deadlines.response import (
+    OFFICIAL_RESPONSE_DEADLINE_TYPES,
+    RESPONSE_ACT_OBSERVATION,
+    RESPONSE_INTERRUPTION_EVENT_TYPES,
+    RESPONSE_OPENING_EVENT_TYPES,
+    RESPONSE_PROOF_VERSION,
+    RESPONSE_SCOPE_OBSERVATION,
+    response_scope,
+    verified_event_response_deadline,
+)
 from app.services.documents import DocumentExtractor
 from app.services.documents.identity import (
     complete_content_version,
@@ -85,6 +95,12 @@ from app.services.event_detection import (
     EventDetector,
     ParticipantDetector,
     associate_company,
+)
+from app.services.event_detection.detector import (
+    EventLiteralAct,
+    event_act_excerpt,
+    event_literal_act,
+    scope_numbers,
 )
 from app.services.identifiers import (
     is_valid_cnpj,
@@ -1430,6 +1446,7 @@ class DocumentProcessingService:
         latest_event = await latest_procurement_event(session, procurement.id)
         event_count = participant_count = lead_count = 0
         pending_evaluations: dict[UUID, ProcurementEvent] = {}
+        new_events: set[UUID] = set()
         pages: list[DocumentEvidence] = []
         for chunk in chunks:
             source_evidence = DocumentEvidence(
@@ -1512,6 +1529,8 @@ class DocumentProcessingService:
                 await refresh_procurement_phase(session, procurement)
                 if event.company_id:
                     pending_evaluations[event.id] = event
+                    if created:
+                        new_events.add(event.id)
 
             if self.settings.contact_domain_discovery_enabled:
                 await self._discover_company_domains(
@@ -1521,7 +1540,11 @@ class DocumentProcessingService:
 
         await persist_values(session, document, pages)
         for event in pending_evaluations.values():
-            lead_count += int(await self._deadline_and_lead(session, procurement, event))
+            lead_count += int(
+                await self._deadline_and_lead(
+                    session, procurement, event, verify_response_deadline=event.id in new_events
+                )
+            )
         await enqueue_document(session, document, self.settings, run_id=self.crawl_run_id)
         return event_count, participant_count, lead_count
 
@@ -1651,7 +1674,6 @@ class DocumentProcessingService:
 
         from app.models.llm_review import LLMEventCitation, LLMSuggestion
         from app.services.event_detection.authority import assertion_diagnostic
-        from app.services.event_detection.detector import _EVENT_PATTERNS
         from app.services.llm.analyzer import attribution_status
         from app.services.llm.queue import digest, document_snapshot
 
@@ -1723,7 +1745,25 @@ class DocumentProcessingService:
                 citations.append(
                     await self._evidence(session, procurement, document, member, local)
                 )
-                located.append((quote, member))
+                claim = (
+                    CompanyReference(
+                        known_party_id, analysis.company_name or "", analysis.company_cnpj
+                    )
+                    if analysis.company_name or analysis.company_cnpj
+                    else None
+                )
+                act = event_act_excerpt(
+                    analysis.event_type.value,
+                    match.group(),
+                    company=claim,
+                    title=document.title,
+                    document_type=document.document_type,
+                    locator=member.locator,
+                )
+                if act:
+                    located.append((quote, member, act))
+            if len({act for _, _, act in located}) != 1:
+                status = "review"
             if status == "review":
                 fingerprint = digest(
                     [
@@ -1760,17 +1800,7 @@ class DocumentProcessingService:
                     )
                     await session.flush()
                 continue
-            quote, chunk = next(
-                (
-                    (q, c)
-                    for q, c in located
-                    if any(
-                        kind == analysis.event_type and pattern.search(q.text)
-                        for kind, pattern in _EVENT_PATTERNS
-                    )
-                ),
-                located[0],
-            )
+            quote, chunk, act = located[0]
             quote_start = chunk.start_offset
             quote_end = chunk.end_offset
             if chunk.text:
@@ -1783,11 +1813,13 @@ class DocumentProcessingService:
                 if quote.page is not None and quote.page == chunk.page_number
                 else chunk.page_number
             )
+            category = EventDetector.classify_reason(act)
+            items = scope_numbers(act, "item")
             detected = DetectedEvent(
                 event_type=analysis.event_type,
                 raw_description=quote.text,
-                normalized_reason=analysis.reason_summary,
-                reason_category=analysis.reason_category,
+                normalized_reason=EventDetector.extract_reason(act, category),
+                reason_category=category,
                 evidence=DocumentEvidence(
                     text=quote.text,
                     source_url=document.resolved_url or document.original_url,
@@ -1803,7 +1835,7 @@ class DocumentProcessingService:
                 company_name=analysis.company_name,
                 company_cnpj=analysis.company_cnpj,
                 company_external_id=known_party_id,
-                item_number=analysis.item_number,
+                item_number=next(iter(items)) if len(items) == 1 else None,
                 occurred_at=analysis.event_date or document.published_at,
             )
             if await self._event_already_exists(session, procurement, detected, document=document):
@@ -2076,6 +2108,33 @@ class DocumentProcessingService:
             )
         ):
             raise ValueError("Identidade ou evidência incompatível com a atribuição")
+        if event.evidence_id:
+            from app.services.event_detection.detector import _cnpjs
+
+            proof = await session.get(Evidence, event.evidence_id)
+            response_opening = event.event_type in RESPONSE_OPENING_EVENT_TYPES
+            target = (
+                CompanyReference(
+                    str(company.id), company.legal_name or company.normalized_name, company.cnpj
+                )
+                if response_opening
+                else None
+            )
+            act = (
+                event_act_excerpt(
+                    event.event_type.value,
+                    proof.text_excerpt,
+                    company=target,
+                    locator=proof.locator,
+                )
+                if proof
+                else None
+            )
+            if response_opening and not act:
+                raise ValueError("O trecho não comprova que a empresa seja a destinatária do prazo")
+            published_parties = _cnpjs(act) if act and not response_opening else []
+            if published_parties and normalize_cnpj(company.cnpj) not in published_parties:
+                raise ValueError("O CNPJ da empresa diverge do CNPJ publicado no ato")
         participates = await session.scalar(
             select(Participant.id)
             .where(
@@ -2103,7 +2162,16 @@ class DocumentProcessingService:
             note=note,
         )
         await session.flush()
-        await self._deadline_and_lead(session, procurement, event)
+        if event.event_type in RESPONSE_INTERRUPTION_EVENT_TYPES and event.evidence_id:
+            proof = await session.get(Evidence, event.evidence_id)
+            document = (
+                await session.get(Document, proof.document_id)
+                if proof and proof.document_id
+                else None
+            )
+            if proof and document:
+                await self.record_response_act_scope(session, event, document, proof, company)
+        await self._deadline_and_lead(session, procurement, event, verify_response_deadline=True)
         return True
 
     async def _evidence(
@@ -2424,6 +2492,8 @@ class DocumentProcessingService:
         )
         session.add(event)
         await session.flush()
+        if event.event_type in RESPONSE_INTERRUPTION_EVENT_TYPES:
+            await self.record_response_act_scope(session, event, document, evidence, company)
         if ancillary:
             await verify_fact(
                 session,
@@ -2520,7 +2590,7 @@ class DocumentProcessingService:
         match = _EXPLICIT_DATE.search(text)
         if match is not None:
             hour = int(match.group("hour") or 23)
-            minute = int(match.group("minute") or 59)
+            minute = int(match.group("minute") or (59 if match.group("hour") is None else 0))
             try:
                 local = datetime(
                     int(match.group("year")),
@@ -2571,6 +2641,9 @@ class DocumentProcessingService:
         session: AsyncSession,
         procurement: Procurement,
         event: ProcurementEvent,
+        *,
+        verify_response_deadline: bool = False,
+        revalidate_legacy_response: bool = False,
     ) -> bool:
         if not await event_document_is_active(session, event):
             # A reviewed/invalidated fact does not withdraw its entire source
@@ -2589,16 +2662,72 @@ class DocumentProcessingService:
         company = await session.get(Company, event.company_id) if event.company_id else None
         if company is None:
             return False
+        deadline_fingerprint = stable_fingerprint("deadline", event.id, "event_response")
+        deadline = await session.scalar(
+            select(Deadline).where(Deadline.fingerprint == deadline_fingerprint)
+        )
+        typed_deadline = bool(
+            deadline and deadline.deadline_type in OFFICIAL_RESPONSE_DEADLINE_TYPES
+        )
+        if typed_deadline and not revalidate_legacy_response:
+            from app.services.opportunity_workspace import legacy_official_response_deadline_ids
+
+            assert deadline is not None
+            if await legacy_official_response_deadline_ids(session, [deadline.id]):
+                return False
+        proof = await session.get(Evidence, event.evidence_id) if event.evidence_id else None
+        document = (
+            await session.get(Document, proof.document_id) if proof and proof.document_id else None
+        )
+        literal = (
+            event_literal_act(
+                event.event_type.value,
+                proof.text_excerpt,
+                company=CompanyReference(
+                    str(company.id), company.legal_name or company.normalized_name, company.cnpj
+                ),
+                title=document.title if document else None,
+                document_type=document.document_type if document else None,
+                include_deadline=True,
+                locator=proof.locator,
+            )
+            if proof
+            else None
+        )
+        act = literal.text if literal else None
         trigger = event.occurred_at or event.published_at
-        explicit = self._document_deadline(event.raw_description, trigger, event.event_type)
+        official = None
+        if verify_response_deadline or revalidate_legacy_response or typed_deadline:
+            official = await verified_event_response_deadline(
+                session, event, company, document, act, timezone=self.settings.timezone
+            )
+        document_deadline = (
+            official.ends_at
+            if official
+            else self._document_deadline(act or "", trigger, event.event_type)
+        )
+        published_deadline = _EXPLICIT_DATE.search(act or "")
+        is_approximate = official is None and (
+            event.event_type in _RELATIVE_DEADLINE_EVENTS
+            or event.event_type
+            in {
+                ProcurementEventType.APPEAL_WINDOW_OPENED,
+                ProcurementEventType.COUNTERARGUMENT_OPENED,
+            }
+            or published_deadline is None
+            or published_deadline["hour"] is None
+        )
         result = self.deadline_engine.calculate(
             DeadlineRequest(
                 event_type=event.event_type.value,
-                trigger_at=trigger,
-                document_deadline_at=explicit,
+                trigger_at=official.starts_at if official else trigger,
+                document_deadline_at=document_deadline,
+                document_deadline_estimated=is_approximate,
                 legal_business_days=3,
                 legal_estimate_applicable=True,
-                legal_basis="Lei 14.133/2021; estimativa operacional sujeita a conferência",
+                legal_basis=None
+                if official
+                else "Lei 14.133/2021; estimativa operacional sujeita a conferência",
                 trigger_source=event.source_url,
                 uf=procurement.uf,
                 timezone=self.settings.timezone,
@@ -2606,16 +2735,13 @@ class DocumentProcessingService:
                 local_holiday_calendar_complete=self.settings.holiday_calendar_path.exists(),
             )
         )
-        deadline_fingerprint = stable_fingerprint("deadline", event.id, "event_response")
-        deadline = await session.scalar(
-            select(Deadline).where(Deadline.fingerprint == deadline_fingerprint)
-        )
+        deadline_type = official.kind if official else "event_response"
         if deadline is None:
             deadline = Deadline(
                 procurement_id=procurement.id,
                 company_id=company.id,
                 event_id=event.id,
-                deadline_type="event_response",
+                deadline_type=deadline_type,
                 legal_basis=result.legal_basis,
                 trigger_at=result.trigger_at,
                 explicit_deadline_at=result.explicit_deadline_at,
@@ -2632,6 +2758,7 @@ class DocumentProcessingService:
             await session.flush()
         else:
             deadline.company_id = company.id
+            deadline.deadline_type = deadline_type
             deadline.legal_basis = result.legal_basis
             deadline.trigger_at = result.trigger_at
             deadline.explicit_deadline_at = result.explicit_deadline_at
@@ -2642,6 +2769,11 @@ class DocumentProcessingService:
             deadline.confidence = Decimal(str(result.confidence))
             deadline.requires_manual_review = result.requires_manual_review
             deadline.calculation_explanation = result.calculation_explanation
+
+        if official and proof and literal:
+            await self._record_response_deadline_scope(
+                session, deadline, proof, literal, official.extension
+            )
 
         fingerprint = stable_fingerprint("lead", procurement.id, company.id, event.id)
         lead = await session.scalar(select(Lead).where(Lead.fingerprint == fingerprint))
@@ -2664,7 +2796,19 @@ class DocumentProcessingService:
             )
             session.add(lead)
         lead.deadline_id = deadline.id
-        lead.reason_summary = event.normalized_reason or event.raw_description[:1000]
+        lead.reason_summary = (
+            EventDetector.extract_reason(act, EventDetector.classify_reason(act)) or act[:1000]
+            if act
+            else "Trecho do ato requer revisão."
+            if event.event_type
+            in {
+                ProcurementEventType.WINNER_DECLARED,
+                ProcurementEventType.ADJUDICATED,
+                ProcurementEventType.HOMOLOGATED,
+                ProcurementEventType.BEST_OFFER_DECLARED,
+            }
+            else event.normalized_reason or event.raw_description[:1000]
+        )
         if created:
             lead.recommended_action = "Revisar a evidência e confirmar o prazo na fonte oficial."
         await session.flush()
@@ -2681,3 +2825,129 @@ class DocumentProcessingService:
             await session.delete(lead)
             return False
         return created
+
+    @staticmethod
+    async def _record_response_deadline_scope(
+        session: AsyncSession,
+        deadline: Deadline,
+        proof: Evidence,
+        act: EventLiteralAct,
+        extension: bool,
+    ) -> None:
+        scope: dict[str, object] = {
+            **response_scope(act.text),
+            "extension": extension,
+            "position": await DocumentProcessingService._response_act_position(session, proof, act),
+            "version": RESPONSE_PROOF_VERSION,
+        }
+        await DocumentProcessingService._record_response_observation(
+            session, "deadline", deadline.id, proof, RESPONSE_SCOPE_OBSERVATION, scope
+        )
+
+    @staticmethod
+    async def record_response_act_scope(
+        session: AsyncSession,
+        event: ProcurementEvent,
+        document: Document,
+        proof: Evidence,
+        company: Company | None,
+        *,
+        apply: bool = True,
+    ) -> bool:
+        if event.event_type not in RESPONSE_INTERRUPTION_EVENT_TYPES:
+            return False
+        general_act = event.event_type in {
+            ProcurementEventType.SESSION_SUSPENDED,
+            ProcurementEventType.HOMOLOGATED,
+        }
+        if (
+            not document.is_active
+            or document.procurement_id != event.procurement_id
+            or event.requires_manual_review
+            and not (general_act and company is None and event.confidence >= Decimal("0.75"))
+        ):
+            return False
+        if company is None and not general_act:
+            return False
+        literal = event_literal_act(
+            event.event_type.value,
+            proof.text_excerpt,
+            company=CompanyReference(
+                str(company.id), company.legal_name or company.normalized_name, company.cnpj
+            )
+            if company
+            else None,
+            title=document.title,
+            document_type=document.document_type,
+            locator=proof.locator,
+        )
+        if not literal:
+            return False
+        scope = response_scope(literal.text)
+        if scope["scope"] == "unknown":
+            return False
+        return await DocumentProcessingService._record_response_observation(
+            session,
+            "procurement_event",
+            event.id,
+            proof,
+            RESPONSE_ACT_OBSERVATION,
+            {
+                **scope,
+                "position": await DocumentProcessingService._response_act_position(
+                    session, proof, literal
+                ),
+                "follows_previous": bool(
+                    re.search(r"\bem\s+seguida\b|\bna\s+sequ[eê]ncia\b", literal.text, re.I)
+                ),
+                "version": RESPONSE_PROOF_VERSION,
+            },
+            apply=apply,
+        )
+
+    @staticmethod
+    async def _response_act_position(
+        session: AsyncSession,
+        proof: Evidence,
+        act: EventLiteralAct,
+    ) -> int | None:
+        if not proof.document_chunk_id or not proof.text_excerpt:
+            return None
+        chunk = await session.get(StoredDocumentChunk, proof.document_chunk_id)
+        if not chunk or chunk.document_id != proof.document_id or chunk.start_offset is None:
+            return None
+        position = chunk.text.find(proof.text_excerpt)
+        if position < 0 or chunk.text.find(proof.text_excerpt, position + 1) >= 0:
+            return None
+        return chunk.start_offset + position + act.start
+
+    @staticmethod
+    async def _record_response_observation(
+        session: AsyncSession,
+        entity_type: str,
+        entity_id: UUID,
+        proof: Evidence,
+        field_name: str,
+        scope: dict[str, object],
+        *,
+        apply: bool = True,
+    ) -> bool:
+        fingerprint = stable_fingerprint(field_name, entity_id, proof.id, scope)
+        if await session.scalar(
+            select(FieldObservation.id).where(FieldObservation.fingerprint == fingerprint)
+        ):
+            return False
+        if not apply:
+            return True
+        session.add(
+            FieldObservation(
+                entity_type=entity_type,
+                entity_id=entity_id,
+                field_name=field_name,
+                value=scope,
+                source="document",
+                evidence_id=proof.id,
+                fingerprint=fingerprint,
+            )
+        )
+        return True

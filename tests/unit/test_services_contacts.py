@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 
+from app.services.contacts.identity import contact_identity
 from app.services.contacts.providers import (
     CompanyContactTarget,
     ContactType,
@@ -12,6 +13,21 @@ from app.services.contacts.providers import (
     PublicWebsiteContactProvider,
     validate_public_url,
 )
+
+
+def test_contact_identity_normalizes_format_without_merging_extensions_or_local_parts() -> None:
+    assert contact_identity("email", "Financeiro+compras@EMPRESA.EXAMPLE") == (
+        "Financeiro+compras@empresa.example"
+    )
+    assert contact_identity("phone", "+55 (98) 3333-4444") == contact_identity(
+        "phone", "9833334444"
+    )
+    assert contact_identity("phone", "+55 (98) 3333-4444 ramal 12") == contact_identity(
+        "phone", "9833334444;ext=12"
+    )
+    assert contact_identity("phone", "9833334444;ext=12") != contact_identity(
+        "phone", "9833334444;ext=13"
+    )
 
 
 def test_manual_contact_csv_reports_errors_and_deduplicates() -> None:

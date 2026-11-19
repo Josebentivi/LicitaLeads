@@ -29,12 +29,12 @@ def json_value(value: Any) -> Any:
 
 
 def model_dict(instance: Any, *, include: set[str] | None = None) -> dict[str, Any]:
-    """Serialize mapped columns only, avoiding implicit relationship queries."""
+    """Serialize public mapped columns, avoiding implicit relationship queries."""
     mapper = inspect(instance).mapper
     values: dict[str, Any] = {}
     for column in mapper.column_attrs:
         key = column.key
-        if include is not None and key not in include:
+        if key.startswith("_") or (include is not None and key not in include):
             continue
         values[key] = json_value(getattr(instance, key))
     return values

@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models import (
     Company,
     CompanyContact,
+    ContactType,
     Contract,
     Deadline,
     Evidence,
@@ -256,14 +257,34 @@ async def evaluate_lead(
         return {"lead_id": str(lead.id), "skipped": "Identidade indisponível"}
     deadline = await db.get(Deadline, lead.deadline_id) if lead.deadline_id else None
     moment = now or datetime.now(UTC)
-    due = (deadline.explicit_deadline_at or deadline.estimated_deadline_at) if deadline else None
+    from app.services.deadlines.response import OFFICIAL_RESPONSE_DEADLINE_TYPES
+    from app.services.opportunity_workspace import deadline_usable, official_response_proof_current
+
+    usable, revalidation_pending = True, False
+    if deadline and deadline.deadline_type in OFFICIAL_RESPONSE_DEADLINE_TYPES:
+        usable_value, proven = (
+            await db.execute(
+                select(deadline_usable(moment), official_response_proof_current()).where(
+                    Deadline.id == deadline.id
+                )
+            )
+        ).one()
+        usable = bool(usable_value)
+        revalidation_pending = not proven
+    due = (
+        (deadline.explicit_deadline_at or deadline.estimated_deadline_at)
+        if deadline and usable
+        else None
+    )
     hours = (due - moment).total_seconds() / 3600 if due else None
     expired = hours is not None and hours < 0
     contacts = list(
         (
             await db.scalars(
                 select(CompanyContact).where(
-                    CompanyContact.company_id == company.id, CompanyContact.is_corporate.is_(True)
+                    CompanyContact.company_id == company.id,
+                    CompanyContact.is_corporate.is_(True),
+                    CompanyContact.contact_type != ContactType.ADDRESS,
                 )
             )
         ).all()
@@ -308,7 +329,12 @@ async def evaluate_lead(
         ]
     )
     references.extend(
-        {"entity_type": "company_contact", "entity_id": str(c.id), "source_url": c.source_url}
+        {
+            "entity_type": "company_contact",
+            "entity_id": str(c.id),
+            "source_url": c.source_url,
+            **({"source_record_id": str(c.source_record_id)} if c.source_record_id else {}),
+        }
         for c in contacts
         if str(c.status) != "invalid"
     )
@@ -337,6 +363,7 @@ async def evaluate_lead(
             else LeadStatus.PENDING_REVIEW
             if event.requires_manual_review
             or (deadline and deadline.requires_manual_review)
+            or revalidation_pending
             or float(event.confidence) < settings.manual_review_confidence_threshold
             else LeadStatus.NEW
         )

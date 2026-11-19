@@ -18,6 +18,11 @@ from app.dependencies import get_db
 from app.models import CrawlRun, CrawlRunStatus, JobLease
 from app.repositories.crawls import JobLeaseRepository
 from app.schemas import CrawlRunRequest
+from app.services.collection_periods import (
+    normalize_discovery_kind,
+    use_calendar_slices,
+    validate_collection_period,
+)
 from app.services.ingestion import IngestionPipeline, PipelineRequest
 from app.services.ingestion.complete_collection import (
     COMPLETE_COLLECTION_LEASE,
@@ -35,6 +40,7 @@ from app.services.ingestion.document_retry import DOCUMENT_LEASE, create_documen
 from app.services.ingestion.municipal_payments import cancel_municipal_task
 from app.services.ingestion.recovery import finalize_cancelled_run
 from app.services.llm.queue import cancel_for_run, queue_status, queue_statuses, retry_for_run
+from app.services.procurement_search import ObjectScope
 
 router = APIRouter(prefix="/crawls", tags=["crawls"])
 _running_tasks: dict[UUID, asyncio.Task[None]] = {}
@@ -43,6 +49,17 @@ _running_tasks: dict[UUID, asyncio.Task[None]] = {}
 def pipeline_request(value: CrawlRunRequest) -> PipelineRequest:
     """Translate the public schema into the service's immutable request."""
 
+    object_scope = ObjectScope.build(
+        value.object_query, value.object_preset, value.object_group, value.government_sphere
+    )
+    discovery_kind = normalize_discovery_kind(value.discovery_kind)
+    publication = value.mode == "procurements" and discovery_kind == "publication"
+    if value.mode != "procurements" and object_scope is not None:
+        raise ValueError("Use filtros de objeto e esfera na coleta de contratações.")
+    if publication:
+        validate_collection_period(
+            value.start_date, value.end_date, timezone=get_settings().timezone, days=value.days
+        )
     return PipelineRequest(
         connector=value.connector,
         mode=value.mode,
@@ -57,8 +74,11 @@ def pipeline_request(value: CrawlRunRequest) -> PipelineRequest:
         unit_code=value.unit_code,
         keyword=value.keyword,
         document_batch_size=value.document_batch_size,
-        discovery_kind=value.discovery_kind,
+        discovery_kind=discovery_kind,
         force_refresh=value.force_refresh,
+        object_scope=object_scope,
+        calendar_months=publication
+        and use_calendar_slices(value.start_date, value.end_date, value.days),
     )
 
 
@@ -194,7 +214,10 @@ async def run_crawl(
 ) -> dict[str, object]:
     """Create an auditable run and execute it after the 202 response."""
 
-    request = pipeline_request(payload)
+    try:
+        request = pipeline_request(payload)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
     run = await IngestionPipeline().create_run(request)
     launch_crawl(run.id, request)
     return {

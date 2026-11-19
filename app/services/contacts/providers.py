@@ -17,6 +17,7 @@ from urllib.robotparser import RobotFileParser
 from app.services.identifiers import is_valid_cnpj, normalize_cnpj
 
 from .domains import EMAIL_PATTERN, GENERIC_EMAIL_PREFIXES
+from .identity import contact_identity
 
 # Regexes and constructor calls below are clearer when kept as single expressions.
 # ruff: noqa: E501
@@ -31,6 +32,7 @@ class ContactType(StrEnum):
     FORM = "form"
     WEBSITE = "website"
     LINKEDIN = "linkedin"
+    ADDRESS = "address"
 
 
 @dataclass(frozen=True, slots=True)
@@ -54,7 +56,8 @@ class CompanyContactCandidate:
 
     @property
     def fingerprint(self) -> str:
-        value = f"{self.company_cnpj or ''}|{self.contact_type.value}|{self.contact_value.lower()}"
+        identity = contact_identity(self.contact_type, self.contact_value)
+        value = f"{self.company_cnpj or ''}|{self.contact_type.value}|{identity}"
         return hashlib.sha256(value.encode()).hexdigest()
 
 
@@ -318,14 +321,18 @@ class PublicWebsiteContactProvider:
                 normalize_cnpj(company_cnpj),
             )
         ]
-        email_values = {match.group(1).lower() for match in EMAIL_PATTERN.finditer(text)}
+        email_values = {
+            contact_identity(ContactType.EMAIL, match.group(1))
+            for match in EMAIL_PATTERN.finditer(text)
+        }
         for anchor in soup.select('a[href^="mailto:"]'):
             href_value = anchor.get("href", "")
             href = href_value if isinstance(href_value, str) else ""
             if "@" in href:
-                email_values.add(href[7:].split("?", 1)[0].lower())
+                email_values.add(contact_identity(ContactType.EMAIL, href[7:].split("?", 1)[0]))
         for email in email_values:
             local, _, email_domain = email.partition("@")
+            local = local.lower()
             generic = local.split("+", 1)[0] in GENERIC_EMAIL_PREFIXES
             if email_domain.rstrip(".") not in {domain, f"www.{domain}"} or not generic:
                 continue

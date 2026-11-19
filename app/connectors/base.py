@@ -17,6 +17,8 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from app.services.procurement_search import ObjectScope
+
 
 class DataAvailability(StrEnum):
     """Meaning of the data returned by a connector call.
@@ -126,6 +128,8 @@ class ConnectorResult[T](BaseModel):
     pagination: PaginationInfo | None = None
     diagnostic: str | None = None
     partial: bool = False
+    unsupported_modalities: list[str] = Field(default_factory=list)
+    unclassified_modality_rows: int = 0
 
     @property
     def is_available(self) -> bool:
@@ -165,6 +169,8 @@ class ProcurementFilters(BaseModel):
     agency_cnpj: str | None = None
     unit_code: str | None = None
     keyword: str | None = None
+    # Connectors filter the published sphere. The pipeline checks text against the items as needed.
+    object_scope: ObjectScope | None = None
     modalities: list[str | int] = Field(default_factory=list)
     page_size: int | None = Field(default=None, ge=1, le=500)
     max_pages: int | None = Field(default=None, ge=1)
@@ -228,6 +234,7 @@ class RawProcurement(TraceableModel):
     modality_code: int | str | None = None
     title: str | None = None
     object_description: str | None = None
+    object_complement: str | None = None
     agency_name: str | None = None
     agency_cnpj: str | None = None
     government_sphere: str | None = None
@@ -263,6 +270,14 @@ class RawProcurementItem(TraceableModel):
     estimated_total_value: Decimal | None = None
     result_status: str | None = None
     has_result: bool | None = None
+
+    @property
+    def summary_description(self) -> str | None:
+        if self.source == "compras_gov":
+            # Older saved pages copied the detailed description into `description`.
+            value = self.raw_payload.get("descricaoResumida")
+            return value if isinstance(value, str) else None
+        return self.description
 
 
 class RawDocument(TraceableModel):

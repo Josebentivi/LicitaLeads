@@ -16,6 +16,7 @@ CONTROL_ENV = "LICITA_CONTROL_DIRECTORY"
 INSTANCE_ENV = "LICITA_CONTROL_INSTANCE"
 ROLE_ENV = "LICITA_CONTROL_ROLE"
 SHUTDOWN_SECONDS = 60
+_SHARING_ERRORS = {5, 32, 33}
 _file_lock = threading.Lock()
 
 
@@ -27,7 +28,18 @@ def atomic_json(path: Path, value: dict[str, Any]) -> None:
             json.dump(value, stream, ensure_ascii=False)
             stream.flush()
             os.fsync(stream.fileno())
-        os.replace(name, path)
+        deadline = time.monotonic() + 1
+        while True:
+            try:
+                os.replace(name, path)
+                break
+            except OSError as exc:
+                # A Windows reader can briefly deny replacement of its open file.
+                if getattr(exc, "winerror", None) not in _SHARING_ERRORS or (
+                    time.monotonic() >= deadline
+                ):
+                    raise
+                time.sleep(0.02)
     finally:
         Path(name).unlink(missing_ok=True)
 

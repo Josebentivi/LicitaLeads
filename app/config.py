@@ -103,6 +103,7 @@ class Settings(BaseSettings):
 
     scheduler_enabled: bool = True
     scheduler_discovery_hours: int = Field(default=6, ge=1)
+    scheduler_government_sphere: Literal["F", "E", "M", "D"] | None = None
     scheduler_price_registry_hours: int = Field(default=24, ge=1)
     price_registry_lookback_days: int | None = Field(default=None, ge=1, le=3650)
     scheduler_active_refresh_minutes: int = Field(default=60, ge=5)
@@ -193,6 +194,11 @@ class Settings(BaseSettings):
     def optional_registry_period(cls, value: object) -> object:
         return None if isinstance(value, str) and not value.strip() else value
 
+    @field_validator("scheduler_government_sphere", mode="before")
+    @classmethod
+    def normalize_scheduler_sphere(cls, value: object) -> object:
+        return (value.strip().upper() or None) if isinstance(value, str) else value
+
     @field_validator("default_uf")
     @classmethod
     def normalize_uf(cls, value: str) -> str:
@@ -265,6 +271,7 @@ class Settings(BaseSettings):
             "transparencia_max_retries": self.transparencia_max_retries,
             "outreach_mode": self.outreach_mode,
             "scheduler_enabled": self.scheduler_enabled,
+            "scheduler_government_sphere": self.scheduler_government_sphere,
             "scheduler_mode": "separate_process",
             "scheduler_price_registry_hours": self.scheduler_price_registry_hours,
             "price_registry_lookback_days": self.effective_price_registry_lookback_days,

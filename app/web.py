@@ -3,14 +3,13 @@
 from __future__ import annotations
 
 import asyncio
-import ipaddress
 import re
 from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Annotated, Any, cast
-from urllib.parse import urlencode, urlsplit
+from urllib.parse import urlencode
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
@@ -18,8 +17,8 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Reques
 from fastapi.responses import RedirectResponse, StreamingResponse
 from fastapi.templating import Jinja2Templates
 from pydantic import BeforeValidator
-from sqlalchemy import false, func, select
-from sqlalchemy.ext.asyncio import AsyncScalarResult, AsyncSession, async_sessionmaker
+from sqlalchemy import false, func, or_, select
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import selectinload
 
 from app.api.routes.crawls import (
@@ -54,7 +53,6 @@ from app.models import (
     Procurement,
     ProcurementEvent,
     ProcurementItem,
-    ProcurementSource,
     ReviewDecision,
     SourceRecord,
 )
@@ -83,10 +81,27 @@ from app.repositories.procurements import (
 )
 from app.schemas import OutreachRequest
 from app.services.application_tests import ApplicationTestService, TestRunBusy
+from app.services.collection_periods import (
+    collection_today,
+    earliest_collection_day,
+    use_calendar_slices,
+    validate_collection_period,
+)
 from app.services.crawl_monitor import monitor_view, municipal_write_progress, nonnegative_int
 from app.services.crawl_progress import safe_label
+from app.services.deadlines.response import OFFICIAL_RESPONSE_DEADLINE_LABELS
+from app.services.event_detection.detector import describe_event_scope
+from app.services.event_detection.types import CompanyReference
 from app.services.group_hubs import build_group_hub
-from app.services.identifiers import canonical_modality, is_valid_cnpj, normalize_cnpj
+from app.services.identifiers import (
+    AUXILIARY_PROCEDURES,
+    CONTRACTING_FORM_LABELS,
+    LICITATION_MODALITIES,
+    canonical_modality,
+    contracting_form,
+    is_valid_cnpj,
+    normalize_cnpj,
+)
 from app.services.ingestion import IngestionPipeline, PipelineRequest
 from app.services.ingestion.complete_collection import (
     COMPLETE_COLLECTION_MODE,
@@ -121,6 +136,8 @@ from app.services.opportunity_workspace import (
     ACTIONABLE_STATUSES,
     OpportunityFilters,
     deadline_indication,
+    deadline_usable,
+    legacy_official_response_deadline_ids,
     loaded_opportunities,
     next_opportunity,
     opportunity_count,
@@ -133,6 +150,17 @@ from app.services.price_registry_scopes import (
     known_price_registry_scopes,
     restore_price_registry_scopes,
 )
+from app.services.procurement_search import (
+    COLLECTION_MODALITIES,
+    GOVERNMENT_SPHERES,
+    OBJECT_GROUPS,
+    OBJECT_PRESETS,
+    ObjectScope,
+    published_sphere,
+)
+from app.services.public_source_links import origin_platform_url as _origin_platform_url
+from app.services.public_source_links import procurement_source_page, source_link_label
+from app.services.public_source_links import public_link as _public_link
 from app.services.scheduler_control import scheduler_status, set_scheduler_paused
 from app.shutdown_web import shutdown_available
 
@@ -169,8 +197,16 @@ async def collection_form_error(request: Request, message: str):
         "batch_size",
         "process_documents",
         "force_refresh",
+        "object_query",
+        "object_group",
+        "government_sphere",
+        "procurements_only",
     }
-    values = {key: str(value)[:250] for key, value in form.items() if key in allowed}
+    values: dict[str, str | list[str]] = {
+        key: str(value)[:250] for key, value in form.items() if key in allowed
+    }
+    for key in ("modalities", "object_preset"):
+        values[key] = [str(value)[:80] for value in form.getlist(key)][:40]
     return templates.TemplateResponse(
         request,
         "collection_form_error.html",
@@ -180,6 +216,7 @@ async def collection_form_error(request: Request, message: str):
             "action": request.url.path,
             "back": COLLECTION_FORM_PATHS[request.url.path],
             "ufs": _BRAZILIAN_UFS,
+            **_collection_object_options(get_settings()),
         },
         status_code=422,
     )
@@ -217,8 +254,8 @@ def _selected_uf(value: str | None) -> str | None:
 _SOURCE_LABELS = {
     "pncp": "PNCP",
     "compras_gov": "Compras.gov.br",
-    "transparencia": "Portal da Transparencia",
-    "manual": "Importacao manual",
+    "transparencia": "Portal da Transparência",
+    "manual": "Importação manual",
     **{
         f"municipal:{source.id}": f"{source.name} (municipal)"
         for source in list_municipal_sources()
@@ -237,6 +274,7 @@ _STATUS_LABELS = {
     "failed": "Falhou",
     "cancelled": "Cancelada",
     "temporary_error": "Indisponível",
+    "not_supported": "Sem cobertura nesta fonte",
 }
 
 _PROCUREMENT_TIMEZONE = ZoneInfo("America/Sao_Paulo")
@@ -270,6 +308,7 @@ _BRAZILIAN_UFS = (
     ("TO", "Tocantins"),
 )
 _PROCUREMENT_MODALITY_LABELS = {
+    "pregao": "Pregão",
     "pregao_eletronico": "Pregão eletrônico",
     "pregao_presencial": "Pregão presencial",
     "concorrencia_eletronica": "Concorrência eletrônica",
@@ -286,34 +325,23 @@ _PROCUREMENT_MODALITY_LABELS = {
     "credenciamento": "Credenciamento",
     "pre_qualificacao": "Pré-qualificação",
     "manifestacao_de_interesse": "Manifestação de interesse",
+    "registro_cadastral": "Registro cadastral",
+    "tomada_de_precos": "Tomada de preços",
 }
-_PROFILTER_MODALITY_KEYS = (
-    "pregao_eletronico",
-    "pregao_presencial",
-    "concorrencia_eletronica",
-    "concorrencia_presencial",
-    "concurso",
-    "leilao_eletronico",
-    "leilao_presencial",
-    "dialogo_competitivo",
-    "dispensa",
-    "inexigibilidade",
-    "credenciamento",
-    "pre_qualificacao",
-    "manifestacao_de_interesse",
-)
 _PROCUREMENT_TYPE_LABELS = {
     "licitacao": "Licitação",
     "contratacao_direta": "Contratação direta",
     "procedimento_auxiliar": "Procedimento auxiliar",
 }
 _PROCUREMENT_STATUS_CATEGORY_LABELS = {
+    "prazo_resposta_aberto": "Prazo aberto para diligência ou recurso",
     "aberta": "Proposta aberta",
     "encerrada": "Encerrada",
     "cancelada": "Cancelada",
     "suspensa": "Suspensa",
     "desconhecida": "Sem prazo conhecido",
 }
+_LICITATION_MODALITY_LABELS = {key: label for key, (label, _) in LICITATION_MODALITIES.items()}
 _PROCUREMENT_STATUS_LABELS = {
     "em andamento": "Em andamento",
     "em julgamento": "Em julgamento",
@@ -391,6 +419,8 @@ _DEADLINE_TYPE_LABELS = {
     "proposal": "Proposta",
     "documentation": "Documentação",
     "diligence": "Diligência",
+    "event_response": "Resposta ao ato",
+    **OFFICIAL_RESPONSE_DEADLINE_LABELS,
 }
 
 _EVENT_TYPE_LABELS = {
@@ -401,6 +431,7 @@ _EVENT_TYPE_LABELS = {
     "QUALIFIED": "Habilitação",
     "INELIGIBLE": "Inabilitação",
     "INTENT_TO_APPEAL": "Intenção de recurso",
+    "APPEAL_WINDOW_OPENED": "Prazo para recurso aberto",
     "APPEAL_SUBMITTED": "Recurso apresentado",
     "COUNTERARGUMENT_OPENED": "Contrarrazões abertas",
     "COUNTERARGUMENT_SUBMITTED": "Contrarrazões apresentadas",
@@ -410,25 +441,25 @@ _EVENT_TYPE_LABELS = {
     "HOMOLOGATED": "Homologação",
     "SESSION_SUSPENDED": "Sessão suspensa",
     "SESSION_REOPENED": "Sessão reaberta",
-    "SESSION_OPENED": "Sessao aberta",
+    "SESSION_OPENED": "Sessão aberta",
     "BEST_OFFER_DECLARED": "Melhor oferta declarada",
-    "NEGOTIATION_REQUESTED": "Negociacao solicitada",
-    "DILIGENCE_REQUESTED": "Diligencia solicitada",
-    "DOCUMENTATION_REQUESTED": "Documentacao solicitada",
+    "NEGOTIATION_REQUESTED": "Negociação solicitada",
+    "DILIGENCE_REQUESTED": "Diligência solicitada",
+    "DOCUMENTATION_REQUESTED": "Documentação solicitada",
     "PARTICIPATION_DETECTED": "Participação em processo ativo",
     "UNKNOWN": "Não informado",
 }
 _PROCUREMENT_PHASE_LABELS = {
-    "unknown": "Nao informada",
+    "unknown": "Não informada",
     "proposals": "Propostas",
     "dispute": "Disputa",
-    "diligence": "Diligencia",
+    "diligence": "Diligência",
     "judgment": "Julgamento",
     "appeal": "Recurso",
-    "counterargument": "Contrarrazoes",
-    "qualification": "Habilitacao",
-    "adjudication": "Adjudicacao",
-    "homologation": "Homologacao",
+    "counterargument": "Contrarrazões",
+    "qualification": "Habilitação",
+    "adjudication": "Adjudicação",
+    "homologation": "Homologação",
     "closed": "Encerrada",
     "suspended": "Suspensa",
     "cancelled": "Cancelada",
@@ -464,6 +495,7 @@ _REVIEW_DECISION_LABELS = {
     "needs_changes": "Ajustes solicitados",
 }
 _CONTACT_TYPE_LABELS = {
+    "address": "Endereço",
     "email": "E-mail",
     "phone": "Telefone",
     "whatsapp": "WhatsApp",
@@ -505,6 +537,43 @@ def _collection_period(days: int, *, today: date | None = None) -> SimpleNamespa
     )
 
 
+def _collection_object_options(settings: Settings) -> dict[str, Any]:
+    return {
+        "object_presets": OBJECT_PRESETS,
+        "object_groups": OBJECT_GROUPS,
+        "government_spheres": GOVERNMENT_SPHERES,
+        "collection_modalities": COLLECTION_MODALITIES,
+        "min_collection_date": earliest_collection_day(
+            collection_today(settings.timezone)
+        ).isoformat(),
+    }
+
+
+def _new_procurement_collection_filters(
+    settings: Settings,
+    start_date: date | None,
+    end_date: date | None,
+    *,
+    days: int | None,
+    modalities: list[str] | None,
+    object_query: str | None,
+    object_preset: list[str] | None,
+    object_group: str | None,
+    government_sphere: str | None,
+) -> tuple[tuple[str, ...], ObjectScope | None]:
+    try:
+        validate_collection_period(start_date, end_date, timezone=settings.timezone, days=days)
+        selected = tuple(dict.fromkeys(modalities or ()))
+        if set(selected).difference(dict(COLLECTION_MODALITIES)):
+            raise ValueError("Selecione modalidades da lista de opções.")
+        scope = ObjectScope.build(
+            object_query, object_preset or (), object_group, government_sphere
+        )
+        return selected, scope
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
 def _validate_collection_dates(
     start_date: date | None, end_date: date | None
 ) -> tuple[date | None, date | None]:
@@ -519,57 +588,9 @@ def _validate_collection_dates(
     return start_date, end_date
 
 
-def _public_link(value: str | None) -> str | None:
-    if not value or "\\" in value or any(ord(c) < 32 for c in value):
-        return None
-    try:
-        parts = urlsplit(value)
-        host = (parts.hostname or "").rstrip(".")
-        if (
-            parts.scheme not in {"http", "https"}
-            or not host
-            or parts.username is not None
-            or parts.password is not None
-            or parts.port == 0
-            or host == "localhost"
-            or host.endswith(".localhost")
-        ):
-            return None
-    except ValueError:
-        return None
-    try:
-        return value if ipaddress.ip_address(host).is_global else None
-    except ValueError:
-        return value if "." in host else None
-
-
-async def _origin_platform_url(db: AsyncSession, procurement: Procurement) -> str | None:
-    """Read the published platform link from the matched PNCP response."""
-    control = procurement.pncp_control_number
-    if not control:
-        return None
-    payloads: AsyncScalarResult[Any] = await db.stream_scalars(
-        select(SourceRecord.raw_payload)
-        .join(ProcurementSource, ProcurementSource.source_record_id == SourceRecord.id)
-        .where(ProcurementSource.procurement_id == procurement.id, SourceRecord.source == "pncp")
-        .order_by(SourceRecord.collected_at.desc())
-    )
-    try:
-        async for payload in payloads:
-            rows = payload.get("data", [payload]) if isinstance(payload, dict) else payload
-            if not isinstance(rows, list):
-                continue
-            for row in rows:
-                if isinstance(row, dict) and row.get("numeroControlePNCP") == control:
-                    link = row.get("linkSistemaOrigem")
-                    if isinstance(link, str) and (official := _public_link(link)):
-                        return official
-        return None
-    finally:
-        await payloads.close()
-
-
-def _deadline_view(deadline: Deadline | None, *, current: bool = True) -> SimpleNamespace:
+def _deadline_view(
+    deadline: Deadline | None, *, current: bool = True, revalidation_pending: bool = False
+) -> SimpleNamespace:
     """A triggering fact is not a deadline; historical dates are never current urgency."""
     value = (deadline.explicit_deadline_at or deadline.estimated_deadline_at) if deadline else None
     kind = (
@@ -581,6 +602,8 @@ def _deadline_view(deadline: Deadline | None, *, current: bool = True) -> Simple
     )
     if deadline and not current:
         kind = "Prazo histórico — não usar como atual"
+    elif revalidation_pending:
+        kind = "Prazo pendente de revalidação"
     elif deadline and value and deadline.calculation_method.value == "MANUAL":
         kind = "Prazo informado manualmente — conferir origem"
     relative = deadline_indication(
@@ -596,27 +619,35 @@ def _deadline_view(deadline: Deadline | None, *, current: bool = True) -> Simple
         recorded_status=_label(deadline.status, _DEADLINE_STATUS_LABELS)
         if deadline and current
         else "Não informado",
-        status=relative,
+        status="Revalidação pendente" if revalidation_pending and current else relative,
         type=_label(deadline.deadline_type, _DEADLINE_TYPE_LABELS) if deadline else "Não informado",
         trigger=_local_datetime(deadline.trigger_at) if deadline else None,
         explanation=deadline.calculation_explanation if deadline else None,
-        requires_review=bool(deadline and deadline.requires_manual_review),
+        requires_review=revalidation_pending or bool(deadline and deadline.requires_manual_review),
         current=current,
     )
 
 
 def _lead_view(
-    lead: Lead, *, return_to: str = "/leads", current_deadline: bool = True
+    lead: Lead,
+    *,
+    return_to: str = "/leads",
+    current_deadline: bool = True,
+    revalidation_pending: bool = False,
 ) -> SimpleNamespace:
-    deadline = _deadline_view(lead.deadline, current=current_deadline)
+    deadline = _deadline_view(
+        lead.deadline, current=current_deadline, revalidation_pending=revalidation_pending
+    )
+    act = _event_act_view(lead.triggering_event, lead.company)
     return SimpleNamespace(
         id=lead.id,
         href=f"/leads/{lead.id}?{urlencode({'return_to': safe_list_url(return_to)})}",
         company_name=lead.company.legal_name or lead.company.normalized_name,
         cnpj=lead.company.cnpj,
         cnpj_label=_format_cnpj(lead.company.cnpj),
-        event_type=_label(lead.triggering_event.event_type, _EVENT_TYPE_LABELS),
-        reason=lead.reason_summary,
+        event_type=act.label,
+        event_scope=act.scope,
+        reason=act.reason if act.award else lead.reason_summary,
         score=lead.score,
         created_at=_local_datetime(lead.created_at),
         deadline=deadline,
@@ -626,19 +657,28 @@ def _lead_view(
     )
 
 
+async def _deadline_display_ids(
+    db: AsyncSession, deadline_ids: set[UUID]
+) -> tuple[set[UUID], set[UUID]]:
+    if not deadline_ids:
+        return set(), set()
+    deadlines = (
+        await db.execute(
+            select(Deadline.id, deadline_usable(datetime.now(UTC)).label("usable")).where(
+                Deadline.id.in_(deadline_ids), deadline_current()
+            )
+        )
+    ).all()
+    usable_ids: set[UUID] = {identifier for identifier, usable in deadlines if usable}
+    pending = await legacy_official_response_deadline_ids(
+        db, {identifier for identifier, usable in deadlines if not usable}
+    )
+    return usable_ids | pending, pending
+
+
 async def _lead_views(db: AsyncSession, rows, *, return_to: str = "/leads"):
     deadline_ids = {row.deadline_id for row in rows if row.deadline_id}
-    current_ids = (
-        set(
-            (
-                await db.scalars(
-                    select(Deadline.id).where(Deadline.id.in_(deadline_ids), deadline_current())
-                )
-            ).all()
-        )
-        if deadline_ids
-        else set()
-    )
+    current_ids, pending_revalidation = await _deadline_display_ids(db, deadline_ids)
     current_leads = (
         set(
             (
@@ -656,6 +696,7 @@ async def _lead_views(db: AsyncSession, rows, *, return_to: str = "/leads"):
             row,
             return_to=return_to,
             current_deadline=row.deadline_id in current_ids and row.id in current_leads,
+            revalidation_pending=row.deadline_id in pending_revalidation,
         )
         view.historical = row.id not in current_leads
         views.append(view)
@@ -690,6 +731,7 @@ def _list_context(request: Request, path: str, *, keys: set[str] | None = None) 
         "published_to": "Publicação até",
         "agency_cnpj": "CNPJ do órgão",
         "company_cnpj": "CNPJ da empresa",
+        "company_participation_only": "Apenas participações",
         "min_score": "Prioridade mínima",
         "event_type": "Evento",
         "municipality": "Município",
@@ -708,6 +750,13 @@ def _list_context(request: Request, path: str, *, keys: set[str] | None = None) 
         "expiring_within_days": "A vencer em dias",
         "allows_adhesion": "Permite adesão",
         "modality": "Modalidade",
+        "contracting_form": "Forma de contratação",
+        "licitation_modality": "Modalidade de licitação",
+        "auxiliary_procedure": "Procedimento auxiliar",
+        "government_sphere": "Esfera do órgão",
+        "object_query": "Objeto ou item",
+        "object_preset": "Objeto sugerido",
+        "object_group": "Grupo de objetos",
         "phase": "Fase",
         "procurement_type": "Tipo de contratação",
         "has_lead": "Com oportunidade",
@@ -723,9 +772,14 @@ def _list_context(request: Request, path: str, *, keys: set[str] | None = None) 
         **_PROCUREMENT_MODALITY_LABELS,
         **_PROCUREMENT_PHASE_LABELS,
         **_PROCUREMENT_TYPE_LABELS,
+        **_LICITATION_MODALITY_LABELS,
+        **GOVERNMENT_SPHERES,
+        **OBJECT_GROUPS,
+        **{preset.key: preset.label for preset in OBJECT_PRESETS},
         **_SOURCE_LABELS,
         **_PAYMENT_PHASE_LABELS,
         "today": "Hoje",
+        "open": "Prazo aberto para diligência ou recurso",
         "actionable": "Para analisar",
         "24h": "Próximas 24 horas",
         "72h": "Próximas 72 horas",
@@ -733,7 +787,9 @@ def _list_context(request: Request, path: str, *, keys: set[str] | None = None) 
     }
     chips = []
     for key, value in meaningful:
-        remaining = [(k, v) for k, v in params if k not in {key, "page"}]
+        remaining = [(k, v) for k, v in params if k != "page" and (k, v) != (key, value)]
+        if path == "/leads" and not remaining:
+            remaining = [("due", "")]
         chips.append(
             SimpleNamespace(
                 label=labels.get(key, key.replace("_", " ").capitalize()),
@@ -814,6 +870,13 @@ templates.env.filters["modality_label"] = lambda value: _label(value, _PROCUREME
 templates.env.filters["procurement_type_label"] = lambda value: _label(
     value, _PROCUREMENT_TYPE_LABELS
 )
+templates.env.filters["contracting_form"] = contracting_form
+templates.env.filters["contracting_form_label"] = lambda value: CONTRACTING_FORM_LABELS.get(
+    contracting_form(value) or "", "—"
+)
+templates.env.filters["government_sphere_label"] = lambda value: GOVERNMENT_SPHERES.get(
+    published_sphere(value) or "", "Não informada"
+)
 templates.env.filters["procurement_phase_label"] = lambda value: _label(
     value, _PROCUREMENT_PHASE_LABELS
 )
@@ -858,9 +921,11 @@ def _technical_origin(
     external_id: str | None = None,
     evidence_id: UUID | None = None,
 ) -> SimpleNamespace:
+    source_url = _public_link(official_url)
     return SimpleNamespace(
         source_label=_label(source, _TECHNICAL_SOURCE_LABELS),
-        official_url=_public_link(official_url),
+        official_url=source_url,
+        link_label=source_link_label(source_url) if source_url else None,
         source_record_id=str(source_record_id) if source_record_id else None,
         external_id=_display_text(external_id) if external_id else None,
         evidence_url=f"/evidencias/{evidence_id}" if evidence_id else None,
@@ -870,7 +935,10 @@ def _technical_origin(
 
 def _item_matches(item: ProcurementItem, query: str) -> bool:
     needle = query.casefold()
-    return needle in item.item_number.casefold() or needle in (item.description or "").casefold()
+    return any(
+        needle in (text or "").casefold()
+        for text in (item.item_number, item.description, item.summary_description)
+    )
 
 
 def _item_view(item: ProcurementItem, procurement: Procurement) -> SimpleNamespace:
@@ -957,10 +1025,47 @@ def _participant_view(
     )
 
 
+def _event_act_view(event: ProcurementEvent, company: Company | None) -> SimpleNamespace:
+    reference = (
+        CompanyReference(
+            str(company.id), company.legal_name or company.normalized_name, company.cnpj
+        )
+        if company
+        else None
+    )
+    act = describe_event_scope(event, event.raw_description, company=reference)
+    award = event.event_type.value in {
+        "BEST_OFFER_DECLARED",
+        "WINNER_DECLARED",
+        "ADJUDICATED",
+        "HOMOLOGATED",
+    }
+    parts = []
+    if act.item_number:
+        parts.append(f"Item {act.item_number}")
+    if act.lot_number:
+        parts.append(f"Lote {act.lot_number}")
+    if act.stage:
+        parts.append(_label(act.stage, _PROCUREMENT_PHASE_LABELS))
+    elif award and event.event_type.value == "WINNER_DECLARED":
+        parts.append("Fase não identificada")
+    return SimpleNamespace(
+        label=_label(event.event_type, _EVENT_TYPE_LABELS),
+        scope=" · ".join(parts),
+        reason=act.reason or "Trecho do ato requer revisão.",
+        award=award,
+    )
+
+
 def _event_view(event: ProcurementEvent) -> SimpleNamespace:
     evidence = event.evidence
     event_date = event.occurred_at or event.published_at
-    reason = event.normalized_reason or _label(event.reason_category, _REASON_CATEGORY_LABELS)
+    act = _event_act_view(event, event.company)
+    reason = (
+        act.reason
+        if act.award
+        else (event.normalized_reason or _label(event.reason_category, _REASON_CATEGORY_LABELS))
+    )
     company_identified = event.company is not None
     company_name = _display_text(
         (event.company.legal_name or event.company.normalized_name) if event.company else None
@@ -968,7 +1073,8 @@ def _event_view(event: ProcurementEvent) -> SimpleNamespace:
     return SimpleNamespace(
         id=event.id,
         procurement_id=event.procurement_id,
-        event_type=_label(event.event_type, _EVENT_TYPE_LABELS),
+        event_type=act.label,
+        event_scope=act.scope,
         company_name="Empresa não identificada" if not company_identified else company_name,
         company_identified=company_identified,
         item_number=_display_text(event.item.item_number if event.item else None),
@@ -1044,7 +1150,7 @@ def _procurement_view(procurement: Procurement) -> SimpleNamespace:
         pncp_control_number=_display_text(procurement.pncp_control_number),
         location=_display_text(location),
         estimated_value=_brl(procurement.estimated_value),
-        official_url=_public_link(procurement.source_url),
+        official_url=procurement_source_page(procurement),
         dates=dates,
         origin=_technical_origin(
             source=procurement.source,
@@ -1150,7 +1256,9 @@ def _source_views(run: CrawlRun) -> list[SimpleNamespace]:
             found_value = run.records_found
         else:
             status = str(stored.get("status") or "")
-            if active:
+            if stored.get("availability") == "not_supported":
+                status = "not_supported"
+            elif active:
                 if not status:
                     progress = (run.cursor or {}).get("progress", {})
                     current_source = progress.get("source") if isinstance(progress, dict) else None
@@ -1189,6 +1297,16 @@ def _source_views(run: CrawlRun) -> list[SimpleNamespace]:
             and not source_id.startswith("municipal:")
             and source_id != "documents"
         )
+        unsupported = stored.get("unsupported_modalities")
+        coverage_notes = []
+        if isinstance(unsupported, list) and unsupported:
+            labels = ", ".join(_label(item, _PROCUREMENT_MODALITY_LABELS) for item in unsupported)
+            coverage_notes.append(f"Modalidades sem cobertura nesta fonte: {labels}.")
+        unknown_variants = nonnegative_int(stored.get("unclassified_modality_rows"))
+        if unknown_variants:
+            coverage_notes.append(
+                f"{unknown_variants} registro(s) sem variante publicada ficaram fora do filtro."
+            )
         views.append(
             SimpleNamespace(
                 id=source_id,
@@ -1197,6 +1315,7 @@ def _source_views(run: CrawlRun) -> list[SimpleNamespace]:
                 else _SOURCE_LABELS.get(source_id, source_id),
                 status=status,
                 status_label=_STATUS_LABELS.get(status, status.replace("_", " ").title()),
+                coverage_note=" ".join(coverage_notes),
                 records_found=found_value,
                 records_failed=records_failed,
                 discovery_total=stored.get("discovery_total"),
@@ -1401,6 +1520,7 @@ async def dashboard(request: Request, db: AsyncSession = Depends(get_db)):
 
     now = datetime.now(UTC)
     due_at = func.coalesce(Deadline.explicit_deadline_at, Deadline.estimated_deadline_at)
+    usable_deadline = deadline_usable(now)
     counts = {
         "Contratações monitoradas": int((await db.scalar(select(func.count(Procurement.id)))) or 0),
         "Novos processos": int(
@@ -1422,18 +1542,14 @@ async def dashboard(request: Request, db: AsyncSession = Depends(get_db)):
             (
                 await db.scalar(
                     select(func.count(Deadline.id)).where(
-                        due_at >= now, due_at <= now + timedelta(hours=24), deadline_current()
+                        due_at >= now, due_at <= now + timedelta(hours=24), usable_deadline
                     )
                 )
             )
             or 0
         ),
         "Prazos vencidos": int(
-            (
-                await db.scalar(
-                    select(func.count(Deadline.id)).where(due_at < now, deadline_current())
-                )
-            )
+            (await db.scalar(select(func.count(Deadline.id)).where(due_at < now, usable_deadline)))
             or 0
         ),
         "Pendências de revisão": int(
@@ -1465,6 +1581,11 @@ async def dashboard(request: Request, db: AsyncSession = Depends(get_db)):
     leads = await _lead_views(db, recent, return_to="/leads?lead_status=actionable")
     agenda = []
     for title, params, hint in [
+        (
+            "Prazo aberto para diligência ou recurso",
+            {"due": "open"},
+            "Oportunidades com prazo vigente na fonte oficial",
+        ),
         ("Aguardando revisão", {"lead_status": "pending_review"}, "Decisões humanas pendentes"),
         (
             "Prazos próximos",
@@ -1483,7 +1604,7 @@ async def dashboard(request: Request, db: AsyncSession = Depends(get_db)):
             SimpleNamespace(
                 title=title,
                 hint=hint,
-                total=await opportunity_count(db, selected),
+                total=await opportunity_count(db, selected, now=now),
                 href="/leads?" + urlencode(params),
             )
         )
@@ -1550,7 +1671,15 @@ async def procurements_page(
     agency: str | None = None,
     agency_cnpj: str | None = None,
     company_cnpj: str | None = None,
+    company_participation_only: bool = False,
     modality: list[str] | None = Query(None),
+    contracting_form: str | None = None,
+    licitation_modality: str | None = None,
+    auxiliary_procedure: str | None = None,
+    object_query: str | None = Query(None, max_length=200),
+    object_preset: list[str] | None = Query(None),
+    object_group: str | None = None,
+    government_sphere: str | None = None,
     procurement_type: str | None = None,
     status_category: str | None = None,
     phase: str | None = None,
@@ -1589,6 +1718,20 @@ async def procurements_page(
     if value_max is not None and value_max < 0:
         value_max = None
     errors = []
+    for value, options, label in (
+        (contracting_form, CONTRACTING_FORM_LABELS, "forma de contratação"),
+        (licitation_modality, _LICITATION_MODALITY_LABELS, "modalidade de licitação"),
+        (auxiliary_procedure, AUXILIARY_PROCEDURES, "procedimento auxiliar"),
+    ):
+        if value and value not in options:
+            errors.append(f"Selecione uma opção válida para {label}.")
+    object_scope = None
+    try:
+        object_scope = ObjectScope.build(
+            object_query, object_preset or (), object_group, government_sphere
+        )
+    except ValueError as exc:
+        errors.append(str(exc))
     if invalid_cnpj:
         errors.append(
             "CNPJ inválido informado. Corrija o campo para aplicar a busca; nenhum filtro foi removido."
@@ -1614,7 +1757,12 @@ async def procurements_page(
             agency=agency,
             agency_cnpj=selected_agency_cnpj,
             company_cnpj=selected_company_cnpj,
+            company_participation_only=company_participation_only,
             modalities=selected_modalities,
+            contracting_form=contracting_form,
+            licitation_modality=licitation_modality,
+            auxiliary_procedure=auxiliary_procedure,
+            object_scope=object_scope,
             procurement_type=selected_type,
             status_category=selected_category,
             phase=selected_phase,
@@ -1643,8 +1791,18 @@ async def procurements_page(
                 agency_cnpj=agency_cnpj,
                 company_cnpj=company_cnpj,
                 company_cnpj_valid=selected_company_cnpj,
+                company_participation_only=company_participation_only,
                 invalid_cnpj=invalid_cnpj,
                 modalities=selected_modalities,
+                contracting_form=contracting_form,
+                licitation_modality=licitation_modality,
+                auxiliary_procedure=auxiliary_procedure,
+                object_query=object_query or "",
+                object_preset=object_preset or (),
+                object_group=object_group,
+                government_sphere=object_scope.government_sphere
+                if object_scope
+                else government_sphere,
                 procurement_type=selected_type,
                 status_category=selected_category,
                 phase=selected_phase,
@@ -1652,11 +1810,17 @@ async def procurements_page(
                 value_min=value_min,
                 value_max=value_max,
             ),
-            "modality_options": [
-                (key, _PROCUREMENT_MODALITY_LABELS[key]) for key in _PROFILTER_MODALITY_KEYS
+            "contracting_forms": CONTRACTING_FORM_LABELS,
+            "licitation_modalities": _LICITATION_MODALITY_LABELS,
+            "auxiliary_procedures": AUXILIARY_PROCEDURES,
+            "object_presets": OBJECT_PRESETS,
+            "object_groups": OBJECT_GROUPS,
+            "government_spheres": GOVERNMENT_SPHERES,
+            "status_category_options": [
+                (key, label)
+                for key, label in _PROCUREMENT_STATUS_CATEGORY_LABELS.items()
+                if key != "desconhecida" or selected_category == key
             ],
-            "type_options": list(_PROCUREMENT_TYPE_LABELS.items()),
-            "status_category_options": list(_PROCUREMENT_STATUS_CATEGORY_LABELS.items()),
             "phase_options": list(_PROCUREMENT_PHASE_LABELS.items()),
         },
         status_code=422 if errors else 200,
@@ -1728,7 +1892,10 @@ async def procurement_items_page(
     statement = select(ProcurementItem, Procurement).join(ProcurementItem.procurement)
     if q.strip():
         statement = statement.where(
-            ProcurementItem.description.icontains(q.strip(), autoescape=True)
+            or_(
+                ProcurementItem.description.icontains(q.strip(), autoescape=True),
+                ProcurementItem.summary_description.icontains(q.strip(), autoescape=True),
+            )
         )
     if agency.strip():
         statement = statement.where(
@@ -2154,7 +2321,7 @@ async def price_registries_page(
                 if item.allows_adhesion
                 else ("Não" if item.allows_adhesion is not None else "Não informado")
             ),
-            source=item.source,
+            source=_label(item.source, _SOURCE_LABELS),
         )
         for item in result.items
     ]
@@ -2289,6 +2456,7 @@ async def price_registry_page(
     registry = await PriceRegistryRepository(db).get_detail(registry_id)
     if registry is None:
         raise HTTPException(status_code=404, detail="Ata não encontrada")
+    registry_source = _public_link(registry.source_url)
     return templates.TemplateResponse(
         request,
         "ata_detail.html",
@@ -2316,8 +2484,9 @@ async def price_registry_page(
                 pncp_control_number=_display_text(registry.pncp_control_number),
                 linked_control_number=_display_text(registry.linked_pncp_control_number),
                 procurement_id=registry.procurement_id,
-                source_url=registry.source_url,
-                source=registry.source,
+                source_url=registry_source,
+                source_link_label=source_link_label(registry_source) if registry_source else None,
+                source=_label(registry.source, _SOURCE_LABELS),
             ),
             "items": [
                 SimpleNamespace(
@@ -3005,6 +3174,9 @@ async def leads_page(
     include_history: bool = False,
     db: AsyncSession = Depends(get_db),
 ):
+    export = request.url.path == "/leads/exportar.csv"
+    implicit_queue = not export and not any(key != "page" for key in request.query_params)
+    effective_due = "open" if implicit_queue else due
     selected = OpportunityFilters(
         query=q.strip(),
         status=lead_status or "",
@@ -3014,7 +3186,7 @@ async def leads_page(
         include_history=include_history,
         created_from=created_from,
         created_to=created_to,
-        due=due,
+        due=effective_due,
         run_id=run,
         timezone=get_settings().timezone,
     )
@@ -3026,7 +3198,7 @@ async def leads_page(
     if run and await db.get(CrawlRun, run) is None:
         raise HTTPException(404, "Coleta não encontrada")
     selected = await resolve_queue_filters(db, selected)
-    if request.url.path == "/leads/exportar.csv":
+    if export:
         from app.services.opportunity_export import opportunity_csv
 
         if errors:
@@ -3054,6 +3226,13 @@ async def leads_page(
         .all()
     )
     context = _list_context(request, "/leads")
+    if implicit_queue:
+        context["list_url"] = "/leads?" + urlencode({"due": "open", "page": page_number})
+    export_url = request.url.remove_query_params(["page", "page_size"]).replace(
+        path="/leads/exportar.csv"
+    )
+    if implicit_queue:
+        export_url = export_url.include_query_params(due="open")
     leads = await _lead_views(db, rows, return_to=context["list_url"])
     filters = SimpleNamespace(
         min_score=min_score,
@@ -3064,7 +3243,7 @@ async def leads_page(
         created_from=created_from.isoformat() if created_from else "",
         created_to=created_to.isoformat() if created_to else "",
         q=q,
-        due=due,
+        due=effective_due,
         run=str(run) if run else "",
     )
     return templates.TemplateResponse(
@@ -3073,6 +3252,7 @@ async def leads_page(
         {
             "leads": leads,
             "filters": filters,
+            "export_url": export_url,
             **context,
             "filter_errors": errors,
             "event_options": list(_EVENT_TYPE_LABELS.items()),
@@ -3161,6 +3341,7 @@ async def _render_lead_page(
         else None
     )
     data = model_dict(lead)
+    act = _event_act_view(lead.triggering_event, lead.company)
     data.update(
         company_name=lead.company.legal_name or lead.company.normalized_name,
         cnpj=lead.company.cnpj,
@@ -3168,14 +3349,17 @@ async def _render_lead_page(
         created_at=_local_datetime(lead.created_at),
         updated_at=_local_datetime(lead.updated_at),
         draft_created_at=_local_datetime(draft.created_at) if draft else None,
-        event_label=_label(lead.triggering_event.event_type, _EVENT_TYPE_LABELS),
+        event_label=act.label,
+        event_scope=act.scope,
+        reason_summary=act.reason if act.award else lead.reason_summary,
         event_at=_local_datetime(
             lead.triggering_event.occurred_at or lead.triggering_event.published_at
         ),
         lead_status=_label(lead.lead_status, _LEAD_STATUS_LABELS),
         process=lead.procurement.purchase_number or lead.procurement.title or "Contratação",
         agency=lead.procurement.agency_name or "Órgão não informado",
-        official_url=_public_link(lead.procurement.source_url),
+        official_url=procurement_source_page(lead.procurement),
+        technical_url=_public_link(lead.procurement.source_url),
         origin_platform_url=await _origin_platform_url(db, lead.procurement),
     )
     view = SimpleNamespace(**data)
@@ -3206,11 +3390,8 @@ async def _render_lead_page(
             else None
         )
     )
-    deadline_is_current = bool(
-        lead.deadline_id
-        and await db.scalar(
-            select(Deadline.id).where(Deadline.id == lead.deadline_id, deadline_current())
-        )
+    current_deadline_ids, pending_revalidation = await _deadline_display_ids(
+        db, {lead.deadline_id} if lead.deadline_id else set()
     )
     return_to = safe_list_url(request.query_params.get("return_to"))
     queue_filters = OpportunityFilters.from_url(return_to, timezone=get_settings().timezone)
@@ -3230,7 +3411,11 @@ async def _render_lead_page(
             "integrity_notice": notice,
             "reviews": reviews,
             "contacts": contacts,
-            "deadline": _deadline_view(lead.deadline, current=deadline_is_current),
+            "deadline": _deadline_view(
+                lead.deadline,
+                current=current and lead.deadline_id in current_deadline_ids,
+                revalidation_pending=lead.deadline_id in pending_revalidation,
+            ),
             "review_feedback": request.query_params.get("review"),
             "review_error": review_error,
             "review_form": review_form or {},
@@ -3348,6 +3533,7 @@ async def review_lead_from_web(
 async def crawls_page(
     request: Request, run: UUID | None = None, db: AsyncSession = Depends(get_db)
 ):
+    settings = get_settings()
     views, has_active = await _crawl_views(db, run)
     progress_views, llm_status = await _crawl_monitor_views(db)
     return templates.TemplateResponse(
@@ -3362,8 +3548,9 @@ async def crawls_page(
             "resumable_crawls": await _resumable_crawl_views(db),
             "llm_status": llm_status,
             "ufs": _BRAZILIAN_UFS,
-            "selected_uf": get_settings().default_uf,
-            "period": _collection_period(get_settings().default_lookback_days),
+            "selected_uf": settings.default_uf,
+            "period": _collection_period(settings.default_lookback_days),
+            **_collection_object_options(settings),
         },
     )
 
@@ -3439,7 +3626,7 @@ async def _resumable_crawl_views(db: AsyncSession) -> list[SimpleNamespace]:
         .where(
             CollectionWorkItem.batch_id == CollectionBatch.id,
             CollectionWorkItem.kind == "record",
-            CollectionWorkItem.status.in_(("pending", "failed")),
+            CollectionWorkItem.status.in_(("pending", "failed", "details_pending")),
         )
         .exists()
     )
@@ -3613,22 +3800,44 @@ async def collect_all_from_web(
     start_date: OptionalDateForm = Form(None),
     end_date: OptionalDateForm = Form(None),
     force_refresh: bool = Form(False),
+    modalities: list[str] | None = Form(None),
+    object_query: str | None = Form(None),
+    object_preset: list[str] | None = Form(None),
+    object_group: str | None = Form(None),
+    government_sphere: str | None = Form(None),
+    procurements_only: bool = Form(False),
 ) -> RedirectResponse:
     """Start one background run across the available sources and record categories."""
     settings = get_settings()
     region = (uf or settings.default_uf).strip().upper()
     if region not in dict(_BRAZILIAN_UFS):
         raise HTTPException(422, "Selecione uma UF válida")
-    start_date, end_date = _validate_collection_dates(start_date, end_date)
-    if start_date and end_date and (end_date == date.max or (end_date - start_date).days >= 3650):
-        raise HTTPException(422, "Informe um período de até 3.650 dias")
+    selected, object_scope = _new_procurement_collection_filters(
+        settings,
+        start_date,
+        end_date,
+        days=settings.default_lookback_days,
+        modalities=modalities,
+        object_query=object_query,
+        object_preset=object_preset,
+        object_group=object_group,
+        government_sphere=government_sphere,
+    )
     if start_date is None or end_date is None:
         period = _collection_period(settings.default_lookback_days)
         start_date, end_date = (
             date.fromisoformat(period.start_date),
             date.fromisoformat(period.end_date),
         )
-    scope = CollectionScope(region, start_date, end_date, force_refresh=force_refresh)
+    scope = CollectionScope(
+        region,
+        start_date,
+        end_date,
+        force_refresh=force_refresh,
+        modalities=selected,
+        object_scope=object_scope,
+        procurements_only=procurements_only,
+    )
     service = CompleteCollection(settings)
     try:
         ticket = await service.enqueue(scope)
@@ -3642,16 +3851,32 @@ async def collect_all_from_web(
 async def run_crawl_from_web(
     connector: str = Form("all"),
     uf: str = Form("MA"),
-    days: int = Form(7, ge=1, le=3650),
+    days: int = Form(7, ge=1, le=732),
     start_date: OptionalDateForm = Form(None),
     end_date: OptionalDateForm = Form(None),
     batch_size: int = Form(30, ge=1, le=500),
     process_documents: bool = Form(False),
     force_refresh: bool = Form(False),
+    modalities: list[str] | None = Form(None),
+    object_query: str | None = Form(None),
+    object_preset: list[str] | None = Form(None),
+    object_group: str | None = Form(None),
+    government_sphere: str | None = Form(None),
 ) -> RedirectResponse:
     """Start a default crawl from the dashboard without exposing JSON details."""
 
-    start_date, end_date = _validate_collection_dates(start_date, end_date)
+    settings = get_settings()
+    selected, object_scope = _new_procurement_collection_filters(
+        settings,
+        start_date,
+        end_date,
+        days=days,
+        modalities=modalities,
+        object_query=object_query,
+        object_preset=object_preset,
+        object_group=object_group,
+        government_sphere=government_sphere,
+    )
     uf = uf.strip().upper()
     if connector not in {"all", "pncp", "compras_gov"} or uf not in dict(_BRAZILIAN_UFS):
         raise HTTPException(422, "Selecione uma fonte e uma UF válidas.")
@@ -3661,6 +3886,9 @@ async def run_crawl_from_web(
         days=None if start_date else days,
         start_date=start_date,
         end_date=end_date,
+        modalities=selected or tuple(settings.default_modalities),
+        object_scope=object_scope,
+        calendar_months=use_calendar_slices(start_date, end_date, days),
         process_documents=process_documents,
         document_batch_size=max(1, batch_size),
         force_refresh=force_refresh,
@@ -3706,6 +3934,10 @@ def _retry_request(
         unit_code=filters.get("unit_code"),
         price_registry_scopes=restore_price_registry_scopes(filters),
         keyword=filters.get("keyword"),
+        object_scope=ObjectScope.from_mapping(filters["object_scope"])
+        if filters.get("object_scope")
+        else None,
+        calendar_months=bool(filters.get("calendar_months")),
         max_pages=filters.get("max_pages"),
         process_documents=bool(filters.get("process_documents", True)),
         document_batch_size=filters.get("document_batch_size"),

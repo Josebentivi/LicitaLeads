@@ -60,7 +60,6 @@ print(json.dumps({
 """
 
 DATABASE_SNIPPET = """\
-import asyncio
 import sqlite3
 from contextlib import closing
 from pathlib import Path
@@ -68,6 +67,7 @@ from pathlib import Path
 from alembic.config import Config
 from alembic.script import ScriptDirectory
 
+from app.async_runtime import run_database_async
 from app.config import get_settings
 
 
@@ -98,10 +98,13 @@ async def check() -> int:
                 ).fetchone()[0]
         else:
             from sqlalchemy import text
-            from app.database import engine
+            from app.database import dispose_database, engine
 
-            async with engine.connect() as connection:
-                current = await connection.scalar(text("SELECT version_num FROM alembic_version"))
+            try:
+                async with engine.connect() as connection:
+                    current = await connection.scalar(text("SELECT version_num FROM alembic_version"))
+            finally:
+                await dispose_database()
     except Exception as exc:
         print(f"banco inacessivel ({exc.__class__.__name__})")
         return 1
@@ -112,7 +115,7 @@ async def check() -> int:
     return 0
 
 
-raise SystemExit(asyncio.run(check()))
+raise SystemExit(run_database_async(check()))
 """
 
 
@@ -1124,19 +1127,28 @@ def _wait_for_server(
     channel = runtime.channel
     forced: list[str] = []
     complete_at: float | None = None
-    while process.poll() is None or (
-        channel.requested
-        and scheduler is not None
-        and scheduler.process is not None
-        and scheduler.process.poll() is None
-    ):
-        if channel.requested:
+    deadline: float | None = None
+    previous_state: tuple[str, tuple[str, ...], bool] | None = None
+    while True:
+        if deadline is None:
+            request = channel.read("request")
+            requested_at = request.get("requested_at")
+            if request.get("instance") == channel.instance and isinstance(
+                requested_at, (int, float)
+            ):
+                deadline = float(requested_at) + SHUTDOWN_SECONDS
+        running = process.poll() is None
+        if deadline is None:
+            if not running:
+                break
+        else:
             stopped = (
                 scheduler is None
                 or scheduler.process is None
                 or scheduler.process.poll() is not None
             )
-            deadline = float(channel.read("request")["requested_at"]) + SHUTDOWN_SECONDS
+            if not running and stopped:
+                break
             if time.time() >= deadline:
                 if not stopped and scheduler and scheduler.process:
                     forced.append("scheduler")
@@ -1155,15 +1167,18 @@ def _wait_for_server(
                 phase = "exit" if time.monotonic() - complete_at >= 3 else "complete"
             else:
                 phase = "cancelling"
-            channel.write(
-                "launcher", {"phase": phase, "forced": forced, "scheduler_stopped": stopped}
-            )
+            state = (phase, tuple(forced), stopped)
+            if state != previous_state:
+                channel.write(
+                    "launcher", {"phase": phase, "forced": forced, "scheduler_stopped": stopped}
+                )
+                previous_state = state
             if complete_at is not None and time.monotonic() - complete_at >= 8:
                 forced.append("api")
                 _stop_owned_tree(process)
                 break
         time.sleep(0.2)
-    if channel.requested:
+    if deadline is not None:
         receipt = channel.receipt()
         incomplete = not receipt.get("cleanup_complete", False)
         atomic_json(channel.receipt_path, {**receipt, "forced": forced, "finished_at": time.time()})

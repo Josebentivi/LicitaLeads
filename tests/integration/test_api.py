@@ -333,7 +333,7 @@ async def test_procurement_cnpj_filters(
     assert invalid_company.status_code == 422
     assert "CNPJ da empresa" in invalid_company.json()["detail"]
     assert page.status_code == 200
-    assert "ver empresa" in page.text
+    assert f'href="/empresas/{company_cnpj}"' in page.text
     assert invalid_page.status_code == 422
     assert "CNPJ inválido informado" in invalid_page.text
     assert 'value="123"' in invalid_page.text
@@ -577,7 +577,7 @@ async def test_help_page_documents_the_lawyer_workflow(
         "O que é a plataforma",
         "Palavras que você vai ver",
         "Passo a passo por tela",
-        "Como ler o score de um lead",
+        "Como ler a pontuação de prioridade",
         "O que a plataforma não faz",
         "Perguntas frequentes",
         "Para quem opera as coletas",

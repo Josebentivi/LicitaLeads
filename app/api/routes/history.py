@@ -56,6 +56,8 @@ FIELD_LABELS = {
     "unit": "Unidade",
     "description": "Descrição",
     "object_description": "Objeto",
+    "object_complement": "Complemento do objeto",
+    "summary_description": "Descrição resumida do item",
     "title": "Título",
     "is_srp": "Registro de preços",
     "allows_adhesion": "Permite adesão",

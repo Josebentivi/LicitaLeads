@@ -10,7 +10,7 @@
   </div>
   <div class="header-actions">
     <span class="badge">{{ registry.status }}</span>
-    {% if registry.source_url %}<a class="button secondary" href="{{ registry.source_url }}" target="_blank" rel="noopener">Abrir fonte oficial</a>{% endif %}
+    {% if registry.source_url %}<a class="button secondary" href="{{ registry.source_url }}" target="_blank" rel="noopener">{{ registry.source_link_label }}</a>{% endif %}
   </div>
 </header>
 <section class="procurement-summary" aria-label="Resumo da ata">
@@ -27,8 +27,9 @@
     <div><dt>Fonte</dt><dd>{{ registry.source }}</dd></div>
   </dl>
 </section>
+<p class="hint">“Não informado” indica um dado ausente no acervo. Uma seção sem registros pode depender da cobertura da fonte ou da etapa de coleta. <a href="/crawls">Acompanhar coletas</a> · <a href="/ajuda#atas">Entender os dados das atas</a></p>
 <section class="panel procurement-section">
-  <div class="section-heading"><div><h2>Itens registrados</h2><p class="hint">Fornecedor, quantidades e preços conforme publicação oficial; itens ausentes indicam limitação da fonte.</p></div></div>
+  <div class="section-heading"><div><h2>Itens registrados</h2><p class="hint">Fornecedor, quantidades e preços conforme publicação oficial.</p></div></div>
   <div class="table-wrap">
   <table><thead><tr><th>Item</th><th>Descrição</th><th>Quantidade</th><th>Unidade</th><th>Valor unitário</th><th>Valor total</th><th>Adesão máxima</th><th>Fornecedor</th></tr></thead>
   <tbody>{% for item in items %}<tr>
@@ -47,7 +48,7 @@
 <section class="panel procurement-section">
   <div class="section-heading"><div><h2>Unidades e saldos</h2><p class="hint">Saldos coletados no módulo ARP do Compras.gov.br.</p></div></div>
   <div class="table-wrap">
-  <table><thead><tr><th>Item</th><th>Codigo</th><th>Descricao</th><th>Fornecedor</th><th>Registrado</th><th>Saldo adesoes</th><th>Saldo remanejamento</th><th>Limite adesao</th><th>Unidade</th><th>Aceita adesao</th><th>Atualizado</th></tr></thead>
+  <table><thead><tr><th>Item</th><th>Código</th><th>Descrição</th><th>Fornecedor</th><th>Registrado</th><th>Saldo de adesões</th><th>Saldo de remanejamento</th><th>Limite de adesão</th><th>Unidade</th><th>Aceita adesão</th><th>Atualizado</th></tr></thead>
   <tbody>{% for unit in units %}<tr>
     <td>{{ unit.item_number }}</td><td>{{ unit.catalog_code }}</td><td><small>{{ unit.description }}</small></td><td>{{ unit.supplier_name }}</td>
     <td>{{ unit.quantity_registered }}</td><td>{{ unit.adhesion_balance }}</td><td>{{ unit.remanejamento_balance }}</td><td>{{ unit.adhesion_limit }}</td>
@@ -66,7 +67,7 @@
   </div>
 </section>
 <section class="panel procurement-section">
-  <div class="section-heading"><div><h2>Adesoes de outros orgaos</h2><p class="hint">Adesoes registradas ("caronas"). Nao confundir com uso da ata apenas como referencia de preco.</p></div></div>
+  <div class="section-heading"><div><h2>Adesões de outros órgãos</h2><p class="hint">Adesões formalizadas por unidades que usam a ata (“caronas”).</p></div></div>
   <div class="table-wrap">
   <table><thead><tr><th>Item</th><th>Unidade aderente</th><th>Aprovada em</th><th>Quantidade</th></tr></thead>
   <tbody>{% for adhesion in adhesions %}<tr>

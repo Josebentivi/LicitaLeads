@@ -140,7 +140,45 @@ _MODALITY_CATEGORIES: dict[str, str] = {
     "credenciamento": PROCUREMENT_TYPE_PROCEDIMENTO_AUXILIAR,
     "pre_qualificacao": PROCUREMENT_TYPE_PROCEDIMENTO_AUXILIAR,
     "manifestacao_de_interesse": PROCUREMENT_TYPE_PROCEDIMENTO_AUXILIAR,
+    "registro_cadastral": PROCUREMENT_TYPE_PROCEDIMENTO_AUXILIAR,
 }
+
+
+LICITATION_MODALITIES = {
+    "pregao": ("Pregão", ("pregao", "pregao_eletronico", "pregao_presencial")),
+    "concorrencia": (
+        "Concorrência",
+        ("concorrencia", "concorrencia_eletronica", "concorrencia_presencial"),
+    ),
+    "concurso": ("Concurso", ("concurso",)),
+    "leilao": ("Leilão", ("leilao", "leilao_eletronico", "leilao_presencial")),
+    "dialogo_competitivo": ("Diálogo competitivo", ("dialogo_competitivo",)),
+}
+DIRECT_CONTRACTING_MODALITIES = {
+    "dispensa": ("dispensa", "dispensa_eletronica"),
+    "inexigibilidade": ("inexigibilidade",),
+}
+CONTRACTING_FORM_LABELS = {
+    "licitacao": "Licitação",
+    "dispensa": "Contratação direta por dispensa",
+    "inexigibilidade": "Contratação direta por inexigibilidade",
+}
+AUXILIARY_PROCEDURES = {
+    "credenciamento": "Credenciamento",
+    "pre_qualificacao": "Pré-qualificação",
+    "manifestacao_de_interesse": "Procedimento de manifestação de interesse",
+    "registro_cadastral": "Registro cadastral",
+}
+
+
+def contracting_form(value: str | None) -> str | None:
+    key = canonical_modality(value)
+    for form, modalities in DIRECT_CONTRACTING_MODALITIES.items():
+        if key in modalities:
+            return form
+    if modality_category(key) == PROCUREMENT_TYPE_LICITACAO:
+        return "licitacao"
+    return None
 
 
 def modality_category(value: str | None) -> str | None:

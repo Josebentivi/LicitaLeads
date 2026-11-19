@@ -8,7 +8,10 @@
 <label>De <input type="date" name="start_date" value="{{ values.get('start_date', '') }}" form="complete-collection-form"></label>
 <label>Até <input type="date" name="end_date" value="{{ values.get('end_date', '') }}" form="complete-collection-form"></label>
 <label class="checkbox"><input type="checkbox" name="force_refresh" value="true" form="complete-collection-form"{% if values.get('force_refresh') == 'true' %} checked{% endif %}> Reconsultar detalhes já verificados</label>
-</div><p>Depois de corrigir as datas, use <strong>Coletar dados</strong> no topo.</p><a href="{{ back }}">Voltar a Coletas</a></section>
+<label class="checkbox"><input type="checkbox" name="procurements_only" value="true" form="complete-collection-form"{% if values.get('procurements_only') == 'true' %} checked{% endif %}> Somente contratações e documentos</label>
+</div>
+{% with target_form = 'complete-collection-form' %}{% include '_procurement_collection_scope.html' %}{% endwith %}
+<p>Depois de corrigir os campos, use <strong>Coletar dados</strong> no topo.</p><a href="{{ back }}">Voltar a Coletas</a></section>
 {% else %}
 <form method="post" action="{{ action }}" class="panel" data-submit-once><div class="filters">
 <label>Fonte <select name="connector">{% for value,label in [('all','Todas as fontes disponíveis'),('pncp','PNCP'),('compras_gov','Compras.gov.br')] %}<option value="{{ value }}"{% if values.get('connector', 'all') == value %} selected{% endif %}>{{ label }}</option>{% endfor %}</select></label>
@@ -18,6 +21,8 @@
 {% if action == '/atas/collect' %}<input type="hidden" name="registry_scope" value="{{ values.get('registry_scope', '') }}"><p>O órgão/unidade selecionado foi preservado. Para mudar a unidade, <a href="/atas">volte à seleção de atas</a>.</p>{% endif %}
 {% if action == '/crawls/run' %}<label>Documentos por lote <input name="batch_size" type="number" min="1" max="500" value="{{ values.get('batch_size', '30') }}"></label><label class="checkbox"><input type="checkbox" name="process_documents" value="true"{% if values.get('process_documents') == 'true' %} checked{% endif %}> Baixar/processar documentos</label>{% endif %}
 <label class="checkbox"><input type="checkbox" name="force_refresh" value="true"{% if values.get('force_refresh') == 'true' %} checked{% endif %}> Reconsultar detalhes já verificados</label>
-</div><button type="submit" data-busy-label="Iniciando…">Tentar iniciar coleta</button> <a href="{{ back }}">Voltar à página de coleta</a></form>
+</div>
+{% if action == '/crawls/run' %}{% include '_procurement_collection_scope.html' %}{% endif %}
+<button type="submit" data-busy-label="Iniciando…">Tentar iniciar coleta</button> <a href="{{ back }}">Voltar à página de coleta</a></form>
 {% endif %}
 {% endblock %}

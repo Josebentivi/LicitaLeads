@@ -12,6 +12,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import write_session
 from app.models import CollectionBatch, CollectionSyncState, CrawlRunStatus
+from app.services.collection_periods import (
+    earliest_collection_day,
+    normalize_discovery_kind,
+    use_calendar_slices,
+)
 from app.services.ingestion.collection_batches import digest, latest_limited_batch
 from app.services.ingestion.continuation import pipeline_request_from_filters
 
@@ -99,6 +104,11 @@ async def prepare_scheduled(
             end = today
             kind = "update" if request.connector == "pncp" else request.discovery_kind
             strategy = "incremental"
+        if request.mode == "procurements":
+            kind = normalize_discovery_kind(kind)
+        publication = request.mode == "procurements" and kind == "publication"
+        if publication and request.start_date is None:
+            start = max(start, earliest_collection_day(today))
         context = {
             "key": key,
             "strategy": strategy,
@@ -118,6 +128,7 @@ async def prepare_scheduled(
             discovery_kind=kind,
             resume_automatically=True,
             sync_context=context,
+            calendar_months=publication and use_calendar_slices(start, end),
         )
         state.pending_request = planned.as_json()
     if bootstrap:

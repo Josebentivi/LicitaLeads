@@ -1,6 +1,8 @@
 """Browser-level journeys verify JavaScript/HTMX and their isolated DB effects."""
 
 import sqlite3
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 import httpx
 import pytest
@@ -17,9 +19,12 @@ def test_complete_collection_updates_registry_catalog(browser, runtime):
     assert len(browser.find_elements(By.CSS_SELECTOR, "#complete-collection-form button")) == 1
     assert not browser.find_elements(By.CSS_SELECTOR, "form[action='/atas/collect']")
     browser.get(runtime.url + "/crawls")
+    today = datetime.now(ZoneInfo("America/Sao_Paulo")).date()
     browser.execute_script(
-        "document.querySelector('#escopo [name=start_date]').value='2026-01-01';"
-        "document.querySelector('#escopo [name=end_date]').value='2026-12-31';"
+        "document.querySelector('#escopo [name=start_date]').value=arguments[0];"
+        "document.querySelector('#escopo [name=end_date]').value=arguments[1];",
+        today.replace(month=1, day=1).isoformat(),
+        today.isoformat(),
     )
     browser.find_element(By.CSS_SELECTOR, "#complete-collection-form button").click()
     wait = WebDriverWait(browser, 35)

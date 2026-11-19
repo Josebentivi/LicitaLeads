@@ -18,6 +18,7 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 from app import __version__
 from app.ai_web import router as ai_web_router
 from app.api.router import api_router
+from app.async_runtime import configure_uvicorn_loop
 from app.company_web import router as company_web_router
 from app.config import get_settings
 from app.logging import configure_logging
@@ -122,4 +123,9 @@ async def maintenance_error(_request: Request, exc: MaintenanceInProgress):
 
 if __name__ == "__main__":
     settings = get_settings()
-    uvicorn.run("app.main:app", host=settings.app_host, port=settings.app_port)
+    uvicorn.run(
+        "app.main:app",
+        host=settings.app_host,
+        port=settings.app_port,
+        loop=configure_uvicorn_loop(settings.database_url),
+    )

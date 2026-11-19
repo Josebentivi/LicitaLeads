@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-import asyncio
 from logging.config import fileConfig
 
 from alembic import context
 from sqlalchemy import Connection, pool
 from sqlalchemy.ext.asyncio import async_engine_from_config
 
+from app.async_runtime import run_database_async
 from app.config import get_settings
 from app.database import normalize_async_database_url
 from app.models import Base
@@ -62,7 +62,7 @@ async def run_async_migrations() -> None:
 
 
 def run_migrations_online() -> None:
-    asyncio.run(run_async_migrations())
+    run_database_async(run_async_migrations())
 
 
 if context.is_offline_mode():

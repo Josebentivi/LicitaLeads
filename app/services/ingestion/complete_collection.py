@@ -21,11 +21,13 @@ from app.connectors.municipal_payments.sources import (
 from app.database import async_session_factory, write_session
 from app.models import CrawlRun, CrawlRunStatus, JobLease, Procurement
 from app.repositories.crawls import JobLeaseRepository
+from app.services.collection_periods import use_calendar_slices
 from app.services.identifiers import is_valid_cnpj
 from app.services.ingestion.municipal_payments import MunicipalPaymentIngestionService
 from app.services.ingestion.payments import PaymentIngestionService
 from app.services.ingestion.pipeline import IngestionPipeline, PipelineRequest, PipelineSummary
 from app.services.price_registry_scopes import known_price_registry_scopes
+from app.services.procurement_search import ObjectScope
 
 COMPLETE_COLLECTION_LEASE = "complete-collection"
 COMPLETE_COLLECTION_MODE = "complete"
@@ -63,6 +65,22 @@ class CollectionScope:
     start_date: date
     end_date: date
     force_refresh: bool = False
+    modalities: tuple[str, ...] = ()
+    object_scope: ObjectScope | None = None
+    procurements_only: bool = False
+
+    def as_json(self) -> dict[str, Any]:
+        return {
+            "connector": COMPLETE_COLLECTION_MODE,
+            "mode": COMPLETE_COLLECTION_MODE,
+            "uf": self.uf,
+            "start_date": self.start_date.isoformat(),
+            "end_date": self.end_date.isoformat(),
+            "force_refresh": self.force_refresh,
+            **({"modalities": list(self.modalities)} if self.modalities else {}),
+            **({"object_scope": self.object_scope.as_json()} if self.object_scope else {}),
+            **({"procurements_only": True} if self.procurements_only else {}),
+        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -110,6 +128,7 @@ class CompleteCollection:
         """Reserve a single manual collection and reuse it on duplicate submission."""
         now = datetime.now(UTC)
         ticket = CollectionTicket(uuid4(), None)
+        filters = scope.as_json()
         async with write_session(self.sessions) as db:
             leases = JobLeaseRepository(db)
             await leases.assert_writes_allowed(now=now)
@@ -125,28 +144,26 @@ class CompleteCollection:
                     previous = await db.get(
                         CrawlRun, UUID(lease.owner_id.removeprefix("complete:"))
                     )
-                    if previous is not None and previous.status in _ACTIVE:
+                    if (
+                        previous is not None
+                        and previous.status in _ACTIVE
+                        and previous.filters == filters
+                    ):
                         return CollectionTicket(previous.id, None)
-                raise RuntimeError("A coleta completa já está reservada")
+                raise RuntimeError("Já há outra coleta em andamento.")
             assert lease is not None
             db.add(
                 CrawlRun(
                     id=ticket.run_id,
                     connector=COMPLETE_COLLECTION_MODE,
                     status=CrawlRunStatus.PENDING,
-                    filters={
-                        "connector": COMPLETE_COLLECTION_MODE,
-                        "mode": COMPLETE_COLLECTION_MODE,
-                        "uf": scope.uf,
-                        "start_date": scope.start_date.isoformat(),
-                        "end_date": scope.end_date.isoformat(),
-                        "force_refresh": scope.force_refresh,
-                    },
+                    filters=filters,
                     cursor={
                         "progress": {"stage": "queued", "updated_at": now.isoformat()},
                         "complete_stages": [
                             {"key": key, "label": label, "status": "pending", "run_ids": []}
                             for key, label in COLLECTION_STAGES
+                            if key == "procurements" or not scope.procurements_only
                         ],
                     },
                 )
@@ -283,12 +300,18 @@ class CompleteCollection:
                 await self._stage(ticket, key, outcome)
                 results.append(outcome.status)
 
-        financial = asyncio.create_task(chain(("municipal", "federal")))
-        procurement = asyncio.create_task(
-            chain(("procurements", "tce_ma", "price_registries", "contracts"))
-        )
+        tasks: tuple[asyncio.Task[None], ...]
+        if scope.procurements_only:
+            tasks = (asyncio.create_task(chain(("procurements",))),)
+        else:
+            tasks = (
+                asyncio.create_task(chain(("municipal", "federal"))),
+                asyncio.create_task(
+                    chain(("procurements", "tce_ma", "price_registries", "contracts"))
+                ),
+            )
         try:
-            await asyncio.gather(procurement, financial)
+            await asyncio.gather(*tasks)
             status = CrawlRunStatus(_combined_status(results))
         except _CollectionStopped:
             status = CrawlRunStatus.CANCELLED
@@ -298,12 +321,12 @@ class CompleteCollection:
         finally:
 
             async def finalize() -> None:
-                for task in (procurement, financial):
+                for task in tasks:
                     # Cancellation of the gather has already reached these
                     # tasks. A second cancellation can interrupt their rollback.
                     if not task.done() and not task.cancelling():
                         task.cancel()
-                await asyncio.gather(procurement, financial, return_exceptions=True)
+                await asyncio.gather(*tasks, return_exceptions=True)
                 heartbeat.cancel()
                 with suppress(asyncio.CancelledError, Exception):
                     await heartbeat
@@ -360,7 +383,13 @@ class CompleteCollection:
         return summary
 
     async def _procurements(self, ticket: CollectionTicket, scope: CollectionScope) -> StepResult:
-        summary = await self._collect_pipeline(ticket, self._request(scope, process_documents=True))
+        request = replace(
+            self._request(scope, process_documents=True),
+            modalities=scope.modalities or tuple(self.settings.default_modalities),
+            object_scope=scope.object_scope,
+            calendar_months=use_calendar_slices(scope.start_date, scope.end_date),
+        )
+        summary = await self._collect_pipeline(ticket, request)
         docs = summary.source_results.get("documents", {})
         return StepResult(
             summary.status.value,

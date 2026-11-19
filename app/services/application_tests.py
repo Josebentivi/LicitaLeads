@@ -35,6 +35,7 @@ from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app import __version__
+from app.async_runtime import run_subprocess_async
 from app.config import Settings, get_settings
 from app.connectors.capabilities import get_source_capabilities
 from app.connectors.municipal_payments.sources import (
@@ -1231,6 +1232,13 @@ class ApplicationTestService:
         self, command: list[str], environment: dict[str, str], timeout_seconds: float
     ) -> tuple[int, bytes]:
         """Own the child and its descendants through completion and cancellation."""
+        return await run_subprocess_async(
+            self._supervise_process(command, environment, timeout_seconds)
+        )
+
+    async def _supervise_process(
+        self, command: list[str], environment: dict[str, str], timeout_seconds: float
+    ) -> tuple[int, bytes]:
         environment = {
             key: value
             for key, value in environment.items()
