@@ -10,7 +10,8 @@ from datetime import UTC, date, datetime, timedelta
 from typing import Any
 from uuid import UUID, uuid4
 
-from sqlalchemy import select
+from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.config import Settings, get_settings
@@ -19,13 +20,26 @@ from app.connectors.municipal_payments.sources import (
     selected_municipal_sources,
 )
 from app.database import async_session_factory, write_session
-from app.models import CrawlRun, CrawlRunStatus, JobLease, Procurement
+from app.models import (
+    CollectionBatch,
+    CollectionWorkItem,
+    CrawlRun,
+    CrawlRunStatus,
+    JobLease,
+    Procurement,
+)
 from app.repositories.crawls import JobLeaseRepository
 from app.services.collection_periods import use_calendar_slices
 from app.services.identifiers import is_valid_cnpj
+from app.services.ingestion.continuation import (
+    ContinuationBusy,
+    create_continuation,
+    pipeline_request_from_filters,
+)
 from app.services.ingestion.municipal_payments import MunicipalPaymentIngestionService
 from app.services.ingestion.payments import PaymentIngestionService
 from app.services.ingestion.pipeline import IngestionPipeline, PipelineRequest, PipelineSummary
+from app.services.ingestion.recovery import finalize_cancelled_run
 from app.services.price_registry_scopes import known_price_registry_scopes
 from app.services.procurement_search import ObjectScope
 
@@ -220,8 +234,9 @@ class CompleteCollection:
             stage.update(
                 status=result.status,
                 note=result.note,
-                run_ids=[str(item) for item in result.run_ids],
             )
+            if result.run_ids or result.status != "running":
+                stage["run_ids"] = [str(item) for item in result.run_ids]
             if result.status == "running":
                 stage.setdefault("started_at", now.isoformat())
             else:
@@ -352,7 +367,7 @@ class CompleteCollection:
         )
 
     async def _collect_pipeline(
-        self, ticket: CollectionTicket, request: PipelineRequest
+        self, ticket: CollectionTicket, request: PipelineRequest, *, resume_from: UUID | None = None
     ) -> PipelineSummary:
         lease_names = self.pipeline._lease_names(request)
         waiting = False
@@ -375,12 +390,32 @@ class CompleteCollection:
             await asyncio.sleep(3)
         if waiting:
             await self._stage(ticket, request.mode, StepResult("running"))
-        async with self._locked(ticket):
-            pass
-        summary = await self.pipeline.run(replace(request, parent_run_id=ticket.run_id))
+        child_id: UUID | None = None
+        try:
+            async with self._locked(ticket) as (db, _):
+                if resume_from is not None:
+                    child, filters = await create_continuation(db, resume_from, require_latest=True)
+                    child_id = child.id
+                    request = pipeline_request_from_filters(filters)
+            request = replace(request, parent_run_id=ticket.run_id)
+            summary = (
+                await self.pipeline.run(request, run_id=child_id)
+                if child_id is not None
+                else await self.pipeline.run(request)
+            )
+        except asyncio.CancelledError:
+            if child_id is not None:
+                await self._cancel_unstarted_child(child_id)
+            raise
         if summary.status is CrawlRunStatus.CANCELLED:
             raise _CollectionStopped("Etapa cancelada")
         return summary
+
+    async def _cancel_unstarted_child(self, run_id: UUID) -> None:
+        async with write_session(self.sessions) as db:
+            run = await db.get(CrawlRun, run_id)
+            if run is not None and run.status is CrawlRunStatus.PENDING:
+                await finalize_cancelled_run(db, run)
 
     async def _procurements(self, ticket: CollectionTicket, scope: CollectionScope) -> StepResult:
         request = replace(
@@ -404,20 +439,98 @@ class CompleteCollection:
             scopes = tuple(await known_price_registry_scopes(db, scope.uf))
         if not scopes:
             return StepResult("skipped", "Nenhuma unidade conhecida nesta UF")
-        summary = await self._collect_pipeline(
-            ticket,
-            self._request(
-                scope,
-                mode="price_registries",
-                process_documents=False,
-                price_registry_scopes=scopes,
-            ),
+        request = self._request(
+            scope,
+            mode="price_registries",
+            process_documents=False,
+            price_registry_scopes=scopes,
         )
-        return StepResult(
-            summary.status.value,
-            f"{summary.records_created} atas novas · {len(scopes)} unidades",
-            [summary.run_id],
-        )
+        run_ids: list[UUID] = []
+        records_created = 0
+        seen = set()
+        last_revalidation_progress: int | None = None
+        summary = await self._collect_pipeline(ticket, request)
+        while True:
+            run_ids.append(summary.run_id)
+            records_created += summary.records_created
+            note = f"{records_created} atas novas · {len(scopes)} unidades"
+            result = StepResult(summary.status.value, note, run_ids)
+            if summary.status is not CrawlRunStatus.PARTIAL:
+                return result
+            checkpoint = await self._registry_checkpoint(summary.run_id)
+            if checkpoint is None:
+                return result
+            batch, work = checkpoint
+            state = (
+                batch.status,
+                tuple(
+                    (source, cursor.get("discovery_complete"), cursor.get("total_records"))
+                    for source, cursor in sorted(batch.cursors.items())
+                ),
+                work,
+            )
+            succeeded = sum(
+                count
+                for _, kind, status, count in work
+                if kind == "record" and status == "succeeded"
+            )
+            if state in seen or (
+                batch.status == "failed"
+                and last_revalidation_progress is not None
+                and succeeded <= last_revalidation_progress
+            ):
+                result.note += " · continuação sem progresso"
+                return result
+            seen.add(state)
+            if batch.status == "failed":
+                last_revalidation_progress = succeeded
+            await self._stage(
+                ticket,
+                "price_registries",
+                StepResult("running", f"{note} · retomando o lote salvo", run_ids),
+            )
+            try:
+                summary = await self._collect_pipeline(ticket, request, resume_from=summary.run_id)
+            except (ContinuationBusy, IntegrityError):
+                result.note += " · lote retomado por outra execução ou fonte ocupada"
+                return result
+
+    async def _registry_checkpoint(
+        self, run_id: UUID
+    ) -> tuple[CollectionBatch, tuple[tuple[str, str, str, int], ...]] | None:
+        async with self.sessions() as db:
+            batch = await db.scalar(
+                select(CollectionBatch)
+                .where(CollectionBatch.last_run_id == run_id)
+                .where(CollectionBatch.status.in_(["limited", "failed"]))
+            )
+            if batch is None:
+                return None
+            failures = [cursor for cursor in batch.cursors.values() if cursor.get("failed")]
+            # A changed page total invalidates the partition. The coordinator marks
+            # that discovery failure resumable because it can restart from page 1.
+            if batch.status == "failed" and (
+                not failures or not all(cursor.get("resumable") for cursor in failures)
+            ):
+                return None
+            identity = (
+                CollectionWorkItem.source,
+                CollectionWorkItem.kind,
+                CollectionWorkItem.status,
+            )
+            counts = await db.execute(
+                select(*identity, func.count())
+                .where(
+                    CollectionWorkItem.batch_id == batch.id,
+                    CollectionWorkItem.kind.in_(["record", "response"]),
+                )
+                .group_by(*identity)
+                .order_by(*identity)
+            )
+            work = tuple((source, kind, status, count) for source, kind, status, count in counts)
+            if any(kind == "record" and status == "failed" for _, kind, status, _ in work):
+                return None
+            return batch, work
 
     async def _contracts(self, ticket: CollectionTicket, scope: CollectionScope) -> StepResult:
         agencies = self.settings.contract_agency_cnpjs

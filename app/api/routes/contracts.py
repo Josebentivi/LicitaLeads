@@ -82,6 +82,8 @@ async def get_contract(contract_id: UUID, db: AsyncSession = Depends(get_db)) ->
     summary = await repository.payment_summary(
         contract, grace_days=get_settings().payment_grace_days
     )
+    terms_observation = await repository.latest_terms_observation(contract.id)
+    terms_evidence = terms_observation.source_record if terms_observation is not None else None
     return {
         "contract": model_dict(contract),
         "company": model_dict(contract.company) if contract.company else None,
@@ -92,5 +94,16 @@ async def get_contract(contract_id: UUID, db: AsyncSession = Depends(get_db)) ->
         "payments": [model_dict(payment) for payment in contract.payments],
         "items": [model_dict(item) for item in contract.items],
         "terms": [model_dict(term) for term in contract.terms],
+        "terms_availability": (
+            {
+                "availability": terms_observation.value,
+                "source": terms_observation.source,
+                "source_record_id": terms_evidence.id,
+                "http_status": terms_evidence.http_status,
+                "collected_at": terms_observation.collected_at,
+            }
+            if terms_observation is not None and terms_evidence is not None
+            else None
+        ),
         "payment_summary": summary,
     }

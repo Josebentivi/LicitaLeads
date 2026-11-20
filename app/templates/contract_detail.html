@@ -41,6 +41,12 @@
 </section>
 <section class="panel procurement-section">
   <div class="section-heading"><div><h2 id="termos">Termos e aditivos</h2><p class="hint">Confira a situação e a vigência publicada em cada termo.</p></div></div>
+  {% if terms_unavailable_source %}
+  <p class="hint">Termos indisponíveis na fonte. O PNCP confirmou a exclusão do contrato (HTTP 410).
+    {% if terms_unavailable_source.url %}<a href="{{ terms_unavailable_source.url }}" target="_blank" rel="noopener noreferrer">Resposta oficial</a>{% endif %}
+    <small>Registro de origem · {{ terms_unavailable_source.id }}</small>
+  </p>
+  {% endif %}
   <div class="table-wrap">
   <table><thead><tr><th>Termo</th><th>Tipo</th><th>Assinatura</th><th>Publicacao</th><th>Valor</th><th>Nova vigencia</th><th>Objeto</th><th>Fonte</th></tr></thead>
   <tbody>{% for term in terms %}<tr>

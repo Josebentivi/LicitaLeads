@@ -2635,6 +2635,8 @@ async def contract_page(
     summary = await repository.payment_summary(
         contract, grace_days=get_settings().payment_grace_days
     )
+    terms_observation = await repository.latest_terms_observation(contract.id)
+    terms_evidence = terms_observation.source_record if terms_observation is not None else None
     return templates.TemplateResponse(
         request,
         "contract_detail.html",
@@ -2683,6 +2685,14 @@ async def contract_page(
                 "pago": "Os pagamentos vinculados atingem o valor de referência do contrato.",
                 "parcial": "Os pagamentos vinculados cobrem parte do valor de referência.",
             }.get(str(summary["status"]), "Situação de pagamento não avaliada."),
+            "terms_unavailable_source": (
+                SimpleNamespace(
+                    id=terms_evidence.id,
+                    url=_public_link(terms_evidence.endpoint),
+                )
+                if terms_evidence is not None and terms_evidence.http_status == 410
+                else None
+            ),
             "items": [
                 SimpleNamespace(
                     item_number=_display_text(item.item_number),

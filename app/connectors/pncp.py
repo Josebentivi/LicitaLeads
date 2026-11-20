@@ -82,7 +82,7 @@ PNCP_MODALITY_CODES: dict[str, int] = {
 }
 
 _CONTROL_NUMBER = re.compile(
-    r"^(?P<cnpj>[A-Z0-9]{14})-\d-(?P<sequence>\d{1,9})/(?P<year>\d{4})$",
+    r"^(?P<cnpj>[A-Z0-9]{14})-(?P<kind>\d)-(?P<sequence>\d{1,9})/(?P<year>\d{4})$",
     re.IGNORECASE,
 )
 _COMPOSITE_ID = re.compile(
@@ -969,8 +969,23 @@ class PNCPConnector:
                 availability=DataAvailability.NOT_PUBLISHED,
                 diagnostic="contract agency/year/sequence not published; terms cannot be queried",
             )
-        path = f"orgaos/{contract.agency_cnpj}/contratos/{contract.year}/{contract.sequence}/termos"
-        rows, refs, records, pagination, error = await self._collect_integration(path)
+        path = f"orgaos/{contract.agency_cnpj}/contratos/{contract.year}/{contract.sequence}"
+        rows, refs, records, pagination, error = await self._collect_integration(f"{path}/termos")
+        if (
+            not records
+            and isinstance(error, ConnectorHTTPError)
+            and error.status_code in {404, 410}
+        ):
+            removal = await self._confirm_contract_removal(contract, path)
+            if removal is not None:
+                return ConnectorResult(
+                    data=[],
+                    availability=DataAvailability.NOT_PUBLISHED,
+                    source_urls=[removal.endpoint],
+                    raw_records=[removal],
+                    collected_at=removal.collected_at,
+                    diagnostic="Termos indisponíveis por exclusão confirmada pelo PNCP (HTTP 410)",
+                )
         by_ref = self._records_by_ref(records)
         valid = [
             (row, ref)
@@ -1004,6 +1019,40 @@ class PNCPConnector:
             partial=partial,
             diagnostic="partial result: contract term collection incomplete" if partial else None,
         )
+
+    async def _confirm_contract_removal(
+        self, contract: RawContract, detail_path: str
+    ) -> RawSourceRecord | None:
+        """Verify the contract itself before treating its terms as unavailable."""
+        if contract.source != self.name:
+            return None
+        identifier = contract.pncp_control_number or contract.external_id
+        control_number = _CONTROL_NUMBER.fullmatch(identifier.strip())
+        if control_number and control_number["kind"] != "2":
+            return None
+        try:
+            reference = parse_pncp_external_id(identifier)
+        except ValueError:
+            return None
+        if (reference.cnpj, reference.year, reference.sequence) != (
+            contract.agency_cnpj,
+            contract.year,
+            contract.sequence,
+        ):
+            return None
+        endpoint = join_url(self.integration_base_url, detail_path)
+        try:
+            response = await self._http.request_json(
+                "GET",
+                endpoint,
+                bypass_replay=True,
+                accepted_error_statuses=frozenset({410}),
+            )
+        except _HTTP_EXCEPTIONS:
+            return None
+        if response.status_code == 410 and httpx.URL(response.url) == httpx.URL(endpoint):
+            return source_record(self.name, response)
+        return None
 
     def _map_contract_term(
         self, row: dict[str, Any], contract: RawContract, source_url: str

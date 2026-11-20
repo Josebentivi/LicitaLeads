@@ -8,7 +8,9 @@ import httpx
 import pytest
 
 from app.connectors import DataAvailability, ProcurementFilters
-from app.connectors.http import AsyncHTTPClient
+from app.connectors.base import RawContract
+from app.connectors.continuation import ResponseReplay
+from app.connectors.http import AsyncHTTPClient, ConnectorHTTPError
 from app.connectors.pncp import PNCPConnector, parse_pncp_external_id
 from app.services.procurement_search import ObjectScope
 
@@ -577,8 +579,6 @@ async def test_contract_discovery_retains_rows_but_rejects_incomplete_coverage(
 
 @pytest.mark.asyncio
 async def test_pncp_contract_terms_are_mapped() -> None:
-    from app.connectors.base import RawContract
-
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(
             200,
@@ -618,6 +618,153 @@ async def test_pncp_contract_terms_are_mapped() -> None:
     assert result.data[0].term_type == "Aditivo de valor"
     assert result.data[0].value_delta == 100
     await raw_client.aclose()
+
+
+def _term_contract() -> RawContract:
+    return RawContract(
+        source="pncp",
+        external_id="12345678000199-2-000001/2026",
+        pncp_control_number="12345678000199-2-000001/2026",
+        agency_cnpj="12345678000199",
+        year=2026,
+        sequence=1,
+    )
+
+
+@pytest.mark.parametrize(
+    ("terms_status", "detail_body"),
+    [(404, {"status": 410, "message": "O contrato/empenho informado foi excluído."}), (410, "")],
+    ids=["terms-not-found-with-json-evidence", "terms-gone-without-body"],
+)
+@pytest.mark.parametrize("legacy_identifier", [False, True])
+async def test_pncp_confirms_contract_removal_and_returns_non_retracting_term_evidence(
+    terms_status: int, detail_body: dict[str, object] | str, legacy_identifier: bool
+) -> None:
+    detail_path = "/api/pncp/v1/orgaos/12345678000199/contratos/2026/1"
+    requests = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.path == detail_path + "/termos":
+            return httpx.Response(terms_status)
+        assert request.url.path == detail_path
+        if isinstance(detail_body, dict):
+            return httpx.Response(410, json=detail_body)
+        return httpx.Response(410, text=detail_body)
+
+    async def unexpected_checkpoint(*args) -> None:
+        pytest.fail("HTTP errors must not be saved as a replayable official page")
+
+    contract = _term_contract()
+    if legacy_identifier:
+        contract = contract.model_copy(
+            update={"pncp_control_number": None, "external_id": "12345678000199:2026:1"}
+        )
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as raw:
+        http = AsyncHTTPClient(_settings(), client=raw)
+        replay = ResponseReplay(
+            http, [], unexpected_checkpoint, unexpected_checkpoint, source="pncp"
+        )
+        connector = PNCPConnector(_settings(), http_client=http)
+        result = await connector.fetch_contract_terms(contract)
+        assert [request.url.path for request in requests] == [detail_path + "/termos", detail_path]
+        assert dict(requests[1].url.params) == {}
+        assert replay.cache == {}
+        with pytest.raises(ConnectorHTTPError, match="HTTP 410"):
+            await http.request_json("GET", f"https://pncp.test{detail_path}")
+
+    assert result.data == []
+    assert result.availability is DataAvailability.NOT_PUBLISHED
+    assert not result.partial
+    assert not result.is_complete
+    assert "HTTP 410" in (result.diagnostic or "")
+    (evidence,) = result.raw_records
+    assert evidence.endpoint == f"https://pncp.test{detail_path}"
+    assert evidence.http_status == 410
+    assert evidence.raw_payload == detail_body
+    assert evidence.collected_at == result.collected_at
+
+
+@pytest.mark.parametrize("detail_status", [200, 404, 503])
+async def test_pncp_terms_not_found_without_removal_confirmation_remains_partial(
+    detail_status: int,
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/termos"):
+            return httpx.Response(404)
+        return httpx.Response(detail_status, json={"status": detail_status})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as raw:
+        connector = PNCPConnector(_settings(), http_client=AsyncHTTPClient(_settings(), client=raw))
+        result = await connector.fetch_contract_terms(_term_contract())
+
+    assert result.availability is DataAvailability.NOT_PUBLISHED
+    assert result.partial
+    assert result.raw_records == []
+
+
+async def test_pncp_terms_gone_after_successful_page_preserves_collected_terms() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path.endswith("/termos")
+        if request.url.params["pagina"] == "1":
+            return httpx.Response(
+                200,
+                json={"data": [{"sequencialTermoContrato": 1}], "totalPaginas": 2},
+            )
+        return httpx.Response(410)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as raw:
+        connector = PNCPConnector(_settings(), http_client=AsyncHTTPClient(_settings(), client=raw))
+        result = await connector.fetch_contract_terms(_term_contract())
+
+    assert result.availability is DataAvailability.AVAILABLE
+    assert result.partial
+    assert [term.term_number for term in result.data] == ["1"]
+    assert [record.http_status for record in result.raw_records] == [200]
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"sequence": 2},
+        {"pncp_control_number": "12345678000199-1-000001/2026"},
+        {"pncp_control_number": "12345678000199-3-000001/2026"},
+        {"source": "compras_gov"},
+    ],
+    ids=["mismatched-sequence", "purchase-control", "price-registry-control", "other-source"],
+)
+async def test_pncp_does_not_confirm_removal_if_header_identity_conflicts(
+    overrides: dict[str, object],
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path.endswith("/termos")
+        return httpx.Response(404)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as raw:
+        connector = PNCPConnector(_settings(), http_client=AsyncHTTPClient(_settings(), client=raw))
+        result = await connector.fetch_contract_terms(_term_contract().model_copy(update=overrides))
+
+    assert result.partial
+    assert result.raw_records == []
+
+
+async def test_pncp_does_not_accept_removal_at_a_redirect_destination() -> None:
+    detail_path = "/api/pncp/v1/orgaos/12345678000199/contratos/2026/1"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == detail_path + "/termos":
+            return httpx.Response(404)
+        if request.url.path == detail_path:
+            return httpx.Response(307, headers={"Location": "/unrelated"})
+        assert request.url.path == "/unrelated"
+        return httpx.Response(410)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as raw:
+        connector = PNCPConnector(_settings(), http_client=AsyncHTTPClient(_settings(), client=raw))
+        result = await connector.fetch_contract_terms(_term_contract())
+
+    assert result.partial
+    assert result.raw_records == []
 
 
 @pytest.mark.asyncio

@@ -253,11 +253,13 @@ class AsyncHTTPClient:
         headers: Mapping[str, str] | None = None,
         rate_scope: str | None = None,
         bypass_replay: bool = False,
+        accepted_error_statuses: frozenset[int] = frozenset(),
     ) -> HTTPJSONResponse:
         """Request JSON, retrying only transport errors and transient statuses.
 
         rate_scope names a fixed adapter operation shared by all its records;
         it narrows adaptive pacing, never origin-wide Retry-After or capacity.
+        accepted_error_statuses allows an adapter to retain a specific HTTP error as evidence.
         """
 
         request_params = {key: value for key, value in (params or {}).items() if value is not None}
@@ -352,7 +354,7 @@ class AsyncHTTPClient:
                     await self._retry_sleep(delay)
                 continue
 
-            if response.is_error:
+            if response.is_error and response.status_code not in accepted_error_statuses:
                 raise ConnectorHTTPError(
                     status_code=response.status_code,
                     url=str(response.request.url),
@@ -387,15 +389,18 @@ class AsyncHTTPClient:
                 try:
                     payload = response.json()
                 except ValueError as exc:
-                    raise ConnectorDecodeError(
-                        f"Invalid JSON returned by {response.request.url}",
-                        status_code=response.status_code,
-                        url=str(response.request.url),
-                        content_type=response.headers.get("content-type", ""),
-                        body=response.text,
-                    ) from exc
+                    if not response.is_error:
+                        raise ConnectorDecodeError(
+                            f"Invalid JSON returned by {response.request.url}",
+                            status_code=response.status_code,
+                            url=str(response.request.url),
+                            content_type=response.headers.get("content-type", ""),
+                            body=response.text,
+                        ) from exc
+                    payload = response.text
 
-            await self._rate_success(url, rate_generation, rate_scope=rate_scope)
+            if not response.is_error:
+                await self._rate_success(url, rate_generation, rate_scope=rate_scope)
 
             page = request_params.get("pagina", request_params.get("page"))
             total_pages = payload.get("totalPaginas") if isinstance(payload, dict) else None

@@ -10,14 +10,15 @@ from zoneinfo import ZoneInfo
 
 from sqlalchemy import Select, and_, case, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import selectinload
+from sqlalchemy.orm import joinedload, selectinload
 
-from app.models import Company, Contract, ContractTerm, Payment
+from app.models import Company, Contract, ContractTerm, FieldObservation, Payment
 from app.models.entities import MunicipalBudgetEntry
 from app.repositories.base import BaseRepository, Page
 from app.services.municipal_budget import budget_function_label, public_budget_values
 
 _PAYMENT_PHASES = ("pagamento", "pago", "pago_agregado", "3")
+CONTRACT_TERMS_AVAILABILITY_FIELD = "terms_availability"
 
 
 def contract_value(contract: Contract) -> Decimal | None:
@@ -66,6 +67,20 @@ class ContractRepository(BaseRepository[Contract]):
                 selectinload(Contract.items),
                 selectinload(Contract.terms),
             )
+        )
+
+    async def latest_terms_observation(self, contract_id: UUID) -> FieldObservation | None:
+        return await self.session.scalar(
+            select(FieldObservation)
+            .options(joinedload(FieldObservation.source_record, innerjoin=True))
+            .where(
+                FieldObservation.entity_type == "contract",
+                FieldObservation.entity_id == contract_id,
+                FieldObservation.field_name == CONTRACT_TERMS_AVAILABILITY_FIELD,
+                FieldObservation.source == "pncp",
+            )
+            .order_by(FieldObservation.collected_at.desc(), FieldObservation.id.desc())
+            .limit(1)
         )
 
     async def list_filtered(

@@ -132,10 +132,16 @@ Também existem `POST /api/crawls/{id}/continue` (202, 404 ou 409) e
 `python -m app.cli continue-crawl ID`. Uma segunda continuação concorrente é
 recusada. O ponto de confirmação avança na transação que grava o registro.
 
+Na coleta geral, a etapa de atas continua o mesmo lote enquanto houver trabalho
+após o limite de uma execução e a fila avançar. Cada continuação usa o período e
+as unidades já definidos, processa os registros salvos e grava pelas identidades
+oficiais. Quando a fonte altera o total de uma paginação, a etapa pode retomar a
+partição invalidada. Falhas persistentes e cancelamentos deixam o lote disponível
+para continuação explícita.
+
 Os fluxos agendados retomam lotes limitados no próximo ciclo normal, respeitando
-a pausa geral. Falhas e cancelamentos exigem retomada explícita; uma falha de
-registro não faz os outros registros válidos serem descartados. Importações
-manuais são continuadas pelo botão ou CLI, sem reenviar o arquivo.
+a pausa geral. Importações manuais são continuadas pelo botão ou CLI, sem
+reenviar o arquivo.
 
 Nas fontes paginadas, o conector reconstrói os resultados usando respostas
 salvas localmente. A página de fronteira é consultada novamente antes de buscar
@@ -233,7 +239,8 @@ páginas de atas, compartilhada entre unidades. Uma página final é sempre pres
 suas sobras ficam na fila. A continuação consome primeiro os registros salvos, com consulta
 SQL limitada, antes de buscar mais páginas. Zero mantém a ausência desse limite. O total
 informado pela fonte, cabeçalhos recebidos e registros selecionados são mostrados separadamente.
-Falhas reais exigem continuação explícita mesmo quando também existem sobras por limite.
+Falhas de fonte ou de registros que persistem exigem continuação explícita, inclusive
+quando também existem sobras por limite.
 
 Jobs automáticos disputam os mesmos leases por fonte/UF. Uma fonte ocupada adia o job sem
 criar uma coleta falha nem avançar a rotação de rechecagem; fontes diferentes continuam

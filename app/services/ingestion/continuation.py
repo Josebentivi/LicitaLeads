@@ -19,7 +19,7 @@ class ContinuationBusy(ValueError):
 
 
 async def create_continuation(
-    session: AsyncSession, run_id: UUID
+    session: AsyncSession, run_id: UUID, *, require_latest: bool = False
 ) -> tuple[CrawlRun, dict[str, Any]]:
     await JobLeaseRepository(session).assert_writes_allowed(now=datetime.now(UTC))
     parent = await session.get(CrawlRun, run_id)
@@ -34,6 +34,8 @@ async def create_continuation(
     )
     if batch is None or batch.status == "complete":
         raise ContinuationBusy("Esta coleta não possui trabalho pendente")
+    if require_latest and batch.last_run_id != run_id:
+        raise ContinuationBusy("O lote já tem uma execução mais recente")
     active = await session.scalar(
         select(CrawlRun.id)
         .where(

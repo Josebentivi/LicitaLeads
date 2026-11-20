@@ -395,6 +395,13 @@ A janela inclui hoje e o último dia em horário de Brasília. Ordena os contrat
 primeira data publicada no intervalo. `valid_until` conserva a data do cabeçalho
 e `term_expirations` apresenta as datas dos termos com situação e origem para conferência.
 
+No detalhe do contrato, `terms_availability` informa a última observação
+conclusiva do PNCP, com data, status HTTP e identificador do registro de origem.
+Quando a consulta ao detalhe confirma a exclusão com HTTP 410, a disponibilidade
+dos termos é registrada como `not_published`. Os cabeçalhos e termos coletados
+anteriormente fazem parte do histórico. Uma consulta posterior bem-sucedida
+atualiza a disponibilidade com sua própria evidência.
+
 No detalhe do contrato, `payment_summary.payment_count` conta os registros vigentes
 da fase de pagamento vinculados ao contrato. `paid_value` e `balance` ficam nulos
 quando a contagem é zero ou algum desses registros está sem valor. A situação

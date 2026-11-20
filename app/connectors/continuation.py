@@ -172,6 +172,9 @@ class ResponseReplay:
             _, validators, _ = prior
             kwargs = {**kwargs, "headers": {**(kwargs.get("headers") or {}), **validators}}
         response = await self.original(method, url, **kwargs)
+        if response.status_code >= 400:
+            # A caller can accept an error as evidence without making it a replayable page.
+            return response
         revalidated = response.status_code == 304
         if revalidated:
             if prior is None or self.on_revalidated is None:

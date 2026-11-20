@@ -13,6 +13,7 @@ from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from enum import Enum
 from typing import Any, cast
+from urllib.parse import urlsplit
 from uuid import UUID, uuid4
 from zoneinfo import ZoneInfo
 
@@ -78,6 +79,7 @@ from app.models import (
     ProcurementSource,
     SourceRecord,
 )
+from app.repositories.contracts import CONTRACT_TERMS_AVAILABILITY_FIELD
 from app.repositories.crawls import JobLeaseRepository
 from app.repositories.procurements import ProcurementRepository
 from app.services.collection_periods import calendar_month_slices, normalize_discovery_kind
@@ -1564,6 +1566,7 @@ class IngestionPipeline:
                 items=items.data if items.is_available else [],
                 item_source_record_ids=self._source_id_map(items.raw_records, persisted_items),
                 terms=terms.data if terms.is_available else [],
+                terms_result=terms,
                 term_source_record_ids=self._source_id_map(terms.raw_records, persisted_terms),
                 fallback_item_source_record_id=self._single_source_id(persisted_items),
                 fallback_term_source_record_id=self._single_source_id(persisted_terms),
@@ -1633,6 +1636,7 @@ class IngestionPipeline:
         items: list[RawContractItem] | None = None,
         item_source_record_ids: dict[str, UUID] | None = None,
         terms: list[RawContractTerm] | None = None,
+        terms_result: ConnectorResult[list[RawContractTerm]] | None = None,
         term_source_record_ids: dict[str, UUID] | None = None,
         fallback_item_source_record_id: UUID | None = None,
         fallback_term_source_record_id: UUID | None = None,
@@ -1790,6 +1794,10 @@ class IngestionPipeline:
                 )
                 term_entity.status = raw_term.status or term_entity.status
                 term_entity.source_url = raw_term.source_url or term_entity.source_url
+            if terms_result is not None and term_source_record_ids:
+                await self._observe_contract_terms(
+                    session, contract.id, raw, terms_result, term_source_record_ids
+                )
             await session.flush()
             self._record().outcome = tracker.outcome
             await self._save_verification(session)
@@ -1802,6 +1810,63 @@ class IngestionPipeline:
                     details_failed=self._record().details_failed,
                 )
             return created
+
+    @staticmethod
+    async def _observe_contract_terms(
+        session: AsyncSession,
+        contract_id: UUID,
+        raw: RawContract,
+        result: ConnectorResult[list[RawContractTerm]],
+        source_ids: dict[str, UUID],
+    ) -> None:
+        if raw.source != "pncp" or not (raw.agency_cnpj and raw.year and raw.sequence):
+            return
+        detail_path = f"/orgaos/{raw.agency_cnpj}/contratos/{raw.year}/{raw.sequence}"
+        unavailable = (
+            result.availability is ConnectorAvailability.NOT_PUBLISHED and not result.partial
+        )
+        if unavailable:
+            path, statuses = detail_path, {410}
+        elif result.is_complete:
+            path, statuses = f"{detail_path}/termos", {200, 204, 205}
+        else:
+            return
+        proof = max(
+            (
+                response
+                for response in result.raw_records
+                if response.source == raw.source
+                and response.http_status in statuses
+                and urlsplit(response.endpoint).path.rstrip("/").endswith(path)
+            ),
+            key=lambda response: response.collected_at,
+            default=None,
+        )
+        if proof is None:
+            return
+        source_record_id = source_ids[proof.record_key]
+        fingerprint = stable_fingerprint(
+            CONTRACT_TERMS_AVAILABILITY_FIELD, contract_id, source_record_id
+        )
+        if await session.scalar(
+            select(FieldObservation.id).where(FieldObservation.fingerprint == fingerprint)
+        ):
+            return
+        session.add(
+            FieldObservation(
+                entity_type="contract",
+                entity_id=contract_id,
+                field_name=CONTRACT_TERMS_AVAILABILITY_FIELD,
+                value=result.availability.value,
+                value_status=(
+                    FieldValueStatus.NOT_AVAILABLE if unavailable else FieldValueStatus.OBSERVED
+                ),
+                source=raw.source,
+                source_record_id=source_record_id,
+                collected_at=proof.collected_at,
+                fingerprint=fingerprint,
+            )
+        )
 
     async def _price_registry_detail(
         self,

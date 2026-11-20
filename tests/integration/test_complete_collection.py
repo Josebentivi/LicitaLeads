@@ -2,15 +2,19 @@
 
 import asyncio
 from datetime import UTC, date, datetime
+from types import SimpleNamespace
 from uuid import uuid4
 
+import httpx
 import pytest
 from bs4 import BeautifulSoup
 from sqlalchemy import func, select
 
 from app.config import Settings
-from app.connectors.base import ConnectorResult, RawSourceRecord
+from app.connectors.base import ConnectorResult, PaginationInfo, RawPriceRegistry, RawSourceRecord
 from app.connectors.base import DataAvailability as ConnectorAvailability
+from app.connectors.http import AsyncHTTPClient
+from app.connectors.pncp import PNCPConnector
 from app.connectors.tce_ma import SincContrataResource, SincContrataRow, TCEMAConnector
 from app.models import (
     CollectionBatch,
@@ -19,6 +23,7 @@ from app.models import (
     CrawlRunStatus,
     JobLease,
     Lead,
+    PriceRegistry,
     Procurement,
     ProcurementEvent,
     ProcurementSource,
@@ -35,6 +40,205 @@ from app.services.ingestion.complete_collection import (
 from app.services.ingestion.tce_ma_observations import tce_observations_for
 
 SCOPE = CollectionScope("MA", date(2026, 5, 1), date(2026, 7, 31))
+
+
+@pytest.fixture
+def collection_with_registries(database, monkeypatch):
+    settings = Settings(
+        _env_file=None,
+        crawl_max_pages=1,
+        crawl_max_records_per_source=0,
+        http_max_concurrency=1,
+        http_min_request_interval_seconds=0,
+        http_max_retries=0,
+    )
+    collection = CompleteCollection(settings, sessions=database.sessions)
+
+    async def skip(ticket, scope):
+        return StepResult("skipped")
+
+    for stage in ("_procurements", "_tce", "_contracts", "_municipal", "_federal"):
+        monkeypatch.setattr(collection, stage, skip)
+    return collection
+
+
+async def _seed_arp_unit(database):
+    async with database.sessions.begin() as db:
+        db.add(
+            Procurement(
+                source="pncp",
+                external_id="arp-unit-anchor",
+                agency_cnpj="00000000000191",
+                agency_name="Órgão de Exemplo",
+                uf="MA",
+                uasg="980921",
+                fingerprint="arp-unit-anchor",
+            )
+        )
+
+
+@pytest.mark.parametrize(
+    "source_outcome", ["complete", "record_limit", "new_total", "failed", "cancelled"]
+)
+async def test_general_collection_continues_the_same_arp_batch(
+    database, monkeypatch, collection_with_registries, source_outcome
+):
+    collection = collection_with_registries
+    if source_outcome == "record_limit":
+        monkeypatch.setattr(collection.settings, "crawl_max_records_per_source", 1)
+    startup = asyncio.Event()
+    requests: list[int] = []
+    await _seed_arp_unit(database)
+
+    async def handler(request):
+        page = int(request.url.params["pagina"])
+        assert request.url.params["dataInicial"] == "20260501"
+        assert request.url.params["dataFinal"] == "20260731"
+        assert request.url.params["codigoUnidadeAdministrativa"] == "980921"
+        requests.append(page)
+        if source_outcome == "failed" and page == 2:
+            return httpx.Response(503)
+        if source_outcome == "cancelled" and len(requests) == 2:
+            startup.set()
+            await asyncio.Event().wait()
+        total = 2 if source_outcome == "new_total" and len(requests) == 1 else 3
+        serials = range(1, 4) if source_outcome == "record_limit" else (page,)
+        return httpx.Response(
+            200,
+            json={
+                "data": [
+                    {
+                        "numeroControlePNCPAta": f"00000000000191-1-{serial:06}/2026",
+                        "anoAta": 2026,
+                        "numeroAtaRegistroPreco": str(serial),
+                        "cnpjOrgao": "00000000000191",
+                        "codigoUnidadeOrgao": "980921",
+                    }
+                    for serial in serials
+                ],
+                "totalPaginas": 1 if source_outcome == "record_limit" else total,
+                "totalRegistros": total,
+            },
+        )
+
+    def make_connectors(source):
+        raw_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        http = AsyncHTTPClient(collection.settings, client=raw_client)
+        connector = PNCPConnector(collection.settings, http_client=http)
+        monkeypatch.setattr(connector, "aclose", raw_client.aclose)
+        return [connector]
+
+    monkeypatch.setattr(collection.pipeline, "_selected_connectors", make_connectors)
+    ticket = await collection.enqueue(SCOPE)
+    worker = asyncio.create_task(collection.run(ticket, SCOPE))
+    try:
+        if source_outcome == "cancelled":
+            await asyncio.wait_for(startup.wait(), 10)
+            worker.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await worker
+        else:
+            await asyncio.wait_for(worker, 10)
+    finally:
+        if not worker.done():
+            worker.cancel()
+            await asyncio.gather(worker, return_exceptions=True)
+
+    expected_requests = {
+        "complete": [1, 1, 2, 2, 3],
+        "record_limit": [1],
+        "new_total": [1, 1, 1, 1, 2, 2, 3],
+        "failed": [1, 1, 2],
+        "cancelled": [1, 1],
+    }
+    assert requests == expected_requests[source_outcome]
+    async with database.sessions() as db:
+        root = await db.get_one(CrawlRun, ticket.run_id)
+        batches = (await db.scalars(select(CollectionBatch))).all()
+        (batch,) = batches
+        children = (
+            await db.scalars(
+                select(CrawlRun).where(CrawlRun.batch_id == batch.id).order_by(CrawlRun.created_at)
+            )
+        ).all()
+        assert all(row.filters["parent_run_id"] == str(ticket.run_id) for row in children)
+        assert all(row.filters["start_date"] == "2026-05-01" for row in children)
+        assert all(row.filters["end_date"] == "2026-07-31" for row in children)
+        assert len({row.filters["price_registry_scopes"][0]["key"] for row in children}) == 1
+        assert await db.scalar(select(func.count()).select_from(JobLease)) == 0
+        step = next(s for s in root.cursor["complete_stages"] if s["key"] == "price_registries")
+        if source_outcome in ("complete", "record_limit", "new_total"):
+            assert root.status is CrawlRunStatus.COMPLETED
+            assert batch.status == "complete"
+            assert step["status"] == "completed" and "3 atas novas" in step["note"]
+            expected_registries = 3
+        else:
+            assert root.status.value == (
+                "cancelled" if source_outcome == "cancelled" else "partial"
+            )
+            assert batch.status == ("suspended" if source_outcome == "cancelled" else "failed")
+            expected_registries = 1
+        if source_outcome != "cancelled":
+            assert step["run_ids"] == [str(row.id) for row in children]
+        assert (
+            await db.scalar(select(func.count()).select_from(PriceRegistry)) == expected_registries
+        )
+
+
+async def test_general_collection_stops_arp_continuation_when_checkpoint_repeats(
+    database, monkeypatch, collection_with_registries
+):
+    collection = collection_with_registries
+    calls = 0
+    await _seed_arp_unit(database)
+
+    async def discover(filters):
+        nonlocal calls
+        calls += 1
+        assert calls <= 2
+        return ConnectorResult(
+            data=[
+                RawPriceRegistry(
+                    source="pncp",
+                    source_url="https://pncp.gov.br/api/consulta/v1/atas",
+                    external_id="same-ata",
+                    pncp_control_number="same-ata",
+                )
+            ],
+            availability=ConnectorAvailability.AVAILABLE,
+            pagination=PaginationInfo(truncated=True),
+            partial=True,
+        )
+
+    async def close():
+        pass
+
+    async def no_items(external_id):
+        return ConnectorResult(data=[], availability=ConnectorAvailability.NOT_SUPPORTED)
+
+    monkeypatch.setattr(
+        collection.pipeline,
+        "_selected_connectors",
+        lambda source: [
+            SimpleNamespace(
+                name="pncp",
+                discover_price_registries=discover,
+                fetch_price_registry_items=no_items,
+                aclose=close,
+            )
+        ],
+    )
+    ticket = await collection.enqueue(SCOPE)
+    await asyncio.wait_for(collection.run(ticket, SCOPE), 10)
+
+    async with database.sessions() as db:
+        run = await db.get_one(CrawlRun, ticket.run_id)
+        assert run.status is CrawlRunStatus.PARTIAL
+        assert (await db.scalar(select(CollectionBatch))).status == "limited"
+        assert await db.scalar(select(func.count()).select_from(PriceRegistry)) == 1
+        step = next(s for s in run.cursor["complete_stages"] if s["key"] == "price_registries")
+        assert calls == len(step["run_ids"]) == 2
+        assert "continuação sem progresso" in step["note"]
 
 
 @pytest.mark.parametrize("cancel", [False, True])

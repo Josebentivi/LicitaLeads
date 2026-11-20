@@ -15,9 +15,12 @@ from app.models import (
     CollectionBatch,
     CollectionWorkItem,
     Contract,
+    ContractTerm,
     CrawlRun,
     CrawlRunStatus,
+    FieldObservation,
     FieldState,
+    FieldValueStatus,
     PriceRegistry,
     Procurement,
     SourceRecord,
@@ -340,6 +343,132 @@ async def test_empty_contract_response_completes_a_failed_collection_on_resume(d
             )
         )
         assert [record.availability for record in responses] == [DataAvailability.EMPTY]
+
+
+async def test_resume_preserves_terms_when_pncp_confirms_contract_removal(database, api_client):
+    settings = Settings(_env_file=None, http_min_request_interval_seconds=0)
+    control = "00000000000191-2-000001/2026"
+    detail_path = "/api/pncp/v1/orgaos/00000000000191/contratos/2026/1"
+    exclusion = {"status": 410, "message": "O contrato foi excluído.", "path": detail_path}
+    discovery = {
+        "data": [
+            {
+                "numeroControlePNCP": control,
+                "orgaoEntidade": {"cnpj": "00000000000191"},
+                "anoContrato": 2026,
+                "sequencialContrato": 1,
+                "numeroContratoEmpenho": "10",
+                "situacaoContratoNome": "Publicado",
+            }
+        ],
+        "totalRegistros": 1,
+        "totalPaginas": 1,
+    }
+    historical_term = {
+        "sequencialTermoContrato": 1,
+        "numeroTermoContrato": "1",
+        "tipoTermoContratoNome": "Aditivo de prazo",
+        "objetoTermoContrato": "Prorrogação publicada",
+    }
+
+    async def collect(terms_status, detail_status=None, *, continuing=None):
+        def handler(http_request):
+            path = http_request.url.path
+            if path == "/api/consulta/v1/contratos":
+                assert continuing is None
+                return httpx.Response(200, json=discovery)
+            if path == f"{detail_path}/termos":
+                if terms_status == 200:
+                    return httpx.Response(200, json=[historical_term])
+                return httpx.Response(terms_status)
+            assert path == detail_path and detail_status is not None
+            return httpx.Response(
+                detail_status, json=exclusion if detail_status == 410 else {"status": detail_status}
+            )
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            connector = PNCPConnector(
+                settings, http_client=AsyncHTTPClient(settings, client=client)
+            )
+            pipeline = IngestionPipeline(
+                settings, session_factory=database.sessions, connectors={"pncp": connector}
+            )
+            if continuing is None:
+                return await pipeline.run(request)
+            run_id, filters = continuing
+            return await pipeline.run(pipeline_request_from_filters(filters), run_id=run_id)
+
+    request = PipelineRequest(
+        connector="pncp",
+        mode="contracts",
+        start_date=date(2026, 10, 1),
+        end_date=date(2026, 10, 31),
+        process_documents=False,
+    )
+    original = await collect(200)
+    assert original.status is CrawlRunStatus.COMPLETED
+    async with database.sessions() as session:
+        contract = (await session.scalars(select(Contract))).one()
+        term = (await session.scalars(select(ContractTerm))).one()
+        contract_id, term_id = contract.id, term.id
+        original_status, term_source_id = contract.status, term.source_record_id
+
+    incomplete = await collect(404, 404)
+    assert incomplete.status is CrawlRunStatus.PARTIAL
+    async with database.sessions.begin() as session:
+        resumed, filters = await create_continuation(session, incomplete.run_id)
+        resumed_id, batch_id = resumed.id, resumed.batch_id
+
+    gone = await collect(404, 410, continuing=(resumed_id, filters))
+    assert gone.status is CrawlRunStatus.COMPLETED, gone.diagnostics
+    assert (gone.records_created, gone.records_updated) == (0, 1)
+    async with database.sessions() as session:
+        batch = await session.get_one(CollectionBatch, batch_id)
+        assert batch.status == "complete"
+        detail_proof = (
+            await session.scalars(
+                select(SourceRecord).where(
+                    SourceRecord.crawl_run_id == resumed_id, SourceRecord.http_status == 410
+                )
+            )
+        ).one()
+        assert detail_proof.raw_payload == exclusion
+        assert detail_proof.collection_complete is False
+        observation = (
+            await session.scalars(
+                select(FieldObservation).where(
+                    FieldObservation.entity_id == contract_id,
+                    FieldObservation.field_name == "terms_availability",
+                    FieldObservation.value_status == FieldValueStatus.NOT_AVAILABLE,
+                )
+            )
+        ).one()
+        assert observation.source_record_id == detail_proof.id
+        assert observation.collected_at == detail_proof.collected_at
+        proof_id = observation.source_record_id
+        contract = (await session.scalars(select(Contract))).one()
+        term = (await session.scalars(select(ContractTerm))).one()
+        assert (contract.id, contract.status) == (contract_id, original_status)
+        assert (term.id, term.source_record_id) == (term_id, term_source_id)
+
+    detail = (await api_client.get(f"/api/contracts/{contract_id}")).json()
+    assert detail["terms_availability"]["availability"] == DataAvailability.NOT_PUBLISHED
+    assert detail["terms_availability"]["http_status"] == 410
+    assert detail["terms_availability"]["source_record_id"] == str(proof_id)
+    assert [term["id"] for term in detail["terms"]] == [str(term_id)]
+    page = await api_client.get(f"/contratos/{contract_id}")
+    assert "Termos indisponíveis na fonte" in page.text
+    assert "Prorrogação publicada" in page.text
+
+    restored = await collect(204)
+    assert restored.status is CrawlRunStatus.COMPLETED
+    detail = (await api_client.get(f"/api/contracts/{contract_id}")).json()
+    assert detail["terms_availability"]["availability"] == DataAvailability.EMPTY
+    assert [term["id"] for term in detail["terms"]] == [str(term_id)]
+    page = await api_client.get(f"/contratos/{contract_id}")
+    assert "Termos indisponíveis na fonte" not in page.text
+    async with database.sessions() as session:
+        assert await session.get(SourceRecord, proof_id) is not None
 
 
 async def test_real_connector_replays_saved_pages_after_worker_restart(database):
