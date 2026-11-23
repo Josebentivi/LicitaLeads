@@ -149,7 +149,8 @@ Jobs (intervalos configuráveis em `SCHEDULER_*`):
 | `recalculate_deadlines` | 30 min | Recalcula prazos |
 | `enrich_pending_companies` | 24 h | Contatos corporativos |
 | `reconcile_stale_crawls` | 15 min | Marca coletas travadas como `failed` para permitir retry |
-| `crawl_configured_contracts` / `poll_configured_payments` | 24 h quando configurados | Contratos por órgão e pagamentos por fornecedor |
+| `crawl_configured_contracts` | 24 h quando configurado | Contratos por órgão |
+| `poll_configured_payments` | 24 h com a fonte federal e a chave habilitadas | Pagamentos por CNPJ ativo em **Pagamentos › Acompanhamento federal** |
 | `poll_municipal_payments` | 24 h quando configurado | Fontes municipais selecionadas |
 
 Cada job roda sob um lease no banco (`JobLease`): se outra instância já detém o

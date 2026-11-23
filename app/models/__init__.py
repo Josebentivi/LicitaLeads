@@ -77,6 +77,7 @@ from app.models.participation import (
     ParticipantValue,
     ReconciliationRun,
 )
+from app.models.payment_tracking import PaymentTrackingTarget
 
 __all__ = [
     "DocumentAlias",
@@ -130,6 +131,7 @@ __all__ = [
     "OutreachDraft",
     "Participant",
     "Payment",
+    "PaymentTrackingTarget",
     "ParticipantRole",
     "ParticipantStatus",
     "PriceRegistry",

@@ -113,7 +113,7 @@ segundos, sem ocupar capacidade de rede.
 | `ALLOW_INSECURE_HTTP_SOURCES` | `false` | Opt-in explícito para fontes municipais que só publicam HTTP; HTTPS continua preferido |
 | `SAO_LUIS_PAYMENTS_URL` | Dados Abertos | URL do CSV/pagina de Sao Luis; util quando o Cloudflare bloqueia |
 | `PAYMENT_GRACE_DAYS` | `60` | Janela mínima para a API indicar `sem_pagamento_localizado` em contrato com valor de referência positivo e nenhum pagamento vinculado no acervo. A cobertura das fontes pode ser parcial. |
-| `PAYMENT_POLL_CNPJS` | vazio | CNPJs consultados pelo scheduler |
+| `PAYMENT_POLL_CNPJS` | vazio | CNPJs iniciais opcionais no acompanhamento federal. A lista em Pagamentos aceita adições e pausas, inclusive dos CNPJs configurados aqui. |
 | `CONTRACT_AGENCY_CNPJS` | vazio | Orgaos consultados pelo crawl diario de contratos |
 | `SCHEDULER_CONTRACT_HOURS` | `24` | Intervalo do crawl de contratos |
 | `SCHEDULER_PAYMENT_HOURS` | `24` | Intervalo do poll de pagamentos |

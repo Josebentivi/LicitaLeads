@@ -146,6 +146,11 @@ from app.services.opportunity_workspace import (
     safe_list_url,
 )
 from app.services.participation_integrity import deadline_current, event_verified, lead_current
+from app.services.payment_tracking import (
+    list_payment_tracking,
+    set_payment_tracking,
+    tracked_payment_cnpjs,
+)
 from app.services.price_registry_scopes import (
     known_price_registry_scopes,
     restore_price_registry_scopes,
@@ -2916,6 +2921,7 @@ async def payments_page(
     municipal_diagnostic: str | None = None,
     municipal_started: bool = False,
     municipal_busy: bool = False,
+    tracking: str | None = None,
     page_number: int = Query(1, alias="page", ge=1),
     db: AsyncSession = Depends(get_db),
 ):
@@ -3050,6 +3056,10 @@ async def payments_page(
                 else None
             ),
             "municipal_sources": municipal_sources,
+            "payment_tracking": await list_payment_tracking(db, settings.payment_poll_cnpjs),
+            "tracking_feedback": tracking,
+            "federal_payment_source_enabled": "transparencia" in settings.payment_sources,
+            "federal_payment_key_configured": bool(settings.transparencia_api_key.strip()),
             "municipal_has_active": municipal_has_active,
             "municipal_started": municipal_started,
             "municipal_busy": municipal_busy,
@@ -3067,7 +3077,27 @@ async def payments_page(
             ),
             "current_year": current_year,
         },
-        status_code=422 if filter_error else 200,
+        status_code=422 if filter_error or tracking == "invalid" else 200,
+    )
+
+
+@router.post("/pagamentos/acompanhamento")
+async def update_payment_tracking_page(
+    cnpj: str = Form(..., max_length=32),
+    active: bool = Form(True),
+    db: AsyncSession = Depends(get_db),
+) -> RedirectResponse:
+    await JobLeaseRepository(db).assert_writes_allowed(now=datetime.now(UTC))
+    try:
+        await set_payment_tracking(db, cnpj, active=active)
+    except ValueError:
+        await db.rollback()
+        feedback = "invalid"
+    else:
+        await db.commit()
+        feedback = "active" if active else "paused"
+    return RedirectResponse(
+        f"/pagamentos?tracking={feedback}#acompanhamento-federal", status_code=303
     )
 
 
@@ -4121,11 +4151,16 @@ async def settings_page(request: Request, db: AsyncSession = Depends(get_db)):
     leases = await active_leases(db)
     scheduler = await scheduler_status(db)
     last_activity = scheduler.get("last_activity_at")
+    settings = get_settings()
+    public_settings = settings.public_view()
+    public_settings["payment_poll_count"] = len(
+        await tracked_payment_cnpjs(db, settings.payment_poll_cnpjs)
+    )
     return templates.TemplateResponse(
         request,
         "settings.html",
         {
-            "settings": get_settings().public_view(),
+            "settings": public_settings,
             "counts": await data_counts(db),
             "count_labels": COUNT_TABLE_LABELS,
             "block_reason": await maintenance_blocked_reason(db),

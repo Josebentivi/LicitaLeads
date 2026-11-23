@@ -47,6 +47,9 @@ def test_alembic_upgrade_head_creates_integrity_columns(tmp_path: Path) -> None:
         item_columns = {
             row[1] for row in connection.execute("PRAGMA table_info(procurement_items)")
         }
+        tracking_columns = {
+            row[1]: row for row in connection.execute("PRAGMA table_info(payment_tracking_targets)")
+        }
         event_sql = connection.execute(
             "SELECT sql FROM sqlite_master WHERE type='table' AND name='procurement_events'"
         ).fetchone()[0]
@@ -80,7 +83,9 @@ def test_alembic_upgrade_head_creates_integrity_columns(tmp_path: Path) -> None:
         "description_search",
         "summary_description_search",
     } <= item_columns
-    assert revision == "0031_normalized_search_text"
+    assert tracking_columns["cnpj"][5] == 1
+    assert tracking_columns["active"][3] == 1
+    assert revision == "0032_payment_tracking"
 
 
 def test_upgrade_legacy_schema_keeps_raw_sentinel_and_unknown_completeness(tmp_path):

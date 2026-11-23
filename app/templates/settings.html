@@ -20,6 +20,7 @@
     <span class="badge{% if scheduler.paused or not scheduler.alive %} status-pending{% endif %}">{% if not scheduler.enabled %}Desabilitado{% elif scheduler.paused %}Pausado{% elif scheduler.alive %}Ativo{% else %}Sem sinal recente{% endif %}</span>
     {% if scheduler.last_activity_at %}<small>Última atividade: {{ scheduler.last_activity_at }}</small>{% else %}<small>Sem atividade registrada.</small>{% endif %}
   </p>
+  <p><a href="/pagamentos#acompanhamento-federal">Gerenciar CNPJs de pagamentos federais</a></p>
   {% if scheduler_feedback == 'pausado' %}
   <p class="alert success">Coletas automáticas pausadas.</p>
   {% elif scheduler_feedback == 'ativo' %}
@@ -40,9 +41,9 @@
   <p>
     Esta ação apaga <strong>todos os dados coletados</strong> — contratações,
     documentos, eventos, prazos, leads, contatos, empresas, evidências e o
-    histórico de coletas — além dos arquivos baixados no disco. É
-    <strong>irreversível</strong>. O <code>.env</code> e a configuração do
-    sistema são preservados.
+    histórico de coletas — além da lista de acompanhamento federal cadastrada
+    pela plataforma e dos arquivos baixados no disco. É <strong>irreversível</strong>.
+    O <code>.env</code> e a configuração técnica do sistema são preservados.
   </p>
   {% if reset_status == 'ok' %}
   <p class="alert success">Dados apagados. O sistema está zerado e pronto para uma nova coleta. As coletas automáticas foram <strong>pausadas</strong> para não repovoar o banco; retome quando quiser no painel acima.</p>

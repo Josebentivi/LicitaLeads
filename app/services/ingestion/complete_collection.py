@@ -40,6 +40,7 @@ from app.services.ingestion.municipal_payments import MunicipalPaymentIngestionS
 from app.services.ingestion.payments import PaymentIngestionService
 from app.services.ingestion.pipeline import IngestionPipeline, PipelineRequest, PipelineSummary
 from app.services.ingestion.recovery import finalize_cancelled_run
+from app.services.payment_tracking import tracked_payment_cnpjs
 from app.services.price_registry_scopes import known_price_registry_scopes
 from app.services.procurement_search import ObjectScope
 
@@ -618,21 +619,20 @@ class CompleteCollection:
         return await self._payment_step(ids, missing, note)
 
     async def _federal(self, ticket: CollectionTicket, scope: CollectionScope) -> StepResult:
-        if (
-            "transparencia" not in self.settings.payment_sources
-            or not self.settings.transparencia_api_key
-            or not self.settings.payment_poll_cnpjs
-        ):
-            return StepResult(
-                "skipped",
-                "Disponível com chave do Portal da Transparência e CNPJs de favorecidos configurados",
-            )
+        if "transparencia" not in self.settings.payment_sources:
+            return StepResult("skipped", "Fonte federal desativada nas configurações")
+        if not self.settings.transparencia_api_key.strip():
+            return StepResult("skipped", "Chave do Portal da Transparência pendente")
+        async with self.sessions() as db:
+            targets = await tracked_payment_cnpjs(db, self.settings.payment_poll_cnpjs)
+        if not targets:
+            return StepResult("skipped", "Nenhum CNPJ ativo em Pagamentos › Acompanhamento federal")
         ids = []
         missing = False
         service = PaymentIngestionService(self.settings, session_factory=self.sessions)
         try:
             for year in range(scope.start_date.year, scope.end_date.year + 1):
-                for cnpj in self.settings.payment_poll_cnpjs:
+                for cnpj in targets:
                     async with self._locked(ticket):
                         pass
                     try:
@@ -645,9 +645,7 @@ class CompleteCollection:
                         missing = True
         finally:
             await service.aclose()
-        return await self._payment_step(
-            ids, missing, f"{len(self.settings.payment_poll_cnpjs)} favorecidos por exercício"
-        )
+        return await self._payment_step(ids, missing, f"{len(targets)} favorecidos por exercício")
 
     async def _tce(self, ticket: CollectionTicket, scope: CollectionScope) -> StepResult:
         from app.services.ingestion.tce_ma_observations import collect_tce_observations

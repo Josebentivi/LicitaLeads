@@ -33,6 +33,7 @@ from app.services.ingestion.pipeline import PipelineBusy
 from app.services.ingestion.processor import DocumentProcessingService
 from app.services.ingestion.recovery import reconcile_stale_crawls
 from app.services.ingestion.scheduled_collections import run_scheduled_collection
+from app.services.payment_tracking import tracked_payment_cnpjs
 from app.services.price_registry_scopes import known_price_registry_scopes
 from app.services.procurement_search import ObjectScope
 from app.services.scheduler_control import (
@@ -317,8 +318,15 @@ async def crawl_configured_contracts() -> None:
 
 async def poll_configured_payments() -> None:
     settings = get_settings()
+    if (
+        "transparencia" not in settings.payment_sources
+        or not settings.transparencia_api_key.strip()
+    ):
+        return
+    async with async_session_factory() as session:
+        targets = await tracked_payment_cnpjs(session, settings.payment_poll_cnpjs)
     year = datetime.now(ZoneInfo(settings.timezone)).year
-    for company_cnpj in settings.payment_poll_cnpjs:
+    for company_cnpj in targets:
         service = PaymentIngestionService(settings)
         try:
             result = await service.run(
@@ -432,7 +440,7 @@ def build_scheduler() -> AsyncIOScheduler:
             id="crawl_configured_contracts",
             **common,
         )
-    if settings.payment_poll_cnpjs:
+    if "transparencia" in settings.payment_sources and settings.transparencia_api_key.strip():
         scheduler.add_job(
             partial(_leased, "poll_configured_payments", poll_configured_payments, minutes=120),
             "interval",

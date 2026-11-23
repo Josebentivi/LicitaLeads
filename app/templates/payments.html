@@ -2,7 +2,7 @@
 {% from "_macros.html" import pagination_nav %}
 {% block title %}Pagamentos - LicitaLead Monitor{% endblock %}
 {% block content %}
-<div class="page-heading"><div><p class="eyebrow">Execução financeira</p><h1>Pagamentos</h1></div></div>
+<div class="page-heading"><div><p class="eyebrow">Execução financeira</p><h1>Pagamentos</h1></div><a class="button secondary" href="#acompanhamento-federal">Acompanhamento federal</a></div>
 {% if import_result %}<p class="hint">Importacao concluida: {{ import_result.created }} criado(s), {{ import_result.updated }} atualizado(s), {{ import_result.errors }} erro(s).</p>{% endif %}
 {% if municipal_result %}<p class="hint">Coleta municipal concluida em {{ municipal_result.source }}: {{ municipal_result.created }} criado(s), {{ municipal_result.updated }} atualizado(s), {{ municipal_result.linked }} conciliado(s), {{ municipal_result.unlinked }} nao conciliado(s).{% if municipal_result.diagnostic %} {{ municipal_result.diagnostic }}{% endif %}</p>{% endif %}
 <form method="get" action="/pagamentos" class="filters" data-filter-form>
@@ -47,6 +47,7 @@
 {% else %}<div class="panel empty">Nenhum pagamento encontrado. <a href="/pagamentos">Limpe os filtros</a>, acompanhe a atualização em <a href="/crawls">Coletas</a> ou importe um arquivo oficial abaixo.</div>{% endif %}
 <p class="hint">A ausencia de pagamento na base consultada nao prova inadimplencia. Confirme a fonte financeira e o contrato antes de qualquer cobranca.</p>
 {{ pagination_nav(request, pagination.page, pagination.page_size, supplier_count if supplier_view else pagination.total) }}
+{% include "_payment_tracking.html" %}
 {% include "_municipal_payment_cards.html" %}
 <details class="panel" id="importar"><summary>Importar exportação do portal</summary>
   <div class="section-heading"><div><h2>Importar exportação do portal</h2><p class="hint">Baixe o arquivo no portal oficial e importe CSV ou JSON em UTF-8. O arquivo original fica registrado como fonte; linhas inválidas são listadas e ignoradas.</p></div></div>

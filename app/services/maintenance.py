@@ -59,6 +59,7 @@ COUNT_TABLE_LABELS: dict[str, str] = {
     "contract_items": "Itens de contrato",
     "contract_terms": "Termos/aditivos de contrato",
     "payments": "Pagamentos",
+    "payment_tracking_targets": "CNPJs em acompanhamento federal",
     "evidence": "Evidências",
     "source_records": "Registros de fonte",
     "field_observations": "Observações de campo",

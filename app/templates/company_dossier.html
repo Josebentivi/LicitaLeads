@@ -9,6 +9,10 @@
   <div><p class="eyebrow">Visão completa da empresa</p><h1>{{ legal_name or company.normalized_name }}</h1>
   <p>CNPJ {{ company.cnpj | company_value('cnpj') }}{% if company.trade_name %} · {{ company.trade_name }}{% endif %} · Sede: {{ company.municipality or 'Município não informado' }} / {{ company.uf or 'UF não informada' }}</p>
   {% if company.domain or company.website %}<p>{% if company.domain %}Domínio corporativo: {{ company.domain }}{% endif %}{% if company.website and company.website|company_safe_url %} · <a href="{{ company.website }}" target="_blank" rel="noopener noreferrer">Site corporativo</a>{% endif %}</p>{% endif %}</div>
+  <form method="post" action="/pagamentos/acompanhamento" class="header-actions">
+    <input type="hidden" name="cnpj" value="{{ company.cnpj }}">
+    <button type="submit" class="button secondary">Acompanhar pagamentos federais</button>
+  </form>
 </header>
 <p class="hint">{{ overview.notice }} Os vínculos usam CNPJ e identificadores oficiais. Prazos e indícios exigem conferência; a pontuação é uma ferramenta de priorização.</p>
 <section class="panel" id="dados-corporativos">

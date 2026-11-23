@@ -1,0 +1,39 @@
+<section class="panel" id="acompanhamento-federal" aria-labelledby="acompanhamento-federal-titulo">
+  <h2 id="acompanhamento-federal-titulo">Acompanhamento federal</h2>
+  <p class="hint">Os CNPJs ativos entram nas próximas coletas de pagamentos do Portal da Transparência.</p>
+  {% if not federal_payment_source_enabled %}<p class="hint">A fonte Portal da Transparência está desabilitada.</p>{% endif %}
+  {% if not federal_payment_key_configured %}<p class="hint">A coleta federal precisa da chave de acesso do Portal da Transparência.</p>{% endif %}
+  {% if tracking_feedback == 'active' %}<p class="alert success" role="status">Acompanhamento ativado.</p>
+  {% elif tracking_feedback == 'paused' %}<p class="alert success" role="status">Acompanhamento pausado.</p>
+  {% elif tracking_feedback == 'invalid' %}<p class="alert error" role="alert">Informe um CNPJ válido.</p>{% endif %}
+  <form method="post" action="/pagamentos/acompanhamento" class="inline-form">
+    <label>CNPJ da empresa <input name="cnpj" autocomplete="off" spellcheck="false" maxlength="32" required></label>
+    <button type="submit">Acompanhar CNPJ</button>
+  </form>
+  {% if payment_tracking %}
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th scope="col">Empresa</th><th scope="col">CNPJ</th><th scope="col">Situação</th><th scope="col">Ação</th></tr></thead>
+      <tbody>
+        {% for entry in payment_tracking %}
+        <tr>
+          <td>{% if entry.company_name %}<a href="/empresas/{{ entry.cnpj }}?section=payments">{{ entry.company_name }}</a>{% else %}Razão social não informada{% endif %}</td>
+          <td>{{ entry.cnpj }}{% if entry.configured %}<small>Configurado no <code>.env</code></small>{% endif %}</td>
+          <td><span class="badge{% if not entry.active %} status-pending{% endif %}">{{ 'Ativo' if entry.active else 'Pausado' }}</span></td>
+          <td>
+            <form method="post" action="/pagamentos/acompanhamento">
+              <input type="hidden" name="cnpj" value="{{ entry.cnpj }}">
+              <input type="hidden" name="active" value="{{ 'false' if entry.active else 'true' }}">
+              {% set verb = 'Pausar' if entry.active else 'Retomar' %}
+              <button type="submit" class="button secondary compact" aria-label="{{ verb }} acompanhamento de {{ entry.company_name or entry.cnpj }}">{{ verb }}</button>
+            </form>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <p class="empty">Nenhum CNPJ em acompanhamento.</p>
+  {% endif %}
+</section>

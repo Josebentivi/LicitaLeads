@@ -118,8 +118,13 @@ As atas usam órgãos e unidades conhecidos na UF. A coleta de contratos usa os
 órgãos configurados ou os já identificados na UF; a janela é de publicação no
 PNCP e de início de vigência no Compras.gov.br. Os pagamentos municipais são
 consultados pelos exercícios que o período inclui. Pagamentos federais
-dependem da chave do Portal da Transparência e dos CNPJs de favorecidos
-configurados. Em **Pagamentos**, também é possível importar CSV/JSON oficial. Um
+dependem da chave do Portal da Transparência e da lista de favorecidos ativos.
+Em **Pagamentos › Acompanhamento federal**, adicione um CNPJ, pause ou reative
+empresas. O detalhe de uma empresa também permite adicioná-la à lista. A coleta
+geral e o agendador leem a lista a cada execução. São aceitos CNPJs válidos de
+empresas que ainda estejam fora do acervo.
+
+Em **Pagamentos**, também é possível importar CSV/JSON oficial. Um
 identificador oficial,
 quando disponível, é vinculado ao portal de origem. Sem ele, uma linha alterada
 pode gerar outro registro. Empenho, contrato, aditivo e pagamento são fatos

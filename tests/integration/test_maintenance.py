@@ -16,6 +16,7 @@ from app.models import (
     Document,
     ExtractionStatus,
     JobLease,
+    PaymentTrackingTarget,
     PriceRegistry,
     PriceRegistryItem,
     Procurement,
@@ -76,6 +77,8 @@ async def test_clear_data_endpoint_wipes_database_and_files(
     scheduler_log = tmp_path / "scheduler.log"
     scheduler_log.write_text("log antigo\n", encoding="utf-8")
     await _seed(database)
+    async with database.sessions.begin() as session:
+        session.add(PaymentTrackingTarget(cnpj="12345678000195", active=True))
 
     response = await api_client.post("/api/maintenance/clear-data", json={"confirm": True})
 
@@ -84,6 +87,7 @@ async def test_clear_data_endpoint_wipes_database_and_files(
     assert payload["counts"]["procurements"] == 1
     assert payload["counts"]["documents"] == 1
     assert payload["counts"]["crawl_runs"] == 1
+    assert payload["counts"]["payment_tracking_targets"] == 1
     assert payload["files_removed"] == 2
     assert payload["scheduler_paused"] is True
     assert not (documents_root / "ab").exists()
@@ -94,6 +98,7 @@ async def test_clear_data_endpoint_wipes_database_and_files(
         assert await session.scalar(select(func.count()).select_from(Procurement)) == 0
         assert await session.scalar(select(func.count()).select_from(Document)) == 0
         assert await session.scalar(select(func.count()).select_from(CrawlRun)) == 0
+        assert await session.scalar(select(func.count()).select_from(PaymentTrackingTarget)) == 0
 
 
 @pytest.mark.asyncio
