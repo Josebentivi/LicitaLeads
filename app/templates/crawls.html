@@ -18,12 +18,13 @@
     {% with target_form = 'complete-collection-form' %}{% include "_collection_period_fields.html" %}{% endwith %}
     <label class="checkbox"><input name="force_refresh" type="checkbox" value="true" form="complete-collection-form"> Reconsultar detalhes já verificados</label>
     <label class="checkbox"><input name="procurements_only" type="checkbox" value="true" form="complete-collection-form"> Somente contratações e documentos</label>
+    {% with federal_scope='acervo' %}{% include '_federal_scope_field.html' %}{% endwith %}
   </div>
   <details>
     <summary>Filtros das contratações</summary>
     {% with target_form = 'complete-collection-form' %}{% include '_procurement_collection_scope.html' %}{% endwith %}
   </details>
-  <p class="hint">Ajuste o escopo e clique em <strong>Coletar dados</strong> no topo. O período de contratações inclui as duas datas e aceita até os últimos dois anos. Na coleta completa, os pagamentos usam os exercícios do período. Os favorecidos federais vêm do <a href="/pagamentos#acompanhamento-federal">acompanhamento federal</a>.</p>
+  <p class="hint">Ajuste o escopo e clique em <strong>Coletar dados</strong> no topo. O período inclui as duas datas e aceita até os últimos dois anos. O histórico federal usa arquivos diários do período. As consultas pela API usam os exercícios e os CNPJs do <a href="/pagamentos#acompanhamento-federal">acompanhamento federal</a>.</p>
 </details>
 {% include "_crawl_progress.html" %}
 <div class="section-heading"><h2>{{ 'Execução selecionada' if focused_run else 'Histórico de coletas' }}</h2>{% if focused_run %}<a href="/crawls#crawl-table">Voltar ao histórico recente</a>{% elif not llm_status %}<a href="/ia">Fila e sugestões da IA</a>{% endif %}</div>

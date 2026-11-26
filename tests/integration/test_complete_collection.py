@@ -21,6 +21,7 @@ from app.models import (
     CollectionWorkItem,
     CrawlRun,
     CrawlRunStatus,
+    Document,
     JobLease,
     Lead,
     PriceRegistry,
@@ -28,6 +29,7 @@ from app.models import (
     ProcurementEvent,
     ProcurementSource,
     SourceRecord,
+    TceMaVerifiedLink,
 )
 from app.models.enums import DataAvailability
 from app.services.ingestion.collection_batches import retained_response_fingerprint
@@ -37,9 +39,125 @@ from app.services.ingestion.complete_collection import (
     CompleteCollection,
     StepResult,
 )
+from app.services.ingestion.federal_payments import FEDERAL_BATCH_MODE, FEDERAL_CONNECTOR
 from app.services.ingestion.tce_ma_observations import tce_observations_for
 
 SCOPE = CollectionScope("MA", date(2026, 5, 1), date(2026, 7, 31))
+
+
+async def test_collection_projects_saved_reasons_and_latest_batches(api_client, database):
+    root, arp_run, municipal_run, federal_run = (uuid4() for _ in range(4))
+    arp_batch, federal_batch = uuid4(), uuid4()
+    now = datetime.now(UTC)
+    async with database.sessions.begin() as db:
+        db.add_all(
+            [
+                CollectionBatch(
+                    id=arp_batch,
+                    stream_key="arp-test",
+                    status="limited",
+                    filters={},
+                    last_run_id=arp_run,
+                ),
+                CollectionBatch(
+                    id=federal_batch,
+                    stream_key="federal-test",
+                    status="limited",
+                    last_run_id=federal_run,
+                    filters={"mode": FEDERAL_BATCH_MODE},
+                    cursors={"federal": {"archives": {"waiting": 1, "total": 1}}},
+                ),
+            ]
+        )
+        await db.flush()
+        db.add_all(
+            [
+                CrawlRun(
+                    id=root,
+                    connector="complete",
+                    status=CrawlRunStatus.PARTIAL,
+                    finished_at=now,
+                    filters=SCOPE.as_json(),
+                    cursor={
+                        "complete_stages": [
+                            {
+                                "key": "price_registries",
+                                "label": "Atas",
+                                "status": "partial",
+                                "run_ids": [str(arp_run)],
+                            },
+                            {
+                                "key": "municipal",
+                                "label": "Pagamentos municipais",
+                                "status": "failed",
+                                "run_ids": [str(municipal_run)],
+                            },
+                            {
+                                "key": "federal",
+                                "label": "Pagamentos federais",
+                                "status": "partial",
+                                "run_ids": [str(federal_run)],
+                                "batch_id": str(federal_batch),
+                            },
+                        ]
+                    },
+                ),
+                CrawlRun(
+                    id=arp_run,
+                    connector="pncp",
+                    status=CrawlRunStatus.PARTIAL,
+                    batch_id=arp_batch,
+                    finished_at=now,
+                ),
+                CrawlRun(
+                    id=municipal_run,
+                    connector="municipal:sao_luis",
+                    status=CrawlRunStatus.FAILED,
+                    finished_at=now,
+                ),
+                CrawlRun(
+                    id=federal_run,
+                    connector=FEDERAL_CONNECTOR,
+                    status=CrawlRunStatus.PARTIAL,
+                    batch_id=federal_batch,
+                    finished_at=now,
+                ),
+            ]
+        )
+        await db.flush()
+        db.add(
+            SourceRecord(
+                crawl_run_id=municipal_run,
+                source="municipal:sao_luis",
+                endpoint="https://www.saoluis.ma.gov.br/dados-abertos",
+                response_hash="failed-municipal",
+                raw_payload=None,
+                http_status=403,
+                availability=DataAvailability.ACCESS_RESTRICTED,
+            )
+        )
+    first = await api_client.get("/crawls")
+    assert first.status_code == 200
+    assert "Limite atingido" in first.text
+    assert "Portal indisponível" in first.text and "/pagamentos#importar-sao-luis" in first.text
+    assert "Aguardando publicação" in first.text
+    async with database.sessions.begin() as db:
+        new_id = uuid4()
+        batch = await db.get_one(CollectionBatch, arp_batch)
+        batch.status, batch.last_run_id = "complete", new_id
+        db.add(
+            CrawlRun(
+                id=new_id,
+                connector="pncp",
+                status=CrawlRunStatus.COMPLETED,
+                batch_id=arp_batch,
+                finished_at=now,
+            )
+        )
+    updated = await api_client.get("/crawls")
+    assert "Execução original · Com pendências" in updated.text
+    assert f"/crawls?run={new_id}" in updated.text
+    assert f"/crawls/{arp_run}/continue" not in updated.text
 
 
 @pytest.fixture
@@ -602,3 +720,86 @@ async def test_tce_attaches_scoped_observations_without_creating_events_or_leads
     review_page = await api_client.get(f"/procurements/{ambiguous.id}")
     assert "Mesmo controle PNCP, identificação divergente" in review_page.text
     assert "13816886000198" in review_page.text and "Contrato informado" not in review_page.text
+
+    quote = "Pregão 59/2026 no Compras.gov e Pregão 90.042/2026 na Prefeitura."
+    organ = "Prefeitura de São Luís, órgão gerenciador, CNPJ 06.307.102/0001-30."
+    fund = "Fundo Municipal de Saúde, contratante, CNPJ 13.816.886/0001-98."
+    async with database.sessions.begin() as db:
+        document = Document(
+            id=uuid4(),
+            procurement_id=ambiguous.id,
+            source_record_id=source.id,
+            original_url="https://pncp.gov.br/edital.pdf",
+            extracted_text=f"{quote}\n{organ}\n{fund}",
+            is_active=True,
+        )
+        db.add(document)
+    url = f"/procurements/{ambiguous.id}/tce-link"
+    review_fields = {
+        "candidate_id": str(review[0].id),
+        "document_id": str(document.id),
+        "quote": quote,
+        "reviewer": "Ana",
+        "note": "Conferi a numeração e os órgãos no edital.",
+    }
+    invalid = await api_client.post(url, data=review_fields)
+    assert invalid.status_code == 422 and "papel do órgão" in invalid.text
+    review_fields.update(
+        {
+            "pncp_document_id": str(document.id),
+            "pncp_quote": organ,
+            "tce_document_id": str(document.id),
+            "tce_quote": fund,
+        }
+    )
+    assert (
+        await api_client.post(url, data={**review_fields, "quote": quote + " inventado"})
+    ).status_code == 422
+    assert (await api_client.post(url, data=review_fields)).status_code == 303
+
+    await collection._finish(ticket, CrawlRunStatus.COMPLETED)
+    next_ticket = await collection.enqueue(SCOPE)
+    approved = data[SincContrataResource.PROCEDURES][1]
+    data[SincContrataResource.CONTRACTS].append(
+        {
+            **approved,
+            "id": "via-confirmacao",
+            "numeroContrato": "569",
+            "anoContrato": 2026,
+        }
+    )
+    await collection._tce(next_ticket, SCOPE)
+    async with database.sessions() as db:
+        link = await db.get_one(TceMaVerifiedLink, ambiguous.id)
+        observed = await tce_observations_for(db, ambiguous.id)
+        contract = next(row for row in observed if row.value["id"] == "via-confirmacao")
+        assert contract.value["vinculo_documental"] == str(link.confirmation_id)
+    assert (
+        await api_client.post(
+            url,
+            data={
+                "revoke_link_id": str(link.confirmation_id),
+                "reviewer": "Ana",
+                "note": "Revisão documental da vinculação.",
+            },
+        )
+    ).status_code == 303
+    async with database.sessions() as db:
+        assert await db.get(TceMaVerifiedLink, ambiguous.id) is None
+        assert contract.id not in {row.id for row in await tce_observations_for(db, ambiguous.id)}
+        assert contract.id in {
+            row.id for row in await tce_observations_for(db, ambiguous.id, historical=True)
+        }
+        assert await db.scalar(select(func.count()).select_from(ProcurementEvent)) == 0
+    # A later contradiction suspends the mapping and requires fresh official evidence.
+    assert (await api_client.post(url, data=review_fields)).status_code == 303
+    data[SincContrataResource.PROCEDURES].append(
+        {**approved, "id": "controle-conflitante", "idContratacaoPncp": control}
+    )
+    await collection._finish(next_ticket, CrawlRunStatus.COMPLETED)
+    conflict_ticket = await collection.enqueue(SCOPE)
+    outcome = await collection._tce(conflict_ticket, SCOPE)
+    assert ambiguous.id in outcome.review_targets
+    async with database.sessions() as db:
+        assert await db.get(TceMaVerifiedLink, ambiguous.id) is None
+    assert (await api_client.post(url, data=review_fields)).status_code == 422

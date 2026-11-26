@@ -12,12 +12,17 @@ from decimal import Decimal
 from typing import Any
 from uuid import UUID, uuid4
 
-from sqlalchemy import or_, select
+from sqlalchemy import String, cast, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import load_only
 
 from app.config import Settings, get_settings
 from app.connectors.base import ConnectorResult, DataAvailability, RawPayment, RawSourceRecord
+from app.connectors.federal_payment_identity import (
+    creditor_list_code,
+    federal_payment_identity,
+    siafi_payment_document,
+)
 from app.connectors.transparencia import TransparenciaPaymentsConnector
 from app.database import async_session_factory
 from app.models import (
@@ -26,6 +31,8 @@ from app.models import (
     Contract,
     CrawlRun,
     CrawlRunStatus,
+    FieldObservation,
+    FieldValueStatus,
     JobLease,
     Payment,
     Procurement,
@@ -57,6 +64,8 @@ class PaymentIngestionSummary:
     diagnostic: str | None = None
     crawl_run_id: UUID | None = None
     can_continue: bool = False
+    status: CrawlRunStatus | None = None
+    batch_status: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -163,6 +172,8 @@ class PaymentIngestionService:
         year: int,
         phase: str | None = None,
         resume_automatically: bool = False,
+        parent_run_id: UUID | None = None,
+        coverage_batch_id: UUID | None = None,
     ) -> PaymentIngestionSummary:
         filters = {
             "connector": "payments:transparencia",
@@ -172,6 +183,10 @@ class PaymentIngestionService:
             "year": year,
             "phase": phase,
         }
+        if parent_run_id is not None:
+            filters["parent_run_id"] = str(parent_run_id)
+        if coverage_batch_id is not None:
+            filters["coverage_batch_id"] = str(coverage_batch_id)
 
         async def fetch() -> ConnectorResult[list[RawPayment]]:
             return await self.connector.discover_payments(
@@ -333,6 +348,7 @@ class PaymentIngestionService:
                             if coordinator.batch_id is not None:
                                 await coordinator.finish_in_session(session, status)
                                 batch = await session.get_one(CollectionBatch, coordinator.batch_id)
+                                summary.batch_status = batch.status
                                 summary.can_continue = batch.status in {
                                     "limited",
                                     "failed",
@@ -355,6 +371,7 @@ class PaymentIngestionService:
                                 summary.payments_conflicted,
                             )
                             run.diagnostic = summary.diagnostic
+                        summary.status = run.status
                 finally:
                     self._collection_run.reset(token)
                     self._coordinator.reset(coordinator_token)
@@ -475,6 +492,10 @@ class PaymentIngestionService:
         run_id = self._collection_run.get() or session.info.get("crawl_run_id")
         session.info["crawl_run_id"] = run_id
         total = len(payments)
+        if any(payment.source == "transparencia" for payment in payments):
+            # The same transaction gate already protects API and scheduled
+            # ingestion. Take it also for direct writes through this service.
+            await JobLeaseRepository(session).lock_acquisitions()
         # Many payments share a single portal page. Keep its audit metadata in
         # the identity map for this block without decoding the saved response.
         payment_sources: dict[UUID, SourceRecord | None] = {}
@@ -495,6 +516,7 @@ class PaymentIngestionService:
                                 SourceRecord.source,
                                 SourceRecord.collected_at,
                                 SourceRecord.collection_complete,
+                                SourceRecord.request_parameters,
                             )
                         ],
                     )
@@ -513,6 +535,11 @@ class PaymentIngestionService:
                     UUID(str(work_id)) if work_id else coordinator.items.get(row_identity(payment))
                 )
                 await coordinator.confirm(session, payment)
+            if created is None:
+                summary.payments_conflicted += 1
+                continue
+            if payment.federal_identity_conflict is True:
+                tracker.outcome.conflicted = True
             tracker.outcome.count(summary, created, prefix="payments")
             summary.payments_created += int(created)
             summary.payments_updated += int(not created)
@@ -584,11 +611,48 @@ class PaymentIngestionService:
         session: AsyncSession,
         raw: RawPayment,
         source: SourceRecord | None,
-    ) -> tuple[bool, bool]:
+    ) -> tuple[bool | None, bool]:
         raw_document = normalize_cnpj(raw.supplier_cnpj)
         cnpj = raw_document if is_valid_cnpj(raw_document) else None
         fingerprint = stable_fingerprint("payment", raw.source, raw.external_id)
-        payment = await session.scalar(select(Payment).where(Payment.fingerprint == fingerprint))
+        identity = None
+        role = raw.federal_beneficiary_role
+        phase = (raw.phase or "").strip().lower()
+        is_payment = raw.source == "transparencia" and (
+            phase in {"pagamento", "3"}
+            or (
+                not phase
+                and source is not None
+                and str(source.request_parameters.get("fase")) == "3"
+            )
+        )
+        if role is None and is_payment:
+            # A pending row retained before the migration lacks the new role fields.
+            if federal_payment_identity(raw.document_number, cnpj, "issued") is not None:
+                role = "issued"
+        if role is not None:
+            if is_payment:
+                identity = federal_payment_identity(
+                    raw.document_number, cnpj, role, raw.federal_creditor_list
+                )
+            if identity is None:
+                return None, False
+            candidates = await self._federal_payment_candidates(session, raw, cnpj, identity)
+            if len(candidates) > 1:
+                await self._record_federal_identity_conflict(
+                    session, candidates, identity, source, "multiple_records"
+                )
+                return None, False
+            payment = next(iter(candidates), None)
+            if payment is not None and not await self._has_observed_phase(session, payment):
+                await self._record_federal_identity_conflict(
+                    session, candidates, identity, source, "legacy_phase_unknown"
+                )
+                return None, False
+        else:
+            payment = await session.scalar(
+                select(Payment).where(Payment.fingerprint == fingerprint)
+            )
         created = payment is None
         if payment is None:
             payment = Payment(
@@ -597,6 +661,9 @@ class PaymentIngestionService:
                 fingerprint=fingerprint,
             )
             session.add(payment)
+        if role is not None:
+            payment.federal_identity = identity
+            payment.federal_beneficiary_role = role
         for name, value in {
             "source_record_id": source.id if source else None,
             "contract_number": raw.contract_number,
@@ -608,8 +675,14 @@ class PaymentIngestionService:
             "process_number": raw.process_number,
             "payment_date": raw.payment_date,
             "amount": raw.amount,
-            "phase": raw.phase,
+            "phase": raw.phase or ("Pagamento" if role is not None else None),
             "document_number": raw.document_number,
+            "federal_creditor_list": creditor_list_code(raw.federal_creditor_list),
+            # Evidence of a creditor list survives a less specific API response.
+            "federal_intermediary": (
+                True if payment.federal_intermediary is True else raw.federal_intermediary
+            ),
+            "federal_identity_conflict": raw.federal_identity_conflict,
             "commitment_number": raw.commitment_number,
             "commitment_external_id": raw.commitment_external_id,
             "is_current": bool(getattr(raw, "is_current", True)),
@@ -620,6 +693,14 @@ class PaymentIngestionService:
             if value is not None or name in raw.cleared_fields:
                 setattr(payment, name, value)
         await session.flush()
+        if identity is not None and source is not None:
+            await self._observe_federal_identity(
+                session,
+                payment,
+                identity,
+                source,
+                reason="ambiguous_final_amount" if raw.federal_identity_conflict else None,
+            )
         if (raw.supplier_name is not None or "supplier_name" in raw.cleared_fields) and (
             not raw.supplier_cnpj or normalize_cnpj(raw.supplier_cnpj) == payment.supplier_cnpj
         ):
@@ -642,10 +723,20 @@ class PaymentIngestionService:
         )
         cnpj = normalize_cnpj(payment.supplier_cnpj)
         company = await self._company(session, cnpj, payment.supplier_name)
-        contract, confidence, match_reason, ambiguous = await self._match_contract(
-            session, accepted, cnpj
-        )
-        procurement = await self._match_procurement(session, accepted)
+        routed_federal_payment = role == "final" or payment.federal_intermediary is True
+        if routed_federal_payment:
+            contract, confidence, match_reason, ambiguous = (
+                None,
+                None,
+                "federal intermediary or final beneficiary requires exact official linkage",
+                False,
+            )
+            procurement = None
+        else:
+            contract, confidence, match_reason, ambiguous = await self._match_contract(
+                session, accepted, cnpj
+            )
+            procurement = await self._match_procurement(session, accepted)
         if (
             procurement
             and payment.agency_cnpj
@@ -668,6 +759,95 @@ class PaymentIngestionService:
         payment.requires_manual_review = contract is None
         await session.flush()
         return created, contract is not None
+
+    @staticmethod
+    async def _federal_payment_candidates(
+        session: AsyncSession,
+        raw: RawPayment,
+        cnpj: str | None,
+        identity: str,
+    ) -> list[Payment]:
+        statement = select(Payment)
+        exact = Payment.federal_identity == identity
+        if raw.federal_beneficiary_role == "issued":
+            # Existing records used an ID containing mutable ancillary fields.
+            # Only the complete published document identifies a legacy match.
+            legacy = (
+                (Payment.source == "transparencia")
+                # A NULL search on the unique identity index scans the entire
+                # non-federal ledger on SQLite. Let the legacy index drive it.
+                & cast(Payment.federal_identity, String).is_(None)
+                & Payment.federal_beneficiary_role.is_(None)
+                & (Payment.supplier_cnpj == cnpj)
+                & (
+                    func.upper(func.trim(Payment.document_number))
+                    == siafi_payment_document(raw.document_number)
+                )
+                & or_(
+                    Payment.phase.is_(None),
+                    func.lower(func.trim(Payment.phase)).in_(("", "pagamento", "3")),
+                )
+            )
+            statement = statement.where(or_(exact, legacy))
+        else:
+            statement = statement.where(exact)
+        return list((await session.scalars(statement)).all())
+
+    @staticmethod
+    async def _has_observed_phase(session: AsyncSession, payment: Payment) -> bool:
+        if payment.federal_identity or (payment.phase and payment.phase.strip()):
+            return True
+        source = (
+            await session.get(SourceRecord, payment.source_record_id)
+            if payment.source_record_id
+            else None
+        )
+        return bool(source and str(source.request_parameters.get("fase")) == "3")
+
+    @staticmethod
+    async def _record_federal_identity_conflict(
+        session: AsyncSession,
+        payments: list[Payment],
+        identity: str,
+        source: SourceRecord | None,
+        reason: str,
+    ) -> None:
+        for payment in payments:
+            payment.federal_identity_conflict = True
+            if source is not None:
+                await PaymentIngestionService._observe_federal_identity(
+                    session, payment, identity, source, reason=reason
+                )
+
+    @staticmethod
+    async def _observe_federal_identity(
+        session: AsyncSession,
+        payment: Payment,
+        identity: str,
+        source: SourceRecord,
+        *,
+        reason: str | None = None,
+    ) -> None:
+        fingerprint = stable_fingerprint("federal_payment_identity", payment.id, source.id, reason)
+        if await session.scalar(
+            select(FieldObservation.id).where(FieldObservation.fingerprint == fingerprint)
+        ):
+            return
+        session.add(
+            FieldObservation(
+                entity_type="payment",
+                entity_id=payment.id,
+                field_name="federal_identity",
+                value={"identity": identity, **({"reason": reason} if reason else {})},
+                value_status=(
+                    FieldValueStatus.REQUIRES_MANUAL_REVIEW if reason else FieldValueStatus.OBSERVED
+                ),
+                source=source.source,
+                source_record_id=source.id,
+                collected_at=source.collected_at,
+                fingerprint=fingerprint,
+            )
+        )
 
     async def _company(
         self, session: AsyncSession, cnpj: str | None, name: str | None

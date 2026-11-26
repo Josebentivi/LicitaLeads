@@ -60,6 +60,21 @@ async def tracked_payment_cnpjs(session: AsyncSession, configured: list[str]) ->
     return [cnpj for cnpj, active in statuses.items() if active]
 
 
+async def federal_coverage_targets(
+    session: AsyncSession, configured: list[str], *, include_acervo: bool
+) -> tuple[list[str], list[str]]:
+    statuses, _ = await _tracking_state(session, configured)
+    tracked = sorted(cnpj for cnpj, active in statuses.items() if active)
+    if not include_acervo:
+        return tracked, []
+    cnpjs = set(tracked)
+    for raw in await session.scalars(select(Company.cnpj)):
+        canonical = normalize_cnpj(raw)
+        if canonical is not None and is_valid_cnpj(canonical) and statuses.get(canonical, True):
+            cnpjs.add(canonical)
+    return tracked, sorted(cnpjs)
+
+
 async def set_payment_tracking(session: AsyncSession, cnpj: str, *, active: bool) -> str:
     canonical = normalize_cnpj(cnpj)
     if canonical is None or not is_valid_cnpj(canonical):

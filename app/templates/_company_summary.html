@@ -1,5 +1,5 @@
-<div id="company-summary" hx-get="/empresas/{{ company.cnpj }}/summary" hx-trigger="company-updated from:body" hx-swap="outerHTML">
-<section class="panel" aria-label="Resumo da empresa"><h2>Panorama do acervo</h2><dl class="facts">
+<div id="company-summary" hx-get="/empresas/{{ company.cnpj }}/summary{% if history_query %}?{{ history_query }}{% endif %}" hx-trigger="company-updated from:body" hx-swap="outerHTML">
+<section class="panel" aria-label="Resumo da empresa"><h2>Panorama do acervo</h2>{% if history_period %}<p class="hint">Período do histórico · {{ history_period.title }}</p>{% endif %}<dl class="facts">
 {% for key,label in section_labels.items() %}<div><dt>{{ label }}</dt><dd>{{ overview.counts[key] }}</dd></div>{% endfor %}
 <div><dt>Pendências de revisão</dt><dd>{{ overview.counts.pending_review }}</dd></div>
 <div><dt>Participações comprovadas</dt><dd>{{ overview.participation_stats.participations }}</dd></div>

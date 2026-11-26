@@ -10,7 +10,7 @@ pytestmark = pytest.mark.browser
 
 def test_reconciled_lot_values_and_invalid_history(browser, runtime):
     from selenium.webdriver.common.by import By
-    from selenium.webdriver.support.ui import WebDriverWait
+    from selenium.webdriver.support.ui import Select, WebDriverWait
 
     from app.database import create_database_engine, create_session_factory
     from tests.integration.test_participation_integrity import apply_repair, seed
@@ -37,6 +37,12 @@ def test_reconciled_lot_values_and_invalid_history(browser, runtime):
         By.XPATH, "//button[normalize-space()='Gerar rascunho']"
     )
     browser.get(runtime.url + "/empresas/10258066000130")
+    period = browser.find_element(By.CSS_SELECTOR, "select[name='period']")
+    Select(period).select_by_value("sem-data")
+    period.find_element(By.XPATH, "ancestor::form").find_element(
+        By.CSS_SELECTOR, "button[type='submit']"
+    ).click()
+    wait.until(lambda d: "period=sem-data" in d.current_url)
     browser.find_element(By.CSS_SELECTOR, "#company-procurements > summary").click()
     wait.until(
         lambda d: d.find_elements(By.CSS_SELECTOR, "#company-procurements .company-record summary")

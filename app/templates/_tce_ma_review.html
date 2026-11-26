@@ -1,0 +1,54 @@
+{% macro document_select(name, required=false) -%}
+  <select name="{{ name }}"{% if required %} required{% endif %}>
+    <option value="">Selecione</option>
+    {% for document in tce_documents %}<option value="{{ document.id }}">{{ document.title or document.document_type or 'Documento oficial' }}</option>{% endfor %}
+  </select>
+{%- endmacro %}
+
+{% if tce_link %}
+<details>
+  <summary>{{ 'Vínculo confirmado' if tce_link_active else 'Vínculo com evidência desatualizada' }} · revogar vínculo</summary>
+  <form method="post" action="/procurements/{{ procurement.id }}/tce-link" class="filters">
+    <input type="hidden" name="revoke_link_id" value="{{ tce_link.confirmation_id }}">
+    <label>Responsável <input name="reviewer" required minlength="2" maxlength="150"></label>
+    <label>Motivo <input name="note" required minlength="5" maxlength="1000"></label>
+    <button type="submit">Revogar vínculo</button>
+  </form>
+</details>
+{% elif tce_observations|selectattr('field_name','equalto','tce_ma.identidade_para_revisao')|list %}
+  {% if tce_documents %}
+  <details>
+    <summary>Confirmar vínculo com documento oficial</summary>
+    <form method="post" action="/procurements/{{ procurement.id }}/tce-link" class="filters">
+      <label>Procedimento do TCE-MA <select name="candidate_id" required>
+        {% for candidate in tce_observations if candidate.field_name == 'tce_ma.identidade_para_revisao' %}
+        <option value="{{ candidate.id }}">Pregão {{ candidate.value.get('numeroProcedimento') }}/{{ candidate.value.get('anoProcedimento') }} · CNPJ {{ candidate.value.get('cnpjProcedimento') }}</option>
+        {% endfor %}
+      </select></label>
+      <label>Documento oficial {{ document_select('document_id', true) }}</label>
+      <label>Trecho com os dois números e o ano <textarea name="quote" required maxlength="4000"></textarea></label>
+      <details>
+        <summary>Comprovação dos papéis quando os CNPJs divergem</summary>
+        <label>Documento do órgão do PNCP {{ document_select('pncp_document_id') }}</label>
+        <label>Trecho com CNPJ e papel do órgão <textarea name="pncp_quote" maxlength="4000"></textarea></label>
+        <label>Documento do órgão do TCE-MA {{ document_select('tce_document_id') }}</label>
+        <label>Trecho com CNPJ e papel do órgão <textarea name="tce_quote" maxlength="4000"></textarea></label>
+      </details>
+      <label>Responsável <input name="reviewer" required minlength="2" maxlength="150"></label>
+      <label>Motivo <input name="note" required minlength="5" maxlength="1000"></label>
+      <button type="submit">Confirmar vínculo</button>
+    </form>
+  </details>
+  {% else %}<p>Para confirmar o vínculo, é necessário um documento oficial do pregão com texto disponível.</p>{% endif %}
+{% endif %}
+{% if tce_decisions %}
+<details><summary>Histórico das decisões de vínculo</summary><ul>
+  {% for decision in tce_decisions %}
+  <li><strong>{{ {'confirmed':'Confirmado','revoked':'Revogado','suspended':'Suspenso para revisão'}.get(decision.value.action) }}</strong> · {{ decision.value.reviewer }} · {{ format_collection_time(decision.collected_at) }}
+    <p>{{ decision.value.reason }}</p>
+    {% for proof in decision.value.proofs %}<blockquote>{{ proof.quote }}{% if proof.url %} · <a href="{{ proof.url }}" target="_blank" rel="noopener noreferrer">Documento oficial</a>{% endif %}</blockquote>{% endfor %}
+    {% if decision.source_record_id %}<small>Registro de origem <code>{{ decision.source_record_id }}</code></small>{% endif %}
+  </li>
+  {% endfor %}
+</ul></details>
+{% endif %}

@@ -1,17 +1,35 @@
 <ol class="complete-stage-list" aria-label="Etapas da coleta">
   {% set labels = {'pending':'Aguardando','running':'Em andamento','completed':'Concluída','partial':'Com pendências','failed':'Falhou','skipped':'Não consultada','cancelled':'Interrompida','not_started':'Não iniciada'} %}
   {% for step in run.complete_stages %}
-  {% set status = 'not_started' if step.status == 'cancelled' and not step.started_at and not step.run_ids else step.status %}
+  {% set federal_batch = run.federal_batch if step.key == 'federal' else none %}
+  {% set status = 'not_started' if step.status == 'cancelled' and not step.started_at and not step.run_ids else step.effective_status|default(step.status) %}
+  {% set latest = step.latest_runs|default(step.run_ids) %}
   <li>
-    <div><strong>{{ step.label }}</strong>{% if step.note %}<small>{{ step.note }}</small>{% endif %}
-    {% if step.run_ids|length == 1 %}
-      <small><a href="/crawls?run={{ step.run_ids[0] }}#execucao-{{ step.run_ids[0] }}">Ver execução e detalhes</a></small>
-    {% elif step.run_ids|length > 1 %}
-      <details><summary>Ver {{ step.run_ids|length }} execuções desta etapa</summary><ol>
-        {% for child in step.run_ids %}<li><a href="/crawls?run={{ child }}#execucao-{{ child }}">Execução {{ loop.index }} · {{ child|string|truncate(13, True, '…') }}</a></li>{% endfor %}
+    <div><strong>{{ step.label }}</strong>
+    {% if federal_batch %}
+      <small>{{ federal_batch.records_created }} registros novos · {{ federal_batch.records_updated }} atualizados{% if federal_batch.beneficiaries_found is not none %} · {{ federal_batch.beneficiaries_found }} CNPJs com registros{% endif %}</small>
+      {% include "_federal_batch_counts.html" %}
+      {% include "_federal_batch_actions.html" %}
+    {% elif step.note %}<small>{{ step.note }}</small>{% endif %}
+    {% if status != step.status and status != 'not_started' %}<small>Execução original · {{ labels.get(step.status, step.status) }}</small>{% endif %}
+    {% for title, detail, url, action in step.reasons %}
+      <small><strong>{{ title }}</strong>{% if detail %} · {{ detail }}{% endif %}{% if url %} · <a href="{{ url }}">{{ action }}</a>{% endif %}</small>
+    {% endfor %}
+    {% if step.resume|default([])|length == 1 %}
+      <form method="post" action="/crawls/{{ step.resume[0] }}/continue" data-submit-once>
+        <button class="button secondary compact" type="submit">Continuar lote</button>
+      </form>
+    {% elif step.resume|default([])|length > 1 %}
+      <small><a href="/crawls#lotes-para-continuar">Ver lotes para continuar</a></small>
+    {% endif %}
+    {% if not federal_batch and latest|length == 1 %}
+      <small><a href="/crawls?run={{ latest[0] }}#execucao-{{ latest[0] }}">Ver execução e detalhes</a></small>
+    {% elif not federal_batch and latest|length > 1 %}
+      <details><summary>Ver {{ latest|length }} execuções desta etapa</summary><ol>
+        {% for child in latest %}<li><a href="/crawls?run={{ child }}#execucao-{{ child }}">Execução {{ loop.index }} · {{ child|string|truncate(13, True, '…') }}</a></li>{% endfor %}
       </ol></details>
     {% endif %}</div>
-    <span class="badge status-{{ status }}">{{ labels.get(status, status) }}</span>
+    <span class="badge status-{{ status }}">{{ step.reasons[0][0] if step.reasons and status in ['partial', 'failed', 'skipped'] else labels.get(status, status) }}</span>
   </li>
   {% endfor %}
 </ol>

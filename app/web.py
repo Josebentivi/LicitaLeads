@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+from collections.abc import Sequence
 from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -17,7 +18,8 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Reques
 from fastapi.responses import RedirectResponse, StreamingResponse
 from fastapi.templating import Jinja2Templates
 from pydantic import BeforeValidator
-from sqlalchemy import false, func, or_, select
+from sqlalchemy import false, func, or_, select, text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import selectinload
 
@@ -45,6 +47,7 @@ from app.models import (
     Document,
     Evidence,
     FieldChange,
+    FieldObservation,
     Lead,
     LeadReview,
     LeadStatus,
@@ -55,6 +58,7 @@ from app.models import (
     ProcurementItem,
     ReviewDecision,
     SourceRecord,
+    TceMaVerifiedLink,
 )
 from app.models.participation import FactVerification
 from app.navigation import (
@@ -87,11 +91,26 @@ from app.services.collection_periods import (
     use_calendar_slices,
     validate_collection_period,
 )
-from app.services.crawl_monitor import monitor_view, municipal_write_progress, nonnegative_int
+from app.services.complete_collection_views import attach_complete_stages
+from app.services.crawl_monitor import (
+    monitor_view,
+    municipal_write_progress,
+    nonnegative_int,
+    timestamp,
+)
 from app.services.crawl_progress import safe_label
 from app.services.deadlines.response import OFFICIAL_RESPONSE_DEADLINE_LABELS
 from app.services.event_detection.detector import describe_event_scope
 from app.services.event_detection.types import CompanyReference
+from app.services.federal_payment_views import (
+    FEDERAL_PAYMENT_LABELS,
+    federal_batch_views,
+    federal_day_label,
+    federal_payment_category,
+    federal_payment_filter,
+    federal_payment_totals,
+    latest_federal_batch,
+)
 from app.services.group_hubs import build_group_hub
 from app.services.identifiers import (
     AUXILIARY_PROCEDURES,
@@ -115,6 +134,11 @@ from app.services.ingestion.document_retry import (
     documents_for_run,
     eligible,
 )
+from app.services.ingestion.federal_payments import (
+    FEDERAL_BATCH_MODE,
+    FEDERAL_CONNECTOR,
+    FederalScope,
+)
 from app.services.ingestion.municipal_payments import (
     MunicipalPaymentIngestionService,
     discard_municipal_task,
@@ -123,6 +147,11 @@ from app.services.ingestion.municipal_payments import (
 )
 from app.services.ingestion.payment_import import PaymentImportErrorList, PaymentImportService
 from app.services.ingestion.processor import DocumentProcessingService
+from app.services.ingestion.sao_luis_import import (
+    MAX_CSV_BYTES,
+    SaoLuisCsvImport,
+    SaoLuisImportBusy,
+)
 from app.services.ingestion.tce_ma_observations import tce_observations_for
 from app.services.maintenance import (
     COUNT_TABLE_LABELS,
@@ -161,12 +190,21 @@ from app.services.procurement_search import (
     OBJECT_GROUPS,
     OBJECT_PRESETS,
     ObjectScope,
+    normalized_search_text,
     published_sphere,
 )
 from app.services.public_source_links import origin_platform_url as _origin_platform_url
 from app.services.public_source_links import procurement_source_page, source_link_label
 from app.services.public_source_links import public_link as _public_link
 from app.services.scheduler_control import scheduler_status, set_scheduler_paused
+from app.services.tce_ma_review import (
+    Excerpt,
+    active_tce_links,
+    add_tce_decision,
+    confirm_tce_link,
+    tce_decisions_for,
+)
+from app.services.write_admission import ApplicationSession, admit_before_row_lock
 from app.shutdown_web import shutdown_available
 
 router = APIRouter(include_in_schema=False)
@@ -206,6 +244,7 @@ async def collection_form_error(request: Request, message: str):
         "object_group",
         "government_sphere",
         "procurements_only",
+        "federal_scope",
     }
     values: dict[str, str | list[str]] = {
         key: str(value)[:250] for key, value in form.items() if key in allowed
@@ -270,6 +309,8 @@ _CONNECTOR_LABELS = {
     **_SOURCE_LABELS,
     "all": "Todas as fontes",
     COMPLETE_COLLECTION_MODE: "Coleta completa",
+    "payments:transparencia": "Portal da Transparência",
+    FEDERAL_CONNECTOR: "Portal da Transparência",
 }
 _STATUS_LABELS = {
     "pending": "Aguardando",
@@ -748,6 +789,7 @@ def _list_context(request: Request, path: str, *, keys: set[str] | None = None) 
         "supplier_cnpj": "CNPJ do fornecedor",
         "match_status": "Conciliação",
         "budget_function": "Função orçamentária",
+        "federal_type": "Tipo federal",
         "fiscal_year": "Exercício",
         "source": "Fonte",
         "valid_on": "Vigente em",
@@ -779,6 +821,7 @@ def _list_context(request: Request, path: str, *, keys: set[str] | None = None) 
         **_PROCUREMENT_TYPE_LABELS,
         **_LICITATION_MODALITY_LABELS,
         **GOVERNMENT_SPHERES,
+        **FEDERAL_PAYMENT_LABELS,
         **OBJECT_GROUPS,
         **{preset.key: preset.label for preset in OBJECT_PRESETS},
         **_SOURCE_LABELS,
@@ -870,6 +913,7 @@ def _brl(value: Decimal | None, decimal_places: int = 2) -> str:
 
 
 templates.env.filters["brl"] = _brl
+templates.env.filters["local_datetime"] = _local_datetime
 templates.env.filters["display_text"] = _display_text
 templates.env.filters["modality_label"] = lambda value: _label(value, _PROCUREMENT_MODALITY_LABELS)
 templates.env.filters["procurement_type_label"] = lambda value: _label(
@@ -1434,6 +1478,8 @@ def _crawl_view(run: CrawlRun) -> SimpleNamespace:
             if isinstance(run.filters, dict) and run.filters.get("mode") == "contracts"
             else "Pagamentos municipais"
             if run.connector.startswith("municipal:")
+            else "Pagamentos federais"
+            if mode == FEDERAL_BATCH_MODE
             else "Pagamentos"
             if mode in {"payments", "payment_import"}
             else "Licitações"
@@ -1461,7 +1507,8 @@ def _crawl_view(run: CrawlRun) -> SimpleNamespace:
         else "/contratos"
         if mode == "contracts"
         else "/pagamentos"
-        if run.connector.startswith("municipal:") or mode in {"payments", "payment_import"}
+        if run.connector.startswith("municipal:")
+        or mode in {"payments", "payment_import", FEDERAL_BATCH_MODE}
         else f"/leads?run={linked_run}"
         if linked_run
         else "/leads"
@@ -1472,7 +1519,8 @@ def _crawl_view(run: CrawlRun) -> SimpleNamespace:
         else "Ver acervo de contratos"
         if mode == "contracts"
         else "Ver pagamentos"
-        if run.connector.startswith("municipal:") or mode in {"payments", "payment_import"}
+        if run.connector.startswith("municipal:")
+        or mode in {"payments", "payment_import", FEDERAL_BATCH_MODE}
         else "Ver oportunidades"
         if mode == COMPLETE_COLLECTION_MODE and not linked_run
         else "Ver oportunidades vinculadas",
@@ -1481,6 +1529,8 @@ def _crawl_view(run: CrawlRun) -> SimpleNamespace:
         else None,
         complete_stages=complete_stages,
         complete=mode == COMPLETE_COLLECTION_MODE,
+        federal=mode == FEDERAL_BATCH_MODE,
+        federal_batch=None,
         has_linked_opportunities=bool(linked_run),
         has_document_batch=isinstance(stored_sources, dict)
         and isinstance(stored_sources.get("documents"), dict),
@@ -1500,7 +1550,14 @@ def _crawl_view(run: CrawlRun) -> SimpleNamespace:
             }
             and bool(run.filters)
             and not run.connector.startswith("municipal:")
-            and mode not in {"documents", COMPLETE_COLLECTION_MODE, "payments", "payment_import"}
+            and mode
+            not in {
+                "documents",
+                COMPLETE_COLLECTION_MODE,
+                "payments",
+                "payment_import",
+                FEDERAL_BATCH_MODE,
+            }
         ),
     )
 
@@ -2137,10 +2194,89 @@ async def procurement_page(
                 if include_history or event.id in event_ids
             ],
             "candidate_companies": candidate_companies,
-            "tce_observations": await tce_observations_for(db, procurement.id),
+            "tce_observations": await tce_observations_for(
+                db, procurement.id, historical=include_history
+            ),
+            "tce_link": await db.get(TceMaVerifiedLink, procurement.id),
+            "tce_link_active": await db.scalar(
+                active_tce_links()
+                .with_only_columns(TceMaVerifiedLink.confirmation_id)
+                .where(TceMaVerifiedLink.procurement_id == procurement.id)
+            ),
+            "tce_decisions": await tce_decisions_for(db, procurement.id),
+            "tce_documents": [
+                doc
+                for doc in shown_documents
+                if doc.id in canonical_ids
+                and doc.id in document_meta
+                and document_meta[doc.id][0] in {"pncp", "compras_gov"}
+            ],
             "link_feedback": request.query_params.get("link"),
         },
     )
+
+
+@router.post("/procurements/{procurement_id}/tce-link")
+async def review_tce_link(
+    procurement_id: UUID,
+    reviewer: str = Form(..., min_length=2, max_length=150),
+    note: str = Form(..., min_length=5, max_length=1000),
+    candidate_id: UUID | None = Form(None),
+    document_id: UUID | None = Form(None),
+    quote: str = Form("", max_length=4000),
+    pncp_document_id: UUID | None = Form(None),
+    pncp_quote: str = Form("", max_length=4000),
+    tce_document_id: UUID | None = Form(None),
+    tce_quote: str = Form("", max_length=4000),
+    revoke_link_id: UUID | None = Form(None),
+    db: AsyncSession = Depends(get_db),
+) -> RedirectResponse:
+    reviewer, note = reviewer.strip(), note.strip()
+    if len(reviewer) < 2 or len(note) < 5:
+        raise HTTPException(422, "Informe o responsável e o motivo da decisão.")
+    if db.get_bind().dialect.name == "sqlite":
+        await db.execute(text("BEGIN IMMEDIATE"))
+    else:
+        await admit_before_row_lock(db)
+    procurement = await db.get(Procurement, procurement_id, with_for_update=True)
+    if procurement is None:
+        raise HTTPException(404, "Contratação não encontrada")
+    try:
+        if revoke_link_id:
+            link = await db.get(TceMaVerifiedLink, procurement_id, with_for_update=True)
+            if not link or link.confirmation_id != revoke_link_id:
+                raise ValueError("O vínculo foi alterado. Atualize a página antes de continuar.")
+            confirmation = await db.get(FieldObservation, revoke_link_id)
+            add_tce_decision(
+                db,
+                link,
+                "revoked",
+                reviewer=reviewer,
+                reason=note,
+                source_record_id=confirmation.source_record_id if confirmation else None,
+            )
+            await db.delete(link)
+        elif candidate_id and document_id:
+            await confirm_tce_link(
+                db,
+                procurement,
+                candidate_id,
+                Excerpt(document_id, quote),
+                pncp_agency=Excerpt(pncp_document_id, pncp_quote) if pncp_document_id else None,
+                tce_agency=Excerpt(tce_document_id, tce_quote) if tce_document_id else None,
+                reviewer=reviewer,
+                reason=note,
+            )
+        else:
+            raise ValueError("Selecione o candidato do TCE-MA e o documento oficial.")
+        await db.commit()
+    except ValueError as exc:
+        await db.rollback()
+        raise HTTPException(422, str(exc)) from None
+    except IntegrityError:
+        await db.rollback()
+        raise HTTPException(409, "O procedimento já está vinculado. Atualize a página.") from None
+    return RedirectResponse(f"/procurements/{procurement_id}#tce-title", status_code=303)
 
 
 @router.post("/procurements/{procurement_id}/events/{event_id}/link-company")
@@ -2737,6 +2873,10 @@ async def contract_page(
                     match_status=_display_text(payment.match_status),
                     source=_label(payment.source, _SOURCE_LABELS),
                     source_url=_public_link(payment.source_url),
+                    federal_type=FEDERAL_PAYMENT_LABELS.get(
+                        federal_payment_category(payment) or ""
+                    ),
+                    federal_conflict=payment.federal_identity_conflict,
                 )
                 for payment in contract.payments
             ],
@@ -2909,6 +3049,7 @@ async def payments_page(
     budget_function: str | None = None,
     fiscal_year: str | None = None,
     match_status: str | None = None,
+    federal_type: str | None = None,
     view: str = "records",
     import_created: int | None = None,
     import_updated: int | None = None,
@@ -2945,6 +3086,11 @@ async def payments_page(
     filter_error = _supplier_filter_error(supplier_cnpj)
     if fiscal_year and year is None:
         filter_error = "Informe um exercício entre 2000 e 2100."
+    if federal_type:
+        if federal_type in FEDERAL_PAYMENT_LABELS:
+            scope = scope.where(federal_payment_filter(federal_type))
+        else:
+            filter_error = "Selecione um tipo válido de pagamento federal."
     supplier_count = 0
     suppliers: list[dict[str, Any]] = []
     supplier_view = view == "suppliers"
@@ -2963,7 +3109,9 @@ async def payments_page(
     functions, years = await repository.budget_options()
     portals = {f"municipal:{item.id}": item for item in list_municipal_sources(settings)}
     receipt_ids = {
-        p.source_record_id for p in result.items if p.source in portals and p.source_record_id
+        p.source_record_id
+        for p in result.items
+        if (p.source in portals or p.federal_beneficiary_role) and p.source_record_id
     }
     receipts = (
         {
@@ -2988,6 +3136,7 @@ async def payments_page(
         SimpleNamespace(
             id=payment.id,
             date=_procurement_datetime(payment.payment_date),
+            has_payment_date=payment.payment_date is not None,
             supplier=_display_text(payment.supplier_name),
             supplier_cnpj=payment.supplier_cnpj if is_valid_cnpj(payment.supplier_cnpj) else None,
             agency=_display_text(payment.agency_name),
@@ -2996,13 +3145,20 @@ async def payments_page(
             document_number=_display_text(payment.document_number),
             match_status=match_labels.get(payment.match_status, "Conciliação não informada"),
             source=_label(payment.source, _SOURCE_LABELS),
-            source_url=portals[payment.source].portal_url if payment.source in portals else None,
+            source_url=portals[payment.source].portal_url
+            if payment.source in portals
+            else _public_link(payment.source_url)
+            if payment.federal_beneficiary_role
+            else None,
             record_id=payment.source_record_id,
             receipt=receipts.get(payment.source_record_id) if payment.source_record_id else None,
             budget=entries.get(payment.id),
             aggregate=payment.status == "agregado_por_empenho",
             procurement_id=payment.procurement_id,
             contract_id=payment.contract_id,
+            federal_type=FEDERAL_PAYMENT_LABELS.get(federal_payment_category(payment) or ""),
+            federal_conflict=payment.federal_identity_conflict,
+            federal_creditor_list=payment.federal_creditor_list,
         )
         for payment in result.items
     ]
@@ -3023,6 +3179,7 @@ async def payments_page(
                     "budget_function",
                     "fiscal_year",
                     "match_status",
+                    "federal_type",
                     "view",
                 },
             ),
@@ -3033,6 +3190,7 @@ async def payments_page(
             "budget_years": years,
             "municipalities": list(portals.values()),
             "match_options": match_labels,
+            "federal_payment_labels": FEDERAL_PAYMENT_LABELS,
             "supplier_count": supplier_count,
             "suppliers": suppliers,
             "supplier_view": supplier_view,
@@ -3045,6 +3203,7 @@ async def payments_page(
                 budget_function=budget_function,
                 fiscal_year=fiscal_year,
                 match_status=match_status,
+                federal_type=federal_type,
             ),
             "import_result": (
                 {
@@ -3057,6 +3216,10 @@ async def payments_page(
             ),
             "municipal_sources": municipal_sources,
             "payment_tracking": await list_payment_tracking(db, settings.payment_poll_cnpjs),
+            "federal_coverage": await latest_federal_batch(db, cnpj=normalized_supplier)
+            if not filter_error
+            else None,
+            "federal_totals": await federal_payment_totals(db, scope) if not filter_error else {},
             "tracking_feedback": tracking,
             "federal_payment_source_enabled": "transparencia" in settings.payment_sources,
             "federal_payment_key_configured": bool(settings.transparencia_api_key.strip()),
@@ -3109,6 +3272,8 @@ async def import_payments_page(
 ):
     """Import a portal export from the operator page."""
 
+    if normalized_search_text(source_name) in {"sao luis", "prefeitura de sao luis"}:
+        raise HTTPException(422, "Use Revisar CSV de São Luís na página de pagamentos.")
     content = await file.read(10 * 1024 * 1024 + 1)
     if len(content) > 10 * 1024 * 1024:
         raise HTTPException(status_code=413, detail="arquivo maior que 10 MB")
@@ -3126,6 +3291,51 @@ async def import_payments_page(
         f"&import_errors={len(result.errors)}"
     )
     return RedirectResponse(target, status_code=303)
+
+
+def _sao_luis_import(db: AsyncSession) -> SaoLuisCsvImport:
+    return SaoLuisCsvImport(
+        get_settings(),
+        async_sessionmaker(
+            db.bind, autoflush=False, expire_on_commit=False, sync_session_class=ApplicationSession
+        ),
+    )
+
+
+@router.post("/pagamentos/sao-luis/previa")
+async def preview_sao_luis_csv(
+    request: Request, file: UploadFile = File(...), db: AsyncSession = Depends(get_db)
+):
+    content = await file.read(MAX_CSV_BYTES + 1)
+    if len(content) > MAX_CSV_BYTES:
+        raise HTTPException(413, "O CSV deve ter até 10 MB.")
+    try:
+        preview = await _sao_luis_import(db).preview(content)
+    except PaymentImportErrorList as exc:
+        raise HTTPException(422, str(exc)) from exc
+    return templates.TemplateResponse(request, "sao_luis_csv.html", {"preview": preview})
+
+
+@router.post("/pagamentos/sao-luis/confirmar")
+async def confirm_sao_luis_csv(
+    request: Request, token: UUID = Form(...), db: AsyncSession = Depends(get_db)
+):
+    try:
+        run_id, reused = await _sao_luis_import(db).confirm(token)
+    except PaymentImportErrorList as exc:
+        raise HTTPException(422, str(exc)) from exc
+    except SaoLuisImportBusy as exc:
+        return templates.TemplateResponse(
+            request, "sao_luis_csv.html", {"error": str(exc), "token": token}, status_code=409
+        )
+    run = await db.get_one(CrawlRun, run_id)
+    return templates.TemplateResponse(request, "sao_luis_csv.html", {"run": run, "reused": reused})
+
+
+@router.post("/pagamentos/sao-luis/cancelar")
+async def cancel_sao_luis_csv(token: UUID = Form(...), db: AsyncSession = Depends(get_db)):
+    await _sao_luis_import(db).cancel(token)
+    return RedirectResponse("/pagamentos#importar-sao-luis", status_code=303)
 
 
 @router.post("/pagamentos/municipal")
@@ -3652,9 +3862,11 @@ async def _crawl_monitor_views(
     summaries = await queue_statuses(
         db, get_settings(), run_ids=[run.id for run in runs], include_global=True
     )
+    base_views = [_crawl_view(run) for run in runs]
+    await _attach_collection_details(db, runs, base_views)
     views = []
-    for run in runs:
-        view = monitor_view(run, _crawl_view(run), now=now)
+    for run, base in zip(runs, base_views, strict=True):
+        view = monitor_view(run, base, now=now)
         view.llm = summaries[run.id]
         views.append(view)
     return views, summaries[None]
@@ -3665,8 +3877,13 @@ async def _resumable_crawl_views(db: AsyncSession) -> list[SimpleNamespace]:
         select(CollectionWorkItem.id)
         .where(
             CollectionWorkItem.batch_id == CollectionBatch.id,
-            CollectionWorkItem.kind == "record",
-            CollectionWorkItem.status.in_(("pending", "failed", "details_pending")),
+            or_(
+                (CollectionWorkItem.kind == "record")
+                & CollectionWorkItem.status.in_(("pending", "failed", "details_pending")),
+                (CollectionBatch.filters["mode"].as_string() == FEDERAL_BATCH_MODE)
+                & CollectionWorkItem.kind.in_(("archive", "beneficiary"))
+                & CollectionWorkItem.status.in_(("pending", "failed", "waiting")),
+            ),
         )
         .exists()
     )
@@ -3786,6 +4003,59 @@ async def crawl_documents(request: Request, run_id: UUID, db: AsyncSession = Dep
     )
 
 
+@router.get("/crawls/{run_id}/federal")
+async def federal_crawl_details(
+    request: Request,
+    run_id: UUID,
+    page: int = Query(1, ge=1),
+    db: AsyncSession = Depends(get_db),
+):
+    run = await db.get(CrawlRun, run_id)
+    if run is None or run.batch_id is None:
+        raise HTTPException(404, "Lote federal não encontrado")
+    batch = (await federal_batch_views(db, {run.batch_id})).get(run.batch_id)
+    if batch is None:
+        raise HTTPException(404, "Lote federal não encontrado")
+    scope = select(CollectionWorkItem).where(
+        CollectionWorkItem.batch_id == batch.id,
+        CollectionWorkItem.kind.in_(("archive", "beneficiary")),
+    )
+    total = await db.scalar(select(func.count()).select_from(scope.subquery())) or 0
+    page_size = 50
+    items = await db.scalars(
+        scope.order_by(
+            CollectionWorkItem.status.in_(("failed", "waiting", "pending")).desc(),
+            CollectionWorkItem.position,
+            CollectionWorkItem.id,
+        )
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+    )
+    return templates.TemplateResponse(
+        request,
+        "crawl_federal.html",
+        {
+            "federal_batch": batch,
+            "page": page,
+            "page_size": page_size,
+            "total": total,
+            "items": [
+                SimpleNamespace(
+                    kind=item.kind,
+                    status=item.status,
+                    day=federal_day_label(item.payload.get("day")),
+                    cnpj=item.payload.get("cnpj"),
+                    year=item.payload.get("year"),
+                    records=item.payload.get("records"),
+                    diagnostic=safe_label(str(item.payload.get("diagnostic") or "")),
+                    next_attempt=timestamp(item.payload.get("next_attempt_at")),
+                )
+                for item in items
+            ],
+        },
+    )
+
+
 @router.post("/crawls/{run_id}/retry-documents")
 async def retry_documents_from_web(run_id: UUID, db: AsyncSession = Depends(get_db)):
     try:
@@ -3809,6 +4079,7 @@ async def _crawl_views(
     if focused_run and not rows:
         raise HTTPException(status_code=404, detail="Execução de coleta não encontrada")
     views = [_crawl_view(run) for run in rows]
+    await _attach_collection_details(db, rows, views)
     batch_ids = {run.batch_id for run in rows if run.batch_id}
     batches = (
         {
@@ -3834,6 +4105,34 @@ async def _crawl_views(
     return views, any(view.active for view in views)
 
 
+async def _attach_collection_details(
+    db: AsyncSession, runs: Sequence[CrawlRun], views: list[SimpleNamespace]
+) -> None:
+    batch_ids = {}
+    for run, view in zip(runs, views, strict=True):
+        if view.federal and run.batch_id is not None:
+            batch_ids[run.id] = run.batch_id
+        elif view.complete:
+            identifier = next(
+                (
+                    step.get("batch_id")
+                    for step in view.complete_stages
+                    if step.get("key") == "federal"
+                ),
+                None,
+            )
+            if isinstance(identifier, str):
+                try:
+                    batch_ids[run.id] = UUID(identifier)
+                except ValueError:
+                    continue
+    batches = await federal_batch_views(db, set(batch_ids.values()))
+    for view in views:
+        if (batch_id := batch_ids.get(view.id)) is not None:
+            view.federal_batch = batches.get(batch_id)
+    await attach_complete_stages(db, views, get_settings(), _TECHNICAL_SOURCE_LABELS)
+
+
 @router.post("/crawls/collect")
 async def collect_all_from_web(
     uf: str | None = Form(None),
@@ -3846,6 +4145,7 @@ async def collect_all_from_web(
     object_group: str | None = Form(None),
     government_sphere: str | None = Form(None),
     procurements_only: bool = Form(False),
+    federal_scope: FederalScope = Form("acervo"),
 ) -> RedirectResponse:
     """Start one background run across the available sources and record categories."""
     settings = get_settings()
@@ -3877,6 +4177,7 @@ async def collect_all_from_web(
         modalities=selected,
         object_scope=object_scope,
         procurements_only=procurements_only,
+        federal_scope="pular" if procurements_only else federal_scope,
     )
     service = CompleteCollection(settings)
     try:
@@ -3959,6 +4260,8 @@ def _retry_request(
             status_code=409,
             detail="Use Reprocessar documentos com falha para selecionar somente os arquivos ainda elegíveis.",
         )
+    if filters.get("mode") == FEDERAL_BATCH_MODE:
+        raise HTTPException(409, "Use Continuar coleta federal para aproveitar o lote salvo.")
     modalities = filters.get("modalities") or get_settings().default_modalities
     return PipelineRequest(
         connector=connector,

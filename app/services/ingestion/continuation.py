@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import CollectionBatch, CollectionWorkItem, CrawlRun, CrawlRunStatus, JobLease
 from app.repositories.crawls import JobLeaseRepository
+from app.services.ingestion.federal_payments import FEDERAL_BATCH_MODE, FEDERAL_LEASE
 
 
 class ContinuationBusy(ValueError):
@@ -19,7 +20,7 @@ class ContinuationBusy(ValueError):
 
 
 async def create_continuation(
-    session: AsyncSession, run_id: UUID, *, require_latest: bool = False
+    session: AsyncSession, run_id: UUID, *, require_latest: bool = False, automatic: bool = False
 ) -> tuple[CrawlRun, dict[str, Any]]:
     await JobLeaseRepository(session).assert_writes_allowed(now=datetime.now(UTC))
     parent = await session.get(CrawlRun, run_id)
@@ -34,6 +35,8 @@ async def create_continuation(
     )
     if batch is None or batch.status == "complete":
         raise ContinuationBusy("Esta coleta não possui trabalho pendente")
+    if automatic and batch.status != "limited":
+        raise ContinuationBusy("Apenas lotes limitados podem ser retomados automaticamente")
     if require_latest and batch.last_run_id != run_id:
         raise ContinuationBusy("O lote já tem uma execução mais recente")
     active = await session.scalar(
@@ -57,6 +60,9 @@ async def create_continuation(
     ]
     if connector.startswith("municipal:"):
         names = [connector]
+    if filters.get("mode") == FEDERAL_BATCH_MODE:
+        names = [FEDERAL_LEASE]
+        filters["automatic_federal_continuation"] = automatic
     if await session.scalar(
         select(JobLease.name)
         .where(JobLease.name.in_(names), JobLease.expires_at > datetime.now(UTC))
@@ -77,14 +83,18 @@ async def create_continuation(
     )
     session.add(run)
     await session.flush()
-    await session.execute(
-        update(CollectionWorkItem)
-        .where(
-            CollectionWorkItem.batch_id == batch.id,
-            CollectionWorkItem.status == "failed",
+    if not automatic:
+        retryable = (
+            ["failed", "waiting"] if filters.get("mode") == FEDERAL_BATCH_MODE else ["failed"]
         )
-        .values(status="pending")
-    )
+        await session.execute(
+            update(CollectionWorkItem)
+            .where(
+                CollectionWorkItem.batch_id == batch.id,
+                CollectionWorkItem.status.in_(retryable),
+            )
+            .values(status="pending")
+        )
     batch.last_run_id = run.id
     return run, filters
 
@@ -112,6 +122,14 @@ def pipeline_request_from_filters(filters: dict[str, Any]) -> Any:
 
 async def execute_continuation(run_id: UUID, filters: dict[str, Any]) -> Any:
     mode = filters.get("mode")
+    if mode == FEDERAL_BATCH_MODE:
+        from app.services.ingestion.federal_payments import FederalCoverageService
+
+        coverage = FederalCoverageService()
+        try:
+            return await coverage.run(run_id)
+        finally:
+            await coverage.aclose()
     if mode in {"payments", "payment_import"}:
         from app.services.ingestion.payments import PaymentIngestionService
 

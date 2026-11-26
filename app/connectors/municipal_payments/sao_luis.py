@@ -557,6 +557,19 @@ class SaoLuisCsvConnector:
             partial=bool(errors or truncated or undated),
         )
 
+    def parse_csv_export(self, content: bytes) -> tuple[list[RawPayment], list[tuple[int, str]]]:
+        """Normalize operator-supplied exports with the live portal identity rules."""
+        payments, errors = [], []
+        url = self.source.open_data_url or self.source.export_url
+        for number, values in self._csv_lines(content):
+            row = {normalize_key(str(key)): value for key, value in values.items()}
+            payment = self._map_row(row, url=url, source_record_ref="")
+            if payment is None:
+                errors.append((number, "Valor inválido ou fornecedor sem CNPJ válido ou nome."))
+            else:
+                payments.append(payment)
+        return payments, errors
+
     def _map_row(
         self,
         row: dict[str, Any],
@@ -567,10 +580,15 @@ class SaoLuisCsvConnector:
         amount = parse_brazilian_money(self._pick(row, "amount"))
         supplier_name = clean_text(self._pick(row, "supplier_name"))
         supplier_cnpj = normalize_cnpj(self._pick(row, "supplier_cnpj"))
-        if amount is None or amount <= 0 or (not supplier_name and not supplier_cnpj):
-            return None
         if supplier_cnpj and not is_valid_cnpj(supplier_cnpj):
             supplier_cnpj = None
+        if (
+            amount is None
+            or not amount.is_finite()
+            or amount <= 0
+            or (not supplier_name and not supplier_cnpj)
+        ):
+            return None
         agency_cnpj = normalize_cnpj(self._pick(row, "agency_cnpj"))
         if agency_cnpj and not is_valid_cnpj(agency_cnpj):
             agency_cnpj = None
@@ -623,6 +641,9 @@ class SaoLuisCsvConnector:
         return content.decode("utf-8", errors="replace")
 
     def _csv_rows(self, content: bytes) -> list[dict[str, Any]]:
+        return [row for _, row in self._csv_lines(content)]
+
+    def _csv_lines(self, content: bytes) -> list[tuple[int, dict[str, Any]]]:
         text = self._decode(content)
         if not text.strip():
             raise ConnectorContractError("CSV vazio não confirma estrutura da fonte")
@@ -630,14 +651,26 @@ class SaoLuisCsvConnector:
             dialect = csv.Sniffer().sniff(text[:4096], delimiters=";,|\t")
         except csv.Error:
             dialect = csv.excel
-        reader = csv.DictReader(io.StringIO(text), dialect=dialect)
-        fields = {normalize_key(key) for key in (reader.fieldnames or [])}
+        reader = csv.reader(io.StringIO(text, newline=""), dialect=dialect)
+        header = next(reader, [])
+        fields = {normalize_key(key) for key in header}
         if not (
             fields.intersection(_ALIASES["amount"])
             and fields.intersection(_ALIASES["supplier_name"] + _ALIASES["supplier_cnpj"])
         ):
             raise ConnectorContractError("CSV sem colunas de valor e fornecedor reconhecidas")
-        return [dict(row) for row in reader]
+        rows: list[tuple[int, dict[str, Any]]] = []
+        while True:
+            number = reader.line_num + 1
+            values = next(reader, None)
+            if values is None:
+                return rows
+            if values:
+                row: dict[Any, Any] = dict.fromkeys(header)
+                row.update(zip(header, values, strict=False))
+                if len(values) > len(header):
+                    row[None] = values[len(header) :]
+                rows.append((number, row))
 
     def _json_rows_safe(self, content: bytes) -> list[dict[str, Any]]:
         try:

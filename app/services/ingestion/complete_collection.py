@@ -36,11 +36,10 @@ from app.services.ingestion.continuation import (
     create_continuation,
     pipeline_request_from_filters,
 )
+from app.services.ingestion.federal_payments import FederalCoverageService, FederalScope
 from app.services.ingestion.municipal_payments import MunicipalPaymentIngestionService
-from app.services.ingestion.payments import PaymentIngestionService
 from app.services.ingestion.pipeline import IngestionPipeline, PipelineRequest, PipelineSummary
 from app.services.ingestion.recovery import finalize_cancelled_run
-from app.services.payment_tracking import tracked_payment_cnpjs
 from app.services.price_registry_scopes import known_price_registry_scopes
 from app.services.procurement_search import ObjectScope
 
@@ -83,6 +82,7 @@ class CollectionScope:
     modalities: tuple[str, ...] = ()
     object_scope: ObjectScope | None = None
     procurements_only: bool = False
+    federal_scope: FederalScope = "acompanhadas"
 
     def as_json(self) -> dict[str, Any]:
         return {
@@ -92,6 +92,7 @@ class CollectionScope:
             "start_date": self.start_date.isoformat(),
             "end_date": self.end_date.isoformat(),
             "force_refresh": self.force_refresh,
+            "federal_scope": self.federal_scope,
             **({"modalities": list(self.modalities)} if self.modalities else {}),
             **({"object_scope": self.object_scope.as_json()} if self.object_scope else {}),
             **({"procurements_only": True} if self.procurements_only else {}),
@@ -113,6 +114,9 @@ class StepResult:
     status: str
     note: str = ""
     run_ids: list[UUID] = field(default_factory=list)
+    batch_id: UUID | None = None
+    reason: str | None = None
+    review_targets: list[UUID] = field(default_factory=list)
 
 
 class _CollectionStopped(RuntimeError):
@@ -238,6 +242,12 @@ class CompleteCollection:
             )
             if result.run_ids or result.status != "running":
                 stage["run_ids"] = [str(item) for item in result.run_ids]
+            if result.batch_id is not None:
+                stage["batch_id"] = str(result.batch_id)
+            if result.reason:
+                stage["reason"] = result.reason
+            if result.review_targets:
+                stage["review_targets"] = [str(item) for item in result.review_targets]
             if result.status == "running":
                 stage.setdefault("started_at", now.isoformat())
             else:
@@ -312,7 +322,9 @@ class CompleteCollection:
                 except _CollectionStopped:
                     raise
                 except Exception as exc:
-                    outcome = StepResult("failed", f"Falha nesta etapa ({type(exc).__name__})")
+                    outcome = StepResult(
+                        "failed", f"Falha nesta etapa ({type(exc).__name__})", reason="failure"
+                    )
                 await self._stage(ticket, key, outcome)
                 results.append(outcome.status)
 
@@ -321,9 +333,9 @@ class CompleteCollection:
             tasks = (asyncio.create_task(chain(("procurements",))),)
         else:
             tasks = (
-                asyncio.create_task(chain(("municipal", "federal"))),
+                asyncio.create_task(chain(("municipal",))),
                 asyncio.create_task(
-                    chain(("procurements", "tce_ma", "price_registries", "contracts"))
+                    chain(("procurements", "tce_ma", "price_registries", "contracts", "federal"))
                 ),
             )
         try:
@@ -619,33 +631,32 @@ class CompleteCollection:
         return await self._payment_step(ids, missing, note)
 
     async def _federal(self, ticket: CollectionTicket, scope: CollectionScope) -> StepResult:
-        if "transparencia" not in self.settings.payment_sources:
-            return StepResult("skipped", "Fonte federal desativada nas configurações")
-        if not self.settings.transparencia_api_key.strip():
-            return StepResult("skipped", "Chave do Portal da Transparência pendente")
-        async with self.sessions() as db:
-            targets = await tracked_payment_cnpjs(db, self.settings.payment_poll_cnpjs)
-        if not targets:
-            return StepResult("skipped", "Nenhum CNPJ ativo em Pagamentos › Acompanhamento federal")
-        ids = []
-        missing = False
-        service = PaymentIngestionService(self.settings, session_factory=self.sessions)
+        async with self._locked(ticket):
+            pass
+        service = FederalCoverageService(self.settings, sessions=self.sessions)
+        child_id: UUID | None = None
         try:
-            for year in range(scope.start_date.year, scope.end_date.year + 1):
-                for cnpj in targets:
-                    async with self._locked(ticket):
-                        pass
-                    try:
-                        summary = await service.run(company_cnpj=cnpj, year=year)
-                        if summary.crawl_run_id:
-                            ids.append(summary.crawl_run_id)
-                        else:
-                            missing = True
-                    except Exception:
-                        missing = True
+            child = await service.enqueue(scope, ticket.run_id)
+            child_id = child.run_id
+            if child_id is None:
+                return StepResult("skipped", child.note, reason=child.skip_reason)
+            await self._stage(
+                ticket, "federal", StepResult("running", "", [child_id], child.batch_id)
+            )
+            status = await service.run(child_id)
+            if status is CrawlRunStatus.CANCELLED:
+                raise _CollectionStopped("Etapa federal cancelada")
+            if status in _ACTIVE:
+                return StepResult(
+                    "partial", "Coleta federal ainda pendente", [child_id], child.batch_id
+                )
+            return StepResult(status.value, "", [child_id], child.batch_id)
+        except (_CollectionStopped, asyncio.CancelledError):
+            if child_id is not None:
+                await self._cancel_unstarted_child(child_id)
+            raise
         finally:
             await service.aclose()
-        return await self._payment_step(ids, missing, f"{len(targets)} favorecidos por exercício")
 
     async def _tce(self, ticket: CollectionTicket, scope: CollectionScope) -> StepResult:
         from app.services.ingestion.tce_ma_observations import collect_tce_observations

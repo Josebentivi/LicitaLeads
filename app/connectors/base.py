@@ -12,7 +12,7 @@ import json
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from enum import StrEnum
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, Literal, Protocol, runtime_checkable
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -497,6 +497,10 @@ class RawPayment(TraceableModel):
     amount: Decimal | None = None
     phase: str | None = None
     document_number: str | None = None
+    federal_beneficiary_role: Literal["issued", "final"] | None = None
+    federal_intermediary: bool | None = None
+    federal_creditor_list: str | None = None
+    federal_identity_conflict: bool | None = None
     commitment_number: str | None = None
     commitment_external_id: str | None = None
     commitment_details_complete: bool = False

@@ -22,7 +22,10 @@ def browser():
         pytest.skip(ready["detail"])
     from selenium import webdriver
 
-    with tempfile.TemporaryDirectory(prefix="licitaleads-browser-profile-") as profile:
+    # Edge can retain a profile log handle briefly after WebDriver quits on Windows.
+    with tempfile.TemporaryDirectory(
+        prefix="licitaleads-browser-profile-", ignore_cleanup_errors=True
+    ) as profile:
         if ready["browser"] == "edge":
             from selenium.webdriver.edge.service import Service
 

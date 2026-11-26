@@ -67,25 +67,28 @@
   {% endif %}
 </section>
 
-{% if tce_observations %}
+{% if tce_observations or tce_decisions %}
 <section class="panel procurement-section tce-panel" aria-labelledby="tce-title">
   <div class="section-heading">
     <div><h2 id="tce-title">TCE-MA · dados complementares</h2><p class="hint">Vínculos confirmados e divergências de identificação para revisão.</p></div>
     <a href="https://www.tcema.tc.br/servicos/servicos-murais/" target="_blank" rel="noopener noreferrer">Abrir mural</a>
   </div>
+  {% include "_tce_ma_review.html" %}
   <div class="table-wrap"><table class="detail-table">
     <thead><tr><th>Registro</th><th>Informação da fonte</th><th>Origem</th></tr></thead>
     <tbody>{% for observation in tce_observations %}
     {% set value = observation.value %}
     <tr>
-      <td>{{ {'tce_ma.procedimentolicitatorio':'Procedimento', 'tce_ma.licitante':'Licitante informado', 'tce_ma.resultado':'Resultado informado', 'tce_ma.contrato':'Contrato informado', 'tce_ma.identidade_para_revisao':'Identidade para revisão'}.get(observation.field_name, 'Registro do TCE-MA') }}</td>
+      <td>{{ {'tce_ma.procedimentolicitatorio':'Procedimento', 'tce_ma.licitante':'Licitante informado', 'tce_ma.resultado':'Resultado informado', 'tce_ma.contrato':'Contrato informado', 'tce_ma.identidade_para_revisao':'Identidade para revisão', 'tce_ma.identidade_conflitante':'Divergência publicada'}.get(observation.field_name, 'Registro do TCE-MA') }}
+      {% if value.get('vinculo_documental') %}<small>{{ 'Vínculo documental' if value.get('vinculo_documental') == tce_link_active|string else 'Vínculo documental histórico' }}</small>{% endif %}</td>
       <td>
         {% if observation.field_name == 'tce_ma.contrato' %}{{ value.get('numeroContrato') or 'Sem número' }} / {{ value.get('anoContrato') or 'Ano não informado' }}
         {% if value.get('anoContrato')|int and procurement.year|int and value.get('anoContrato')|int < procurement.year|int %}<small>Ano anterior ao do pregão · conferir na fonte</small>{% endif %}
         {% elif observation.field_name == 'tce_ma.resultado' %}{{ value.get('nomeTipoResultado') or 'Tipo não informado' }}{% if value.get('dataResultado') %}<small>{{ value.get('dataResultado') }}</small>{% endif %}
         {% elif observation.field_name == 'tce_ma.licitante' %}{{ value.get('licitante') }}
-        {% elif observation.field_name == 'tce_ma.identidade_para_revisao' %}Mesmo controle PNCP, identificação divergente
-        <small>CNPJ informado pelo TCE: {{ value.get('cnpjProcedimento') or 'Não informado' }} · Pregão: {{ value.get('numeroProcedimento') or '—' }}/{{ value.get('anoProcedimento') or '—' }}</small>
+        {% elif observation.field_name in ['tce_ma.identidade_para_revisao', 'tce_ma.identidade_conflitante'] %}
+        {% if observation.field_name == 'tce_ma.identidade_para_revisao' %}Mesmo controle PNCP, identificação divergente{% endif %}
+        <small>Controle PNCP {{ value.get('idContratacaoPncp') or 'não informado' }} · CNPJ {{ value.get('cnpjProcedimento') or 'não informado' }} · Pregão {{ value.get('numeroProcedimento') or '—' }}/{{ value.get('anoProcedimento') or '—' }}</small>
         {% else %}{{ value.get('idProcedimento') }}{% endif %}
       </td>
       <td>

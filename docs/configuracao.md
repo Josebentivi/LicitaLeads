@@ -103,6 +103,10 @@ segundos, sem ocupar capacidade de rede.
 |---|---|---|
 | `TRANSPARENCIA_BASE_URL` | `https://api.portaldatransparencia.gov.br` | Portal da Transparencia (federal) |
 | `TRANSPARENCIA_API_KEY` | vazio | Token `chave-api-dados`; nunca aparece em logs |
+| `FEDERAL_ARCHIVE_MAX_BYTES` / `FEDERAL_ARCHIVE_MAX_EXPANDED_BYTES` | 64 MiB / 512 MiB | Limites próprios dos arquivos diários de despesas |
+| `FEDERAL_PAYMENT_ARCHIVES_PER_PASS` / `FEDERAL_PAYMENT_TARGETS_PER_PASS` | 5 / 25 | Arquivos diários e consultas por CNPJ e exercício em cada passagem federal |
+| `FEDERAL_PAYMENT_PASS_SECONDS` | 600 | Tempo máximo para iniciar novas unidades em uma passagem federal |
+| `SCHEDULER_FEDERAL_COVERAGE_MINUTES` | 30 | Intervalo de retomada automática dos lotes federais limitados |
 | `TRANSPARENCIA_TIMEOUT_SECONDS` | `30` | Timeout por requisicao ao Portal |
 | `TRANSPARENCIA_MAX_RETRIES` | `1` | Tentativas adicionais em falhas temporarias |
 | `PAYMENT_SOURCES` | `transparencia,manual,municipal` | Fontes no exemplo; padrão interno `transparencia,manual` |

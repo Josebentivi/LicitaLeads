@@ -1,10 +1,12 @@
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, time, timedelta
 from decimal import Decimal
 from uuid import uuid4
+from zoneinfo import ZoneInfo
 
 import pytest
 from sqlalchemy import func, select
 
+from app.config import get_settings
 from app.models import (
     Company,
     CompanyContact,
@@ -30,10 +32,102 @@ from app.models import (
     ReasonCategory,
     SourceRecord,
 )
+from app.services.company_overview import dossier_periods
 from app.services.lead_scoring.evaluation import evaluate_lead
 
 CNPJ = "04252011000110"
 OTHER = "11222333000181"
+
+
+async def test_dossier_period_boundaries_and_payment_pagination(api_client, database):
+    local = ZoneInfo(get_settings().timezone)
+    period = next(
+        period
+        for period in dossier_periods("semestre", str(local))
+        if period.start and period.end and (period.end - period.start).days >= 30
+    )
+    first = datetime.combine(period.start, time.min, local).astimezone(UTC)
+    last = datetime.combine(period.end + timedelta(days=1), time.min, local).astimezone(UTC)
+    async with database.sessions.begin() as db:
+        company = Company(cnpj=CNPJ, normalized_name="EMPRESA ALVO")
+        db.add(company)
+        await db.flush()
+        for key, moment in [
+            ("Incluído", first),
+            ("Anterior", first - timedelta(seconds=1)),
+            ("Posterior", last),
+        ]:
+            procurement = Procurement(
+                source="pncp",
+                external_id=f"process-{key}",
+                object_description=f"Pregão {key}",
+                publication_at=moment,
+            )
+            registry = PriceRegistry(
+                source="pncp",
+                external_id=f"arp-{key}",
+                published_at=moment,
+                registry_number=f"Ata {key}",
+            )
+            db.add_all([procurement, registry])
+            await db.flush()
+            db.add_all(
+                [
+                    Participant(
+                        company_id=company.id, procurement_id=procurement.id, source="document"
+                    ),
+                    PriceRegistryItem(
+                        price_registry_id=registry.id, supplier_cnpj=CNPJ, item_number="1"
+                    ),
+                    Contract(
+                        source="pncp",
+                        external_id=f"contract-{key}",
+                        supplier_cnpj=CNPJ,
+                        published_at=moment,
+                        contract_number=f"Contrato {key}",
+                    ),
+                ]
+            )
+        db.add_all(
+            [
+                Payment(
+                    source="manual",
+                    external_id=f"fato-{i}",
+                    supplier_cnpj=CNPJ,
+                    payment_date=first,
+                    document_number=f"Documento no período {i}",
+                )
+                for i in range(21)
+            ]
+        )
+        db.add(
+            Payment(
+                source="municipal:sao_luis",
+                external_id="sem-data",
+                supplier_cnpj=CNPJ,
+                status="agregado_por_empenho",
+                document_number="Agregado sem data",
+            )
+        )
+    base = f"/empresas/{CNPJ}"
+    query = f"history=semestre&period={period.key}"
+    for section in ("procurements", "price_registries", "contracts"):
+        response = await api_client.get(
+            f"{base}/sections/{section}?{query}", headers={"HX-Request": "true"}
+        )
+        assert response.status_code == 200
+        assert "1 registro(s) no acervo" in response.text
+    response = await api_client.get(f"{base}?section=payments&{query}")
+    assert response.status_code == 200
+    assert "21 registro(s) no acervo" in response.text
+    assert "<dt>Participações comprovadas</dt><dd>1</dd>" in response.text
+    assert f"history=semestre&amp;period={period.key}" in response.text
+    second = await api_client.get(f"{base}/sections/payments?page=2&{query}")
+    assert second.status_code == 200 and "21 registro(s) no acervo · página 2" in second.text
+    undated = await api_client.get(f"{base}/sections/payments?history=ano&period=sem-data")
+    assert "1 registro(s) no acervo" in undated.text
+    assert "Agregado por empenho" in undated.text
+    assert (await api_client.get(f"{base}?period=2000-S1")).status_code == 422
 
 
 async def seed(database):
@@ -143,6 +237,7 @@ async def seed(database):
                     supplier_cnpj=CNPJ,
                     procurement_control_number="official-process",
                     global_value=Decimal("200000"),
+                    published_at=datetime.now(UTC),
                     source_record_id=source.id,
                 ),
                 Payment(

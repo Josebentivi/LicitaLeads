@@ -1,6 +1,7 @@
 """HTML dossier fragments. All membership decisions live in the read service."""
 
 from typing import Literal, cast
+from urllib.parse import urlencode
 from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request
@@ -14,15 +15,24 @@ from app.dependencies import get_db
 from app.models import ContactType, Procurement
 from app.schemas import LeadReviewRequest, OutreachRequest
 from app.services.company_overview import (
+    HISTORY_DATES,
     SECTION_LABELS,
     CompanyOverviewService,
+    DossierPeriod,
+    HistoryMode,
     Section,
     find_company,
+    select_dossier_period,
 )
 from app.services.contacts.manual import (
     begin_corporate_write,
     save_corporate_contact,
     save_corporate_name,
+)
+from app.services.federal_payment_views import (
+    FEDERAL_PAYMENT_LABELS,
+    federal_payment_totals,
+    latest_federal_batch,
 )
 from app.services.opportunity_workspace import safe_list_url
 from app.services.public_source_links import (
@@ -69,6 +79,9 @@ LABELS = {
     "phase": "Fase financeira",
     "match_status": "Conciliação",
     "match_reason": "Motivo da conciliação",
+    "federal_type": "Tipo federal",
+    "federal_creditor_list": "Código da lista de credores",
+    "federal_identity_conflict": "Identidade federal em revisão",
     "contact_type": "Tipo de contato",
     "contact_value": "Contato corporativo",
     "verified_at": "Verificado em",
@@ -169,6 +182,9 @@ def visible(key):
         "id",
         "section",
         "kind",
+        "federal_beneficiary_role",
+        "federal_identity",
+        "federal_intermediary",
         "title",
         "groups",
         "origins",
@@ -295,22 +311,50 @@ def render(request, template, context):
     return templates.TemplateResponse(request, template, context)
 
 
+def _dossier_history(request: Request) -> tuple[HistoryMode, list[DossierPeriod], DossierPeriod]:
+    mode = request.query_params.get("history", "semestre")
+    if mode not in ("semestre", "ano"):
+        raise HTTPException(422, "Informe semestre ou ano para o histórico")
+    history = cast(HistoryMode, mode)
+    periods, selected = select_dossier_period(
+        history, request.query_params.get("period"), get_settings().timezone
+    )
+    return history, periods, selected
+
+
+def _history_query(mode: str, period: DossierPeriod) -> str:
+    return urlencode({"history": mode, "period": period.key})
+
+
+async def _federal_payments_context(
+    service: CompanyOverviewService, section: str, period: DossierPeriod | None = None
+) -> dict:
+    if section != "payments":
+        return {}
+    return {
+        "federal_coverage": await latest_federal_batch(service.db, cnpj=service.company.cnpj),
+        "federal_payment_labels": FEDERAL_PAYMENT_LABELS,
+        "federal_totals": await federal_payment_totals(
+            service.db, service.statement("payments", period=period)
+        ),
+    }
+
+
 async def company_page(
     request: Request, cnpj: str, status: str | None, active_only: bool, db: AsyncSession
 ):
     company = await find_company(db, cnpj)
     service = CompanyOverviewService(db, company)
-    overview = await service.overview()
     section = request.query_params.get("section", "leads")
     if section not in SECTION_LABELS:
         raise HTTPException(422, "Seção inválida")
-    history = request.query_params.get("history", "semestre")
-    if history != "semestre" and history != "ano":
-        raise HTTPException(422, "Informe semestre ou ano para o histórico")
+    history, periods, period = _dossier_history(request)
+    overview = await service.overview(period)
     initial = await service.page(
         section,
         status=status if section == "procurements" else None,
         active_only=active_only and section == "procurements",
+        period=period,
     )
     return render(
         request,
@@ -318,13 +362,15 @@ async def company_page(
         {
             "overview": overview,
             "contact_profile": await service.contact_profile(),
-            "participation_history": await service.participation_history(
-                cast(Literal["semestre", "ano"], history), timezone=get_settings().timezone
-            ),
             "history_mode": history,
+            "history_period": period,
+            "history_options": periods,
+            "history_query": _history_query(history, period),
+            "history_sections": HISTORY_DATES,
             "company": company,
             "section_labels": SECTION_LABELS,
             "initial": initial,
+            **await _federal_payments_context(service, section, period),
             "status": status,
             "active_only": active_only,
             "request_id": str(uuid4()),
@@ -365,11 +411,18 @@ async def save_company_contact(
 @router.get("/empresas/{cnpj}/summary")
 async def company_summary(request: Request, cnpj: str, db: AsyncSession = Depends(get_db)):
     company = await find_company(db, cnpj)
-    overview = await CompanyOverviewService(db, company).overview()
+    history, _, period = _dossier_history(request)
+    overview = await CompanyOverviewService(db, company).overview(period)
     return render(
         request,
         "_company_summary.html",
-        {"company": company, "overview": overview, "section_labels": SECTION_LABELS},
+        {
+            "company": company,
+            "overview": overview,
+            "section_labels": SECTION_LABELS,
+            "history_period": period,
+            "history_query": _history_query(history, period),
+        },
     )
 
 
@@ -385,8 +438,19 @@ async def company_section(
     db: AsyncSession = Depends(get_db),
 ):
     company = await find_company(db, cnpj)
-    data = await CompanyOverviewService(db, company).page(
-        section, page=page, historical=historical, status=status, active_only=active_only
+    service = CompanyOverviewService(db, company)
+    history_query = ""
+    period = None
+    if section in HISTORY_DATES and {"history", "period"} & request.query_params.keys():
+        history, _, period = _dossier_history(request)
+        history_query = _history_query(history, period)
+    data = await service.page(
+        section,
+        page=page,
+        historical=historical,
+        status=status,
+        active_only=active_only,
+        period=period,
     )
     return render(
         request,
@@ -396,6 +460,10 @@ async def company_section(
         {
             "company": company,
             "data": data,
+            **await _federal_payments_context(service, section, period),
+            "history_query": history_query,
+            "history_period": period,
+            "history_mode": history if period is not None else None,
             "fragment": "_company_section.html",
             "request_id": str(uuid4()),
         },

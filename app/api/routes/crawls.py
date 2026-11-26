@@ -37,6 +37,11 @@ from app.services.ingestion.continuation import (
     execute_continuation,
 )
 from app.services.ingestion.document_retry import DOCUMENT_LEASE, create_document_retry
+from app.services.ingestion.federal_payments import (
+    FEDERAL_BATCH_MODE,
+    FEDERAL_LEASE,
+    federal_lease_owner,
+)
 from app.services.ingestion.municipal_payments import cancel_municipal_task
 from app.services.ingestion.recovery import finalize_cancelled_run
 from app.services.llm.queue import cancel_for_run, queue_status, queue_statuses, retry_for_run
@@ -113,6 +118,8 @@ def _crawl_lease_names(run: CrawlRun) -> list[str]:
     filters = run.filters if isinstance(run.filters, dict) else {}
     if filters.get("mode") == COMPLETE_COLLECTION_MODE:
         return [COMPLETE_COLLECTION_LEASE]
+    if filters.get("mode") == FEDERAL_BATCH_MODE:
+        return [FEDERAL_LEASE]
     payment_lease = filters.get("lease_name")
     if (
         filters.get("mode") in {"payments", "payment_import"}
@@ -171,9 +178,12 @@ async def cancel_crawl(run_id: UUID, db: AsyncSession) -> bool:
         return accepted
     run.cancel_requested = True
     await cancel_for_run(db, run_id)
+    federal = (run.filters or {}).get("mode") == FEDERAL_BATCH_MODE
     task = _running_tasks.get(run_id)
     if task is not None and not task.done():
-        if run.connector == COMPLETE_COLLECTION_MODE and run.status is CrawlRunStatus.PENDING:
+        if (
+            run.connector == COMPLETE_COLLECTION_MODE or federal
+        ) and run.status is CrawlRunStatus.PENDING:
             await finalize_cancelled_run(db, run)
         await db.commit()
         task.cancel()
@@ -183,14 +193,13 @@ async def cancel_crawl(run_id: UUID, db: AsyncSession) -> bool:
         return True
 
     lease_names = _crawl_lease_names(run)
-    leases = []
-    if lease_names:
-        leases = list(
-            (
-                await db.scalars(select(JobLease.owner_id).where(JobLease.name.in_(lease_names)))
-            ).all()
+    lease = select(JobLease.owner_id).where(JobLease.name.in_(lease_names)).limit(1)
+    if federal:
+        lease = lease.where(
+            JobLease.owner_id == federal_lease_owner(run_id),
+            JobLease.expires_at > datetime.now(UTC),
         )
-    if not leases:
+    if not lease_names or await db.scalar(lease) is None:
         await finalize_cancelled_run(db, run)
     await db.commit()
     return True

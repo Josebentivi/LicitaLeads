@@ -87,6 +87,11 @@ class Settings(BaseSettings):
     transparencia_api_key: str = ""
     transparencia_timeout_seconds: float = Field(default=30, gt=0, le=300)
     transparencia_max_retries: int = Field(default=1, ge=0, le=5)
+    federal_archive_max_bytes: int = Field(default=64 * 1024 * 1024, ge=1024)
+    federal_archive_max_expanded_bytes: int = Field(default=512 * 1024 * 1024, ge=1024)
+    federal_payment_archives_per_pass: int = Field(default=5, ge=1, le=100)
+    federal_payment_targets_per_pass: int = Field(default=25, ge=1, le=500)
+    federal_payment_pass_seconds: int = Field(default=600, ge=1, le=3_600)
     payment_sources: Annotated[list[str], NoDecode] = Field(
         default_factory=lambda: ["transparencia", "manual"]
     )
@@ -132,6 +137,7 @@ class Settings(BaseSettings):
     payment_poll_cnpjs: Annotated[list[str], NoDecode] = Field(default_factory=list)
     scheduler_contract_hours: int = Field(default=24, ge=1)
     scheduler_payment_hours: int = Field(default=24, ge=1)
+    scheduler_federal_coverage_minutes: int = Field(default=30, ge=5)
     scheduler_municipal_payment_hours: int = Field(default=24, ge=1)
     ocr_enabled: bool = False
     ocr_provider: Literal["none", "tesseract"] = "none"

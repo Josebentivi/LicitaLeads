@@ -254,6 +254,7 @@ class AsyncHTTPClient:
         rate_scope: str | None = None,
         bypass_replay: bool = False,
         accepted_error_statuses: frozenset[int] = frozenset(),
+        project_payload: Callable[[Any], Any] | None = None,
     ) -> HTTPJSONResponse:
         """Request JSON, retrying only transport errors and transient statuses.
 
@@ -398,6 +399,9 @@ class AsyncHTTPClient:
                             body=response.text,
                         ) from exc
                     payload = response.text
+
+            if project_payload is not None and not response.is_error:
+                payload = project_payload(payload)
 
             if not response.is_error:
                 await self._rate_success(url, rate_generation, rate_scope=rate_scope)

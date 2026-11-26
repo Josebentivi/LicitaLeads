@@ -7,7 +7,10 @@ missing token is represented as ``ACCESS_RESTRICTED``; it is never treated as
 
 from __future__ import annotations
 
+import hashlib
+import json
 import re
+from collections import defaultdict
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any
@@ -24,6 +27,11 @@ from app.connectors.base import (
     RawSourceRecord,
 )
 from app.connectors.continuation import page_budget_exhausted
+from app.connectors.federal_payment_identity import (
+    creditor_list_code,
+    federal_payment_identity,
+    siafi_payment_document,
+)
 from app.connectors.http import (
     AsyncHTTPClient,
     ConnectorContractError,
@@ -31,6 +39,7 @@ from app.connectors.http import (
     ConnectorHTTPError,
     setting,
 )
+from app.services.identifiers import is_valid_cnpj, normalize_cnpj
 
 _HTTP_EXCEPTIONS = (
     ConnectorHTTPError,
@@ -50,6 +59,45 @@ _PHASE_CODES = {
     "3": 3,
     "pagamento": 3,
 }
+_FINAL_ROW_FIELDS = (
+    "codigoPagamento",
+    "codigoListaCredor",
+    "codigoFavorecidoFinal",
+    "nomeFavorecidoFinal",
+    "valorFinal",
+    "dataCarga",
+    "codigoOrgaoVinculado",
+    "orgaoVinculado",
+    "codigoUnidadeGestora",
+)
+
+
+def _final_page_projection(payload: Any) -> dict[str, Any]:
+    """Retain only corporate beneficiaries on shared creditor-list pages."""
+    if not isinstance(payload, list) or any(not isinstance(row, dict) for row in payload):
+        raise ConnectorContractError("Transparência final-beneficiary page is not a list of rows")
+    encoded = json.dumps(
+        payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode()
+    rows = [
+        {name: row[name] for name in _FINAL_ROW_FIELDS if name in row}
+        for row in payload
+        if is_valid_cnpj(normalized_identifier(row.get("codigoFavorecidoFinal")))
+    ]
+    return {
+        "corporate_beneficiaries": rows,
+        "row_count": len(payload),
+        "original_response_sha256": hashlib.sha256(encoded).hexdigest(),
+    }
+
+
+def _intermediary_marker(row: dict[str, Any]) -> bool | None:
+    markers = (row.get("favorecidoIntermediario"), row.get("favorecidoListaFaturas"))
+    if any(value is True for value in markers):
+        return True
+    if all(value is False for value in markers):
+        return False
+    return None
 
 
 def _amount(value: object) -> Decimal | None:
@@ -61,9 +109,10 @@ def _amount(value: object) -> Decimal | None:
     if _BRL.match(text):
         text = text.replace(".", "").replace(",", ".")
     try:
-        return Decimal(text)
+        amount = Decimal(text)
     except InvalidOperation:
         return None
+    return amount if amount.is_finite() else None
 
 
 def _datetime(value: object, source_timezone: str = "America/Sao_Paulo") -> datetime | None:
@@ -158,8 +207,8 @@ class TransparenciaPaymentsConnector:
                 availability=DataAvailability.ACCESS_RESTRICTED,
                 diagnostic="TRANSPARENCIA_API_KEY is not configured",
             )
-        cnpj = normalized_identifier(company_cnpj)
-        if not cnpj:
+        cnpj = normalize_cnpj(company_cnpj)
+        if not cnpj or not is_valid_cnpj(cnpj):
             return ConnectorResult(
                 data=[],
                 availability=DataAvailability.NOT_SUPPORTED,
@@ -175,9 +224,11 @@ class TransparenciaPaymentsConnector:
         endpoint = join_url(self.base_url, "api-de-dados/despesas/documentos-por-favorecido")
         records: list[RawSourceRecord] = []
         payments: list[RawPayment] = []
+        issued_documents: dict[str, RawPayment] = {}
         seen: set[str] = set()
         page = 1
         partial = False
+        truncated = False
         diagnostic: str | None = None
         headers = {"chave-api-dados": self.api_key}
         try:
@@ -214,6 +265,7 @@ class TransparenciaPaymentsConnector:
                         row,
                         response.url,
                         source_record_ref=record.record_key,
+                        queried_phase=phase_code,
                     )
                     for row in rows
                     if isinstance(row, dict) and self._has_payment_identity(row)
@@ -228,9 +280,18 @@ class TransparenciaPaymentsConnector:
                         partial = True
                     break
                 seen.update(payment.external_id for payment in fresh)
-                payments.extend(fresh)
+                for payment in fresh:
+                    if phase_code == 3 and _intermediary_marker(payment.raw_payload) is True:
+                        if document := siafi_payment_document(payment.document_number):
+                            issued_documents.setdefault(document, payment)
+                        else:
+                            partial = True
+                            diagnostic = "pagamento com repasse e código SIAFI incompleto"
+                    if normalize_cnpj(payment.supplier_cnpj) == cnpj:
+                        payments.append(payment)
                 if page_budget_exhausted(self._http, page, _MAX_PAGES):
                     partial = True
+                    truncated = True
                     diagnostic = f"payment pagination stopped at the {_MAX_PAGES}-page limit"
                     break
                 page += 1
@@ -242,6 +303,15 @@ class TransparenciaPaymentsConnector:
                 return result
             partial = True
             diagnostic = f"partial result: payment pagination failed ({type(exc).__name__})"
+        for document, issued in issued_documents.items():
+            finals = await self._final_beneficiaries(document, cnpj, issued, headers)
+            records.extend(finals.raw_records)
+            if finals.is_complete:
+                payments.extend(finals.data)
+            else:
+                partial = True
+                truncated = truncated or bool(finals.pagination and finals.pagination.truncated)
+                diagnostic = " · ".join(filter(None, (diagnostic, finals.diagnostic)))
         return ConnectorResult(
             data=payments,
             availability=(
@@ -261,9 +331,132 @@ class TransparenciaPaymentsConnector:
             partial=partial,
             pagination=PaginationInfo(
                 fetched_pages=len(records),
-                truncated=bool(diagnostic and "pagination stopped at" in diagnostic),
+                truncated=truncated,
             ),
         )
+
+    async def _final_beneficiaries(
+        self, document: str, cnpj: str, issued: RawPayment, headers: dict[str, str]
+    ) -> ConnectorResult[list[RawPayment]]:
+        endpoint = join_url(self.base_url, "api-de-dados/despesas/favorecidos-finais-por-documento")
+        records: list[RawSourceRecord] = []
+        rows_by_list: dict[str, list[tuple[RawSourceRecord, dict[str, Any]]]] = defaultdict(list)
+        fingerprints: set[str] = set()
+        page = 1
+        incomplete: str | None = None
+        truncated = False
+        try:
+            while True:
+                response = await self._http.request_json(
+                    "GET",
+                    endpoint,
+                    params={"codigoDocumento": document, "pagina": page},
+                    headers=headers,
+                    project_payload=_final_page_projection,
+                )
+                record = source_record(self.name, response)
+                records.append(record)
+                projected = response.payload
+                if not isinstance(projected, dict) or "corporate_beneficiaries" not in projected:
+                    raise ConnectorContractError("invalid retained final-beneficiary response")
+                if projected["row_count"] == 0:
+                    break
+                fingerprint = projected["original_response_sha256"]
+                if fingerprint in fingerprints:
+                    incomplete = "a fonte repetiu a página de favorecidos finais"
+                    break
+                fingerprints.add(fingerprint)
+                for row in projected["corporate_beneficiaries"]:
+                    if normalized_identifier(row.get("codigoFavorecidoFinal")) != cnpj:
+                        continue
+                    creditor_list = creditor_list_code(row.get("codigoListaCredor"))
+                    if (
+                        siafi_payment_document(row.get("codigoPagamento")) != document
+                        or not creditor_list
+                    ):
+                        incomplete = "repasse sem identificação completa do documento e da lista"
+                        continue
+                    rows_by_list[creditor_list].append((record, row))
+                if page_budget_exhausted(self._http, page, _MAX_PAGES):
+                    truncated = True
+                    incomplete = "limite de páginas de favorecidos finais atingido"
+                    break
+                page += 1
+        except _HTTP_EXCEPTIONS as exc:
+            incomplete = f"coleta de favorecidos finais falhou ({type(exc).__name__})"
+
+        payments: list[RawPayment] = []
+        source_pages = len(records)
+        if incomplete is None:
+            for creditor_list, group in rows_by_list.items():
+                aggregation = self._final_payment(document, cnpj, creditor_list, issued, group)
+                records.append(aggregation[0])
+                payments.append(aggregation[1])
+        return ConnectorResult(
+            data=payments,
+            availability=(
+                DataAvailability.TEMPORARY_ERROR
+                if incomplete
+                else DataAvailability.AVAILABLE
+                if payments
+                else DataAvailability.EMPTY
+            ),
+            partial=incomplete is not None,
+            diagnostic=f"{document}: {incomplete}" if incomplete else None,
+            source_urls=list(dict.fromkeys(record.endpoint for record in records)),
+            raw_records=records,
+            pagination=PaginationInfo(fetched_pages=source_pages, truncated=truncated),
+        )
+
+    def _final_payment(
+        self,
+        document: str,
+        cnpj: str,
+        creditor_list: str,
+        issued: RawPayment,
+        group: list[tuple[RawSourceRecord, dict[str, Any]]],
+    ) -> tuple[RawSourceRecord, RawPayment]:
+        original, first_row = group[0]
+        rows = [row for _, row in group]
+        values = [_amount(row.get("valorFinal")) for row in rows]
+        # The CSV and API share no line identifier. Identical rows cannot be safely added.
+        confirmed_values = {value for value in values if value is not None and value.is_finite()}
+        conflict = len(confirmed_values) != len(rows)
+        source = RawSourceRecord.build(
+            source=self.name,
+            endpoint=original.endpoint,
+            request_parameters={"codigoDocumento": document},
+            raw_payload={
+                "aggregation": "final_beneficiary_by_creditor_list",
+                "rows": rows,
+                "official_responses": list(dict.fromkeys(record.record_key for record, _ in group)),
+                "issued_document_response": issued.source_record_ref,
+            },
+            http_status=original.http_status,
+            collected_at=max(record.collected_at for record, _ in group),
+        )
+        identity = federal_payment_identity(document, cnpj, "final", creditor_list)
+        assert identity is not None
+        payment = RawPayment(
+            source=self.name,
+            source_url=issued.source_url,
+            raw_payload=source.raw_payload,
+            source_record_ref=source.record_key,
+            external_id=identity,
+            document_number=document,
+            phase="Pagamento",
+            supplier_cnpj=cnpj,
+            supplier_name=first_row.get("nomeFavorecidoFinal"),
+            agency_name=first_row.get("orgaoVinculado") or issued.agency_name,
+            uasg=first_row.get("codigoUnidadeGestora") or issued.uasg,
+            process_number=issued.process_number,
+            payment_date=issued.payment_date,
+            amount=None if conflict else sum(confirmed_values, Decimal(0)),
+            federal_beneficiary_role="final",
+            federal_creditor_list=creditor_list,
+            federal_identity_conflict=conflict,
+        )
+        return source, payment
 
     @staticmethod
     def _phase_code(phase: str | int | None) -> int | None:
@@ -277,6 +470,7 @@ class TransparenciaPaymentsConnector:
         source_url: str,
         *,
         source_record_ref: str | None = None,
+        queried_phase: int | None = None,
     ) -> RawPayment:
         document = str(row.get("documento") or row.get("documentoResumido") or "")
         phase = row.get("fase")
@@ -288,9 +482,15 @@ class TransparenciaPaymentsConnector:
         )
         uasg = row.get("codigoUg") or row.get("ug")
         external_id = payment_external_id(row)
+        phase_code = self._phase_code(str(phase)) if phase else queried_phase
+        federal = phase_code == 3 and federal_payment_identity(document, supplier, "issued")
         return RawPayment(
             source=self.name,
-            source_url=source_url,
+            source_url=(
+                f"https://portaldatransparencia.gov.br/despesas/pagamento/{siafi_payment_document(document)}"
+                if federal
+                else source_url
+            ),
             raw_payload=row,
             external_id=external_id,
             source_record_ref=source_record_ref,
@@ -299,8 +499,10 @@ class TransparenciaPaymentsConnector:
             process_number=row.get("numeroProcesso"),
             payment_date=payment_date,
             amount=amount,
-            phase=str(phase) if phase else None,
+            phase=str(phase) if phase else ("Pagamento" if federal else None),
             document_number=document or None,
+            federal_beneficiary_role="issued" if federal else None,
+            federal_intermediary=_intermediary_marker(row) if federal else None,
             supplier_cnpj=supplier,
             supplier_name=row.get("nomeFavorecido"),
         )

@@ -60,7 +60,7 @@ async def test_complete_form_sends_explicit_scope_and_refresh(api_client, monkey
         follow_redirects=False,
     )
     assert response.headers["location"] == f"/crawls#coleta-{run_id}"
-    assert calls[0][2] == web.CollectionScope("PI", start, end, True)
+    assert calls[0][2] == web.CollectionScope("PI", start, end, True, federal_scope="acervo")
 
 
 async def test_historical_collection_form_preserves_full_scope(api_client, monkeypatch):
@@ -95,6 +95,7 @@ async def test_historical_collection_form_preserves_full_scope(api_client, monke
     scope = launches[0][2]
     assert scope.start_date == earliest and scope.end_date == today
     assert scope.procurements_only
+    assert scope.federal_scope == "pular"
     assert scope.modalities == ("concorrencia_eletronica", "concorrencia_presencial")
     assert scope.object_scope.matches("M", "Reforma de escola municipal")
     assert not scope.object_scope.matches("F", "Reforma de escola municipal")

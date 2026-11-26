@@ -114,6 +114,10 @@ class _MunicipalExecution:
     coordinator: CollectionCoordinator | None = None
 
 
+def municipal_payment_lease_name(source_id: str) -> str:
+    return f"municipal:{source_id}"
+
+
 class MunicipalPaymentIngestionService:
     """Run one municipal adapter and persist raw responses before payments."""
 
@@ -871,7 +875,7 @@ class MunicipalPaymentIngestionService:
 
     @staticmethod
     def _lease_name(source_id: str) -> str:
-        return f"municipal:{source_id}"
+        return municipal_payment_lease_name(source_id)
 
     async def _acquire_lease(self, name: str, owner: str) -> bool:
         now = datetime.now(UTC)

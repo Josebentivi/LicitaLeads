@@ -1,8 +1,8 @@
 <section class="panel" id="acompanhamento-federal" aria-labelledby="acompanhamento-federal-titulo">
   <h2 id="acompanhamento-federal-titulo">Acompanhamento federal</h2>
-  <p class="hint">Os CNPJs ativos entram nas próximas coletas de pagamentos do Portal da Transparência.</p>
+  <p class="hint">Os CNPJs ativos entram nas próximas consultas por empresa na API do Portal da Transparência. O escopo do histórico em arquivos é definido em <a href="/crawls#escopo">Coletas</a>.</p>
   {% if not federal_payment_source_enabled %}<p class="hint">A fonte Portal da Transparência está desabilitada.</p>{% endif %}
-  {% if not federal_payment_key_configured %}<p class="hint">A coleta federal precisa da chave de acesso do Portal da Transparência.</p>{% endif %}
+  {% if not federal_payment_key_configured %}<p class="hint">As consultas pela API precisam da chave de acesso do Portal da Transparência.</p>{% endif %}
   {% if tracking_feedback == 'active' %}<p class="alert success" role="status">Acompanhamento ativado.</p>
   {% elif tracking_feedback == 'paused' %}<p class="alert success" role="status">Acompanhamento pausado.</p>
   {% elif tracking_feedback == 'invalid' %}<p class="alert error" role="alert">Informe um CNPJ válido.</p>{% endif %}

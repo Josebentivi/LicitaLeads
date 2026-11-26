@@ -1047,6 +1047,15 @@ class Payment(UUIDPrimaryKeyMixin, TimestampMixin, FingerprintMixin, Base):
         UniqueConstraint("source", "external_id", name="uq_payments_source_external_id"),
         Index("ix_payments_company_date", "company_id", "payment_date"),
         Index("ix_payments_contract_date", "contract_id", "payment_date"),
+        Index("ux_payments_federal_identity", "federal_identity", unique=True),
+        Index(
+            "ix_payments_federal_legacy_document",
+            "source",
+            "supplier_cnpj",
+            text("upper(trim(document_number))"),
+            sqlite_where=text("federal_beneficiary_role IS NULL"),
+            postgresql_where=text("federal_beneficiary_role IS NULL"),
+        ),
     )
 
     source: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
@@ -1074,6 +1083,11 @@ class Payment(UUIDPrimaryKeyMixin, TimestampMixin, FingerprintMixin, Base):
     amount: Mapped[Decimal | None] = mapped_column(Numeric(19, 2))
     phase: Mapped[str | None] = mapped_column(String(100), index=True)
     document_number: Mapped[str | None] = mapped_column(String(100), index=True)
+    federal_identity: Mapped[str | None] = mapped_column(String(160))
+    federal_beneficiary_role: Mapped[str | None] = mapped_column(String(10))
+    federal_intermediary: Mapped[bool | None] = mapped_column(Boolean)
+    federal_creditor_list: Mapped[str | None] = mapped_column(String(100))
+    federal_identity_conflict: Mapped[bool | None] = mapped_column(Boolean)
     commitment_number: Mapped[str | None] = mapped_column(String(100))
     commitment_external_id: Mapped[str | None] = mapped_column(String(255), index=True)
     is_current: Mapped[bool] = mapped_column(Boolean, default=True, server_default="1", index=True)

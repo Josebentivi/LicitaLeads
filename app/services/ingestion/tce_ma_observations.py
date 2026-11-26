@@ -14,8 +14,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.connectors.base import RawProcurement
 from app.connectors.http import AsyncHTTPClient
-from app.connectors.tce_ma import SincContrataResource, TCEMAConnector
-from app.models import FieldObservation, Procurement, SourceRecord
+from app.connectors.tce_ma import SincContrataResource, SincContrataRow, TCEMAConnector
+from app.models import FieldObservation, Procurement, SourceRecord, TceMaVerifiedLink
 from app.models.enums import DataAvailability
 from app.services.ingestion.complete_collection import StepResult
 from app.services.ingestion.pipeline import stable_fingerprint
@@ -29,6 +29,14 @@ from app.services.tce_ma_pilot import (
     sinc_procedure_key,
     sinc_row_matches,
 )
+from app.services.tce_ma_review import (
+    IDENTITY_CONFLICT,
+    IDENTITY_REVIEW,
+    active_tce_links,
+    add_tce_decision,
+    number_token,
+)
+from app.services.write_admission import admit_before_row_lock
 
 if TYPE_CHECKING:
     from app.services.ingestion.complete_collection import (
@@ -64,6 +72,18 @@ async def collect_tce_observations(
                 )
             )
         ).all()
+        verified = (
+            {
+                link.procurement_id: link
+                for link in await db.scalars(
+                    active_tce_links().where(
+                        TceMaVerifiedLink.procurement_id.in_([item.id for item in procurements])
+                    )
+                )
+            }
+            if procurements
+            else {}
+        )
     if not procurements:
         return StepResult("skipped", "Nenhum pregão da Prefeitura de São Luís no período")
 
@@ -77,6 +97,12 @@ async def collect_tce_observations(
         conflicts: set[tuple[str, str]] = set()
         identity_review: dict[str, list[tuple[UUID, str, dict[str, Any]]]] = defaultdict(list)
         review_ids: set[UUID] = set()
+        used: dict[tuple[str, str], TceMaVerifiedLink] = {}
+        disputed: dict[UUID, SincContrataRow] = {}
+        by_key: dict[tuple[str, str], list[SincContrataRow]] = defaultdict(list)
+        for row in procedures.data:
+            if (key := sinc_procedure_key(row)) is not None:
+                by_key[key].append(row)
         for procurement in procurements:
             if not procurement.pncp_control_number:
                 continue
@@ -90,6 +116,60 @@ async def collect_tce_observations(
                 purchase_year=procurement.purchase_year,
             )
             match = match_sinc_procedure(candidate, procedures)
+            link = verified.get(procurement.id)
+            if link is not None:
+                rows = by_key[link.key]
+                contradictory = next(
+                    (
+                        row
+                        for row in rows
+                        if not sinc_row_matches(row, link.key, link.pncp_control)
+                        or (
+                            sinc_has_control(row, link.pncp_control)
+                            and (
+                                number_token(row.payload.get("numeroProcedimento"))
+                                != link.tce_number
+                                or str(row.payload.get("anoProcedimento")) != str(link.year)
+                                or row.payload.get("tipoProcedimento") != "PE"
+                            )
+                        )
+                    ),
+                    None,
+                )
+                if contradictory is None:
+                    contradictory = next(
+                        (
+                            row
+                            for row in match.rows
+                            if sinc_has_control(row, link.pncp_control)
+                            and sinc_procedure_key(row) != link.key
+                        ),
+                        None,
+                    )
+                if contradictory is not None:
+                    disputed[procurement.id] = contradictory
+                    review_ids.add(procurement.id)
+                    conflicts.add(link.key)
+                elif (
+                    procurement.pncp_control_number == link.pncp_control
+                    and number_token(procurement.purchase_number) == link.pncp_number
+                    and procurement.purchase_year == link.year
+                    and procedures.is_complete
+                    and (
+                        confirmed := [
+                            row for row in rows if sinc_has_control(row, link.pncp_control)
+                        ]
+                    )
+                ):
+                    if link.key in matches:
+                        conflicts.add(link.key)
+                    matches[link.key] = (procurement.id, link.pncp_control)
+                    used[link.key] = link
+                    confirmed_procedures.update(
+                        (link.key, str(row.payload.get("id")), row.source_record_ref)
+                        for row in confirmed
+                    )
+                    continue
             if match.status == "ambiguo":
                 for row in match.rows:
                     if sinc_has_control(row, procurement.pncp_control_number):
@@ -101,6 +181,18 @@ async def collect_tce_observations(
                             )
                         )
                         review_ids.add(procurement.id)
+                        if (key := sinc_procedure_key(row)) is not None:
+                            for other in by_key[key]:
+                                if not sinc_row_matches(
+                                    other, key, procurement.pncp_control_number
+                                ):
+                                    identity_review[other.source_record_ref].append(
+                                        (
+                                            procurement.id,
+                                            "identidade_conflitante",
+                                            project_tce_row(other.payload),
+                                        )
+                                    )
             if match.key and match.status == "exato":
                 if match.key in matches:
                     conflicts.add(match.key)
@@ -110,7 +202,7 @@ async def collect_tce_observations(
                     for row in match.rows
                 )
         for key in conflicts:
-            matches.pop(key)
+            matches.pop(key, None)
         # The last pilot found exact controls in a minority of cases. A single
         # inventory read establishes coverage and avoids child scans without a match.
         if matches:
@@ -128,6 +220,21 @@ async def collect_tce_observations(
 
     observations = identity_review
     conflicting_rows = 0
+    for result in inventory.values():
+        for row in result.data:
+            key = sinc_procedure_key(row)
+            if (
+                key is not None
+                and (link := used.get(key))
+                and not sinc_row_matches(row, key, link.pncp_control)
+            ):
+                disputed.setdefault(link.procurement_id, row)
+                review_ids.add(link.procurement_id)
+                matches.pop(key, None)
+    for procurement_id, row in disputed.items():
+        observations[row.source_record_ref].append(
+            (procurement_id, "identidade_conflitante", project_tce_row(row.payload))
+        )
     for resource, result in inventory.items():
         for row in result.data:
             procedure_key = sinc_procedure_key(row)
@@ -145,15 +252,42 @@ async def collect_tce_observations(
                 projected = project_tce_row(row.payload)
                 if resource == SincContrataResource.BIDDERS and not projected.get("licitante"):
                     continue
+                if link := used.get(procedure_key):
+                    projected["vinculo_documental"] = str(link.confirmation_id)
                 observations[row.source_record_ref].append(
                     (procurement_id, resource.value, projected)
                 )
 
     saved: list[FieldObservation] = []
     async with collection._locked(ticket) as (db, run):
+        await admit_before_row_lock(db)
+        current = (
+            {
+                link.procurement_id: link
+                for link in await db.scalars(
+                    active_tce_links()
+                    .where(TceMaVerifiedLink.procurement_id.in_(verified))
+                    .order_by(TceMaVerifiedLink.procurement_id)
+                    .with_for_update()
+                )
+            }
+            if verified
+            else {}
+        )
+        valid = {
+            str(link.confirmation_id)
+            for procurement_id, link in current.items()
+            if procurement_id not in disputed
+        }
+        conflict_sources: dict[UUID, UUID] = {}
         for resource, result in inventory.items():
             for raw in result.raw_records:
-                related = observations.get(raw.record_key, [])
+                related = [
+                    entry
+                    for entry in observations.get(raw.record_key, [])
+                    if not entry[2].get("vinculo_documental")
+                    or entry[2]["vinculo_documental"] in valid
+                ]
                 page = raw.raw_payload if isinstance(raw.raw_payload, dict) else {}
                 record = SourceRecord(
                     id=uuid4(),
@@ -182,6 +316,9 @@ async def collect_tce_observations(
                     ),
                 )
                 db.add(record)
+                for procurement_id, kind, _ in related:
+                    if _PREFIX + kind == IDENTITY_CONFLICT and procurement_id in disputed:
+                        conflict_sources[procurement_id] = record.id
                 saved.extend(
                     FieldObservation(
                         entity_type="procurement",
@@ -192,7 +329,15 @@ async def collect_tce_observations(
                         value=value,
                         collected_at=raw.collected_at,
                         fingerprint=stable_fingerprint(
-                            "tce_ma_observation", procurement_id, kind, value
+                            "tce_ma_observation",
+                            procurement_id,
+                            kind,
+                            value,
+                            *(
+                                (run.id,)
+                                if _PREFIX + kind in {IDENTITY_REVIEW, IDENTITY_CONFLICT}
+                                else ()
+                            ),
                         ),
                     )
                     for procurement_id, kind, value in related
@@ -210,10 +355,27 @@ async def collect_tce_observations(
                 ).all()
             )
             db.add_all(item for key, item in candidates.items() if key not in known)
+        for procurement_id, source_id in conflict_sources.items():
+            current_link = current.get(procurement_id)
+            if (
+                current_link
+                and current_link.confirmation_id == verified[procurement_id].confirmation_id
+            ):
+                add_tce_decision(
+                    db,
+                    current_link,
+                    "suspended",
+                    reviewer="Coleta TCE-MA",
+                    reason="A fonte publicou identificadores incompatíveis com o vínculo confirmado.",
+                    source_record_id=source_id,
+                )
+                await db.delete(current_link)
 
     status = (
         "completed"
-        if not conflicting_rows and all(result.is_complete for result in inventory.values())
+        if not conflicting_rows
+        and not disputed
+        and all(result.is_complete for result in inventory.values())
         else "partial"
     )
     if not procedures.data and not procedures.is_complete:
@@ -226,10 +388,18 @@ async def collect_tce_observations(
         status,
         f"{len(matches)} de {len(procurements)} pregões vinculados · "
         f"{sum(map(len, observations.values()))} registros com origem{review_note}{conflicts_note}",
+        review_targets=sorted(review_ids),
     )
 
 
-async def tce_observations_for(db: AsyncSession, procurement_id: UUID) -> list[FieldObservation]:
+async def tce_observations_for(
+    db: AsyncSession, procurement_id: UUID, *, historical: bool = False
+) -> list[FieldObservation]:
+    confirmation = await db.scalar(
+        active_tce_links()
+        .with_only_columns(TceMaVerifiedLink.confirmation_id)
+        .where(TceMaVerifiedLink.procurement_id == procurement_id)
+    )
     rows = (
         await db.scalars(
             select(FieldObservation)
@@ -246,5 +416,8 @@ async def tce_observations_for(db: AsyncSession, procurement_id: UUID) -> list[F
     latest: dict[tuple[str, str], FieldObservation] = {}
     for row in rows:
         if isinstance(row.value, dict):
+            review_id = row.value.get("vinculo_documental")
+            if review_id and review_id != str(confirmation) and not historical:
+                continue
             latest.setdefault((row.field_name, str(row.value.get("id"))), row)
     return list(latest.values())

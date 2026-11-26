@@ -87,6 +87,67 @@ async def test_discovery_maps_payment_documents_and_keeps_token_header() -> None
     await raw_client.aclose()
 
 
+@pytest.mark.asyncio
+async def test_discovery_keeps_only_corporate_final_evidence_and_never_uses_intermediary_amount():
+    cnpj = "00000000000191"
+    receipt = "153173152532025OB008929"
+    requests = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        rows = []
+        if request.url.params["pagina"] == "1":
+            if request.url.path.endswith("documentos-por-favorecido"):
+                rows = [
+                    {
+                        "documento": receipt,
+                        "fase": "Pagamento",
+                        "codigoFavorecido": "52246769000198",
+                        "valor": "5.000,00",
+                        "data": "2025-10-17",
+                        "favorecidoIntermediario": True,
+                    }
+                ]
+            else:
+                rows = [
+                    {
+                        "codigoPagamento": receipt,
+                        "codigoListaCredor": "LISTA1",
+                        "codigoFavorecidoFinal": cnpj,
+                        "valorFinal": "250,00",
+                        "nomeFavorecidoFinal": "Recebedora",
+                        "codigoFavorecidoDespesa": "12345678901",
+                    },
+                    {
+                        "codigoPagamento": receipt,
+                        "codigoListaCredor": "LISTA1",
+                        "codigoFavorecidoFinal": "12345678901",
+                        "valorFinal": "8.900,00",
+                    },
+                ]
+        return httpx.Response(200, json=rows, request=request)
+
+    settings = Settings(app_env="test", transparencia_api_key="secret-token")
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        connector = TransparenciaPaymentsConnector(
+            settings, http_client=AsyncHTTPClient(settings, client=client)
+        )
+        result = await connector.discover_payments(company_cnpj=cnpj, year=2025)
+
+    assert result.is_complete
+    assert len(result.data) == 1
+    payment = result.data[0]
+    assert payment.federal_beneficiary_role == "final"
+    assert payment.federal_creditor_list == "LISTA1"
+    assert payment.supplier_cnpj == cnpj
+    assert payment.amount == Decimal("250.00")
+    assert payment.source_url.endswith(f"/despesas/pagamento/{receipt}")
+    assert all("12345678901" not in str(raw.raw_payload) for raw in result.raw_records)
+    record = next(raw for raw in result.raw_records if raw.record_key == payment.source_record_ref)
+    assert len(record.raw_payload["official_responses"]) == 1
+    assert requests[2].url.params["codigoDocumento"] == receipt
+
+
 def test_payment_source_registry_reports_missing_token_and_unknown_adapter() -> None:
     from app.connectors.payment_sources import list_payment_sources
 

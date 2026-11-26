@@ -117,12 +117,24 @@ elegíveis têm reprocessamento próprio, sem repetir a descoberta.
 As atas usam órgãos e unidades conhecidos na UF. A coleta de contratos usa os
 órgãos configurados ou os já identificados na UF; a janela é de publicação no
 PNCP e de início de vigência no Compras.gov.br. Os pagamentos municipais são
-consultados pelos exercícios que o período inclui. Pagamentos federais
-dependem da chave do Portal da Transparência e da lista de favorecidos ativos.
+consultados pelos exercícios que o período inclui. Em **Escopo da próxima
+coleta**, a etapa **Pagamentos federais** oferece **Todo o acervo** (padrão),
+**Empresas acompanhadas** e **Pular etapa**.
 Em **Pagamentos › Acompanhamento federal**, adicione um CNPJ, pause ou reative
-empresas. O detalhe de uma empresa também permite adicioná-la à lista. A coleta
-geral e o agendador leem a lista a cada execução. São aceitos CNPJs válidos de
-empresas que ainda estejam fora do acervo.
+empresas. O detalhe da empresa também permite adicioná-la à lista, inclusive
+quando o CNPJ ainda estiver fora do acervo.
+
+**Todo o acervo** fixa os CNPJs válidos após a coleta de contratações e
+contratos, inclui os acompanhados ativos e respeita as pausas. O histórico usa
+arquivos diários oficiais do Portal da Transparência no período escolhido. A API
+consulta os acompanhados por exercício, quando a chave estiver configurada.
+**Continuar coleta federal** retoma somente o trabalho pendente. O agendador
+também retoma lotes limitados se as coletas automáticas estiverem ativas.
+Arquivo indisponível e arquivo validado sem registros aparecem separadamente.
+
+O cadastro da empresa e **Pagamentos** exibem os documentos emitidos e os
+repasses a favorecidos finais com totais próprios. Um documento a intermediário
+pode representar valores de várias empresas.
 
 Em **Pagamentos**, também é possível importar CSV/JSON oficial. Um
 identificador oficial,
@@ -139,8 +151,19 @@ O **TCE-MA** complementa os pregões eletrônicos da Prefeitura de São Luís
 (UASG 980921) com vínculo confirmado pelo controle PNCP. No detalhe do
 pregão, consulte a plataforma de origem, quando o PNCP publica o link, e a
 seção **TCE-MA · dados complementares**, com referências oficiais e registros
-para revisão quando o controle coincide e a identificação diverge. A lista do tribunal não vira evento ou oportunidade
-automaticamente.
+para revisão quando o controle coincide e a identificação diverge. Use
+**Confirmar vínculo com documento oficial** e indique o trecho que relaciona
+os números do pregão. Com CNPJs de órgãos diferentes, indique também o trecho
+que comprova o papel de cada órgão. As próximas coletas usam o vínculo para
+trazer registros complementares. As decisões e eventuais revogações ficam no
+histórico.
+
+Em **Coletas**, cada etapa informa por que um lote merece atenção. Um limite
+atingido permite continuar o trabalho salvo. Falhas de acesso mostram o portal
+afetado quando a origem foi registrada. Arquivos federais ausentes do catálogo
+aguardam publicação. Se São Luís restringir o acesso, use **Revisar CSV de
+São Luís** em **Pagamentos**. A prévia mostra linhas novas, existentes,
+repetidas e rejeitadas. A confirmação deve ser feita em até uma hora.
 
 ## Revisão de leads
 
@@ -213,9 +236,11 @@ Em **Dados corporativos**, confira razão social, CNPJ, endereço, telefone e
 e-mail, além da origem e da situação da verificação das informações disponíveis.
 Use **Registrar um dado corporativo** para completar o cadastro com um dado
 público referente ao CNPJ exibido. O CSV de contatos também aceita o tipo
-`address`. Em **Histórico de participações**, selecione semestre ou ano. Os
-totais contam contratações distintas pela data de publicação dos últimos dois
-anos. Abra um total para consultar as respectivas contratações.
+`address`. Em **Histórico da empresa**, selecione semestre ou ano e aplique
+um período dos últimos dois anos. O recorte vale para os totais e as listas de
+participações, atas, contratos e pagamentos. Use **Sem data na fonte** para
+conferir registros sem a data necessária para o filtro. A fila de prazos
+continua a mostrar os prazos vigentes verificados.
 
 Leads abrem inicialmente. As demais listas carregam quando expandidas, em
 páginas de 20 registros; os detalhes também abrem na mesma tela. Os links

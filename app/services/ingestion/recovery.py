@@ -72,6 +72,13 @@ async def _release_lease(session: AsyncSession, run: CrawlRun, now: datetime) ->
         batch = await session.get(CollectionBatch, run.batch_id)
         if batch is not None and batch.last_run_id == run.id:
             batch.status = "suspended" if run.status is CrawlRunStatus.CANCELLED else "failed"
+    if filters.get("mode") == "federal_payments":
+        from app.services.ingestion.federal_payments import FEDERAL_LEASE, federal_lease_owner
+
+        await JobLeaseRepository(session).release(
+            name=FEDERAL_LEASE, owner_id=federal_lease_owner(run.id)
+        )
+        return
     payment_lease = filters.get("lease_name")
     if (
         filters.get("mode") in {"payments", "payment_import"}

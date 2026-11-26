@@ -1,0 +1,20 @@
+<section class="panel" id="cobertura-federal" aria-labelledby="cobertura-federal-titulo">
+  <h3 id="cobertura-federal-titulo">Pagamentos federais</h3>
+  {% if federal_totals %}
+  <dl class="facts">
+    {% for kind, label in federal_payment_labels.items() %}
+    {% set total = federal_totals.get(kind) %}
+    <div><dt>{{ label }}</dt><dd>{% if total %}{{ total[1]|brl }} · {{ total[0] }} registro(s){% else %}Sem registros no recorte{% endif %}</dd></div>
+    {% endfor %}
+  </dl>
+  {% endif %}
+  {% if federal_coverage %}
+  {% with federal_batch=federal_coverage %}
+  <p class="hint">Período do lote de {{ federal_batch.start_date }} a {{ federal_batch.end_date }}{% if federal_batch.updated_at %} · Última atividade em {{ federal_batch.updated_at|local_datetime }}{% endif %}</p>
+  {% include "_federal_batch_counts.html" %}
+  {% if federal_batch.latest_run_id %}<p><a href="/crawls/{{ federal_batch.latest_run_id }}/federal">Ver detalhes do lote federal</a></p>{% endif %}
+  {% endwith %}
+  {% else %}
+  <p class="hint">Nenhuma cobertura federal registrada.</p>
+  {% endif %}
+</section>

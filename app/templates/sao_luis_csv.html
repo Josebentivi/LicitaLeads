@@ -1,0 +1,39 @@
+{% extends "base.html" %}
+{% block title %}Importar CSV de São Luís{% endblock %}
+{% block content %}
+<p><a href="/pagamentos#importar-sao-luis">← Voltar aos pagamentos</a></p>
+<section class="panel">
+  <h1>Importar CSV de São Luís</h1>
+  {% if preview %}
+  <dl class="facts">
+    <div><dt>Registros novos na prévia</dt><dd>{{ preview.created }}</dd></div>
+    <div><dt>Registros já no acervo</dt><dd>{{ preview.existing }}</dd></div>
+    <div><dt>Linhas repetidas no CSV</dt><dd>{{ preview.repeated_rows }}</dd></div>
+    <div><dt>Linhas rejeitadas</dt><dd>{{ preview.errors|length }}</dd></div>
+  </dl>
+  {% if preview.errors %}<details><summary>Ver linhas rejeitadas</summary><ul>
+    {% for line, message in preview.errors %}<li>Linha {{ line }} · {{ message }}</li>{% endfor %}
+  </ul></details>{% endif %}
+  {% if preview.created or preview.existing %}
+  {% set token = preview.token %}
+  <p>Confira a prévia e confirme em até uma hora. Linhas rejeitadas ficam fora da importação.</p>
+  {% endif %}
+  {% elif run %}
+  {% if reused %}<p>Este arquivo já foi importado.</p>
+  {% else %}<p>{{ run.records_created }} registros novos · {{ run.records_updated }} registros revisados{% if run.diagnostic %} · {{ run.diagnostic }}{% endif %}.</p>{% endif %}
+  <a href="/crawls?run={{ run.id }}#execucao-{{ run.id }}">Ver execução e origem</a>
+  {% elif error %}<p role="alert">{{ error }}</p>{% endif %}
+  {% if token %}
+  <div class="action-row">
+    <form method="post" action="/pagamentos/sao-luis/confirmar">
+      <input type="hidden" name="token" value="{{ token }}">
+      <button type="submit">Confirmar importação</button>
+    </form>
+    <form method="post" action="/pagamentos/sao-luis/cancelar">
+      <input type="hidden" name="token" value="{{ token }}">
+      <button type="submit" class="button secondary">Cancelar</button>
+    </form>
+  </div>
+  {% endif %}
+</section>
+{% endblock %}

@@ -53,6 +53,7 @@ def stream_key(filters: dict[str, Any]) -> str:
                 "resume_automatically",
                 "retry_of_run_id",
                 "parent_run_id",
+                "coverage_batch_id",
             }
             and not (key == "force_refresh" and value is False)
         }

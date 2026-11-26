@@ -30,7 +30,7 @@
           <td>
             {% if run.complete %}
               {% if run.active %}<a href="#coleta-{{ run.id }}">Acompanhar etapas</a>
-              {% else %}<details class="complete-history" id="complete-history-{{ run.id }}" hx-preserve>
+              {% else %}<details class="complete-history" id="complete-history-{{ run.id }}"{% if not run.federal_batch %} hx-preserve{% endif %}>
                 <summary>Ver etapas</summary>{% include "_complete_collection_stages.html" %}
               </details>{% endif %}
             {% else %}
@@ -60,7 +60,12 @@
           </td>
           <td class="crawl-actions">
             {% if not run.active and (not run.complete or run.has_linked_opportunities) %}<p><a href="{{ run.result_url }}">{{ run.result_label }}</a>{% if run.records_url %} · <a href="{{ run.records_url }}">Ver contratações vinculadas</a>{% endif %}</p>{% endif %}
-            {% if run.can_continue %}<form method="post" action="/crawls/{{ run.id }}/continue" class="retry-form"><button type="submit" class="button compact">Continuar coleta</button></form>{% endif %}
+            {% if run.federal and run.federal_batch %}
+            {% with federal_batch=run.federal_batch %}
+            {% include "_federal_batch_counts.html" %}
+            {% include "_federal_batch_actions.html" %}
+            {% endwith %}
+            {% elif run.can_continue %}<form method="post" action="/crawls/{{ run.id }}/continue" class="retry-form"><button type="submit" class="button compact">Continuar coleta</button></form>{% endif %}
             {% if run.has_document_batch %}<a href="/crawls/{{ run.id }}/documents">Arquivos, falhas e próximas tentativas</a>{% endif %}
             {% if run.retry_documents %}
             <form method="post" action="/crawls/{{ run.id }}/retry-documents" class="retry-form">

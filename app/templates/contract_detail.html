@@ -58,7 +58,7 @@
 </section>
 <section class="panel procurement-section">
   <div class="section-heading"><div><h2>Pagamentos localizados</h2><p>{{ payment_status }}</p>
-    <p class="hint">O resumo considera apenas registros vigentes de pagamento vinculados a este contrato no acervo. A cobertura das fontes pode ser parcial.</p></div></div>
+    <p class="hint">O resumo considera registros vigentes de pagamento vinculados a este contrato no acervo. Documentos a intermediários e repasses federais aparecem separadamente na lista. A cobertura das fontes pode ser parcial.</p></div></div>
   <dl class="facts">
     <div><dt>Registros de pagamento vinculados</dt><dd>{{ payment_count }}</dd></div>
     <div><dt>Total pago localizado</dt><dd>{{ paid_value }}</dd></div>
@@ -67,7 +67,7 @@
   <div class="table-wrap">
   <table><caption>Documentos de execução financeira vinculados, por fase</caption><thead><tr><th>Data</th><th>Valor</th><th>Fase</th><th>Documento</th><th>Órgão</th><th>Conciliação</th><th>Fonte</th></tr></thead>
   <tbody>{% for payment in payments %}<tr>
-    <td>{{ payment.date }}</td><td>{{ payment.amount }}</td><td>{{ payment.phase }}</td><td>{{ payment.document_number }}</td>
+    <td>{{ payment.date }}</td><td>{{ payment.amount }}</td><td>{{ payment.phase }}{% if payment.federal_type %}<small>{{ payment.federal_type }}</small>{% endif %}{% if payment.federal_conflict %}<small>Identidade federal em revisão</small>{% endif %}</td><td>{{ payment.document_number }}</td>
     <td>{{ payment.agency }}</td><td>{{ payment.match_status }}</td><td>{% if payment.source_url %}<a href="{{ payment.source_url }}" target="_blank" rel="noopener noreferrer">{{ payment.source }}</a>{% else %}{{ payment.source }}{% endif %}</td>
   </tr>{% else %}<tr><td colspan="7" class="empty">Nenhum documento financeiro vinculado a este contrato no acervo.</td></tr>{% endfor %}</tbody></table>
   </div>

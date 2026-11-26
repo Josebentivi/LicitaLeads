@@ -5,6 +5,7 @@ Supplier identity is exact. Looking at a dossier never repairs legacy links.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
 from typing import Any, Literal
 from urllib.parse import urlencode
@@ -83,6 +84,63 @@ MODELS: dict[str, Any] = {
     "documents": Document,
     "contacts": CompanyContact,
 }
+
+HISTORY_DATES = {
+    "procurements": Procurement.publication_at,
+    "price_registries": PriceRegistry.published_at,
+    "contracts": Contract.published_at,
+    "payments": Payment.payment_date,
+}
+HistoryMode = Literal["semestre", "ano"]
+
+
+@dataclass(frozen=True, slots=True)
+class DossierPeriod:
+    key: str
+    title: str
+    start: date | None
+    end: date | None
+    timezone: str
+
+    def condition(self, column: Any) -> Any:
+        if self.start is None or self.end is None:
+            return column.is_(None)
+        zone = ZoneInfo(self.timezone)
+        start = datetime.combine(self.start, time.min, zone).astimezone(UTC)
+        end = datetime.combine(self.end + timedelta(days=1), time.min, zone).astimezone(UTC)
+        return and_(column >= start, column < end)
+
+
+def dossier_periods(
+    mode: HistoryMode, timezone: str, *, today: date | None = None
+) -> list[DossierPeriod]:
+    end = today or datetime.now(ZoneInfo(timezone)).date()
+    earliest = earliest_collection_day(end)
+    periods = []
+    while end >= earliest:
+        semester = 2 if end.month > 6 else 1
+        year = str(end.year)
+        if mode == "semestre":
+            start = date(end.year, 7 if semester == 2 else 1, 1)
+            key, title = f"{year}-S{semester}", f"{semester}º semestre de {year}"
+        else:
+            start = date(end.year, 1, 1)
+            key = title = year
+        start = max(earliest, start)
+        periods.append(DossierPeriod(key, title, start, end, timezone))
+        end = start - timedelta(days=1)
+    return periods
+
+
+def select_dossier_period(
+    mode: HistoryMode, key: str | None, timezone: str
+) -> tuple[list[DossierPeriod], DossierPeriod]:
+    periods = dossier_periods(mode, timezone)
+    periods.append(DossierPeriod("sem-data", "Sem data na fonte", None, None, timezone))
+    selected = next((period for period in periods if period.key == key), None)
+    if selected is None and key is not None:
+        raise HTTPException(422, "Selecione um período disponível para o histórico")
+    return periods, selected or periods[0]
 
 
 def event_current():
@@ -221,6 +279,7 @@ class CompanyOverviewService:
         historical: bool = False,
         status: str | None = None,
         active_only: bool = False,
+        period: DossierPeriod | None = None,
     ):
         if section not in MODELS:
             raise HTTPException(422, "Seção inválida")
@@ -243,6 +302,17 @@ class CompanyOverviewService:
             )
         if section == "procurements":
             condition = company_procurement_condition(company, historical=historical)
+            if period:
+                participation = [
+                    Participant.company_id == company.id,
+                    Participant.procurement_id == Procurement.id,
+                ]
+                if not historical:
+                    participation.append(participant_current())
+                condition = and_(
+                    exists(select(Participant.id).where(*participation)),
+                    period.condition(Procurement.publication_at),
+                )
             if status:
                 from app.models import ParticipantStatus
 
@@ -354,17 +424,19 @@ class CompanyOverviewService:
             "documents": Document.created_at,
             "contacts": CompanyContact.created_at,
         }
+        if period and section in HISTORY_DATES:
+            condition = and_(condition, period.condition(HISTORY_DATES[section]))
         return (
             select(model).where(condition).order_by(ordering[section].desc().nullslast(), model.id)
         )
 
-    async def overview(self) -> dict[str, Any]:
+    async def overview(self, period: DossierPeriod | None = None) -> dict[str, Any]:
         from app.services.opportunity_workspace import deadline_usable
 
         # Scalar subqueries keep the number of round trips independent of the dossier size.
         counts = {}
         for section in MODELS:
-            query = self.statement(section).order_by(None).subquery()
+            query = self.statement(section, period=period).order_by(None).subquery()
             counts[section] = select(func.count()).select_from(query).scalar_subquery()
         counts["pending_review"] = (
             select(func.count())
@@ -411,11 +483,16 @@ class CompanyOverviewService:
         from app.repositories.procurements import CompanyRepository
 
         repository = CompanyRepository(self.db)
+        publication_condition = period.condition(Procurement.publication_at) if period else None
         return {
             "company": model_dict(self.company),
             "counts": dict(row._mapping),
-            "participation_stats": await repository.stats_for_company(self.company.id),
-            "failure_breakdown": await repository.failure_breakdown(self.company.id),
+            "participation_stats": await repository.stats_for_company(
+                self.company.id, publication_condition=publication_condition
+            ),
+            "failure_breakdown": await repository.failure_breakdown(
+                self.company.id, publication_condition=publication_condition
+            ),
             "priority_leads": [self.row("leads", x) for x in priority],
             "upcoming_deadlines": [self.row("deadlines", x) for x in upcoming],
             "contacts": [self.row("contacts", x) for x in contacts],
@@ -473,42 +550,18 @@ class CompanyOverviewService:
         }
 
     async def participation_history(
-        self, granularity: Literal["semestre", "ano"], *, timezone: str, today: date | None = None
+        self, granularity: HistoryMode, *, timezone: str, today: date | None = None
     ) -> list[dict[str, Any]]:
         """Count each documented procurement once in its publication period."""
-        zone = ZoneInfo(timezone)
-        current_day = today or datetime.now(zone).date()
-        end = current_day
-        earliest = earliest_collection_day(current_day)
-        periods: list[tuple[date, date, str]] = []
-        while end >= earliest:
-            second_half = granularity == "semestre" and end.month > 6
-            calendar_start = date(end.year, 7 if second_half else 1, 1)
-            start = max(earliest, calendar_start)
-            title = (
-                str(end.year)
-                if granularity == "ano"
-                else f"{2 if second_half else 1}º semestre de {end.year}"
-            )
-            periods.append((start, end, title))
-            end = start - timedelta(days=1)
-
-        def publication_start(day: date) -> datetime:
-            return datetime.combine(day, time.min, tzinfo=zone).astimezone(UTC)
-
-        counts = []
-        for start, end, _ in periods:
-            counts.append(
-                func.count(Procurement.id).filter(
-                    Procurement.publication_at >= publication_start(start),
-                    Procurement.publication_at < publication_start(end + timedelta(days=1)),
-                )
-            )
+        periods = dossier_periods(granularity, timezone, today=today)
+        counts = [
+            func.count(Procurement.id).filter(period.condition(Procurement.publication_at))
+            for period in periods
+        ]
         totals = (
             await self.db.execute(
                 select(*counts).where(
-                    Procurement.publication_at >= publication_start(earliest),
-                    Procurement.publication_at < publication_start(current_day + timedelta(days=1)),
+                    or_(*(period.condition(Procurement.publication_at) for period in periods)),
                     exists(
                         select(Participant.id)
                         .where(
@@ -523,21 +576,21 @@ class CompanyOverviewService:
         ).one()
         return [
             {
-                "title": title,
-                "start": start,
-                "end": end,
+                "title": period.title,
+                "start": period.start,
+                "end": period.end,
                 "total": total,
                 "href": "/procurements?"
                 + urlencode(
                     {
                         "company_cnpj": self.company.cnpj,
                         "company_participation_only": "true",
-                        "published_from": start.isoformat(),
-                        "published_to": end.isoformat(),
+                        "published_from": period.start.isoformat() if period.start else "",
+                        "published_to": period.end.isoformat() if period.end else "",
                     }
                 ),
             }
-            for (start, end, title), total in zip(periods, totals, strict=True)
+            for period, total in zip(periods, totals, strict=True)
         ]
 
     @staticmethod
@@ -562,6 +615,15 @@ class CompanyOverviewService:
             (str(result[k]) for k in title_fields[section] if result.get(k)), "Não informado"
         )
         result["section"] = section
+        if section == "payments" and entity.federal_beneficiary_role:
+            from app.services.federal_payment_views import (
+                FEDERAL_PAYMENT_LABELS,
+                federal_payment_category,
+            )
+
+            result["federal_type"] = FEDERAL_PAYMENT_LABELS.get(
+                federal_payment_category(entity) or ""
+            )
         return result
 
     async def page(
@@ -573,9 +635,10 @@ class CompanyOverviewService:
         historical: bool = False,
         status: str | None = None,
         active_only: bool = False,
+        period: DossierPeriod | None = None,
     ) -> dict[str, Any]:
         statement = self.statement(
-            section, historical=historical, status=status, active_only=active_only
+            section, historical=historical, status=status, active_only=active_only, period=period
         )
         if section == "documents":
             statement = statement.options(

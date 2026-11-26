@@ -1,0 +1,6 @@
+{% for counts, description, completed_label in [(federal_batch.archives, 'Arquivos diários', 'concluídos'), (federal_batch.api, 'Consultas por CNPJ e exercício', 'concluídas')] %}
+{% if counts.total %}
+<small>{{ description }} · {{ counts.completed }} de {{ counts.total }} {{ completed_label }}{% if counts.empty %} · {{ counts.empty }} sem registros{% endif %}{% if counts.pending %} · {{ counts.pending }} pendentes{% endif %}{% if counts.waiting %} · {{ counts.waiting }} aguardando nova tentativa{% endif %}{% if counts.failed %} · {{ counts.failed }} com falha{% endif %}</small>
+{% endif %}
+{% endfor %}
+{% if federal_batch.api_notice %}<small>{{ federal_batch.api_notice }}</small>{% endif %}

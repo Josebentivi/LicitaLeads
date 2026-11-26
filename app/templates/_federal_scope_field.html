@@ -1,0 +1,7 @@
+<label>Pagamentos federais
+  <select name="federal_scope" form="complete-collection-form">
+    {% for value, label in [('acervo', 'Todo o acervo'), ('acompanhadas', 'Empresas acompanhadas'), ('pular', 'Pular etapa')] %}
+    <option value="{{ value }}"{% if federal_scope == value %} selected{% endif %}>{{ label }}</option>
+    {% endfor %}
+  </select>
+</label>

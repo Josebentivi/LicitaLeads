@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+{% from "_macros.html" import pagination_nav %}
+{% block title %}Lote de pagamentos federais · LicitaLead Monitor{% endblock %}
+{% block content %}
+<p><a href="/crawls">Voltar a Coletas</a></p>
+<h1>Lote de pagamentos federais</h1>
+<section class="panel">
+  <span class="badge status-{{ federal_batch.status }}">{{ federal_batch.status_label }}</span>
+  <p>{{ federal_batch.start_date }} a {{ federal_batch.end_date }} · {{ federal_batch.records_created }} registros novos · {{ federal_batch.records_updated }} atualizados{% if federal_batch.beneficiaries_found is not none %} · {{ federal_batch.beneficiaries_found }} CNPJs com registros{% endif %}</p>
+  {% include "_federal_batch_counts.html" %}
+  {% if federal_batch.can_continue %}<form method="post" action="/crawls/{{ federal_batch.latest_run_id }}/continue" data-submit-once><button class="button compact" type="submit">Continuar coleta federal</button></form>{% endif %}
+</section>
+<section class="panel table-wrap">
+  <table>
+    <thead><tr><th scope="col">Consulta</th><th scope="col">Situação</th><th scope="col">Registros</th><th scope="col">Diagnóstico</th></tr></thead>
+    <tbody>
+    {% set labels = {'succeeded':'Concluída', 'empty':'Concluída sem registros', 'pending':'Pendente', 'waiting':'Aguardando nova tentativa', 'failed':'Falhou'} %}
+    {% for unit in items %}
+    <tr>
+      <td>{% if unit.kind == 'archive' %}Arquivo de {{ unit.day }}{% else %}CNPJ {{ unit.cnpj }} · exercício {{ unit.year }}{% endif %}</td>
+      <td>{{ labels.get(unit.status, 'Situação indisponível') }}</td>
+      <td>{{ unit.records if unit.records is not none else '—' }}</td>
+      <td>{{ unit.diagnostic or '—' }}{% if unit.next_attempt %}<small>Próxima tentativa a partir de {{ unit.next_attempt|local_datetime }}</small>{% endif %}</td>
+    </tr>
+    {% else %}<tr><td colspan="4">Nenhuma unidade de consulta disponível nesta página.</td></tr>{% endfor %}
+    </tbody>
+  </table>
+</section>
+{{ pagination_nav(request, page, page_size, total) }}
+{% endblock %}

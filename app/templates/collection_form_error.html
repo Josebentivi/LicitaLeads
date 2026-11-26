@@ -9,6 +9,7 @@
 <label>Até <input type="date" name="end_date" value="{{ values.get('end_date', '') }}" form="complete-collection-form"></label>
 <label class="checkbox"><input type="checkbox" name="force_refresh" value="true" form="complete-collection-form"{% if values.get('force_refresh') == 'true' %} checked{% endif %}> Reconsultar detalhes já verificados</label>
 <label class="checkbox"><input type="checkbox" name="procurements_only" value="true" form="complete-collection-form"{% if values.get('procurements_only') == 'true' %} checked{% endif %}> Somente contratações e documentos</label>
+{% with federal_scope=values.get('federal_scope', 'acervo') %}{% include '_federal_scope_field.html' %}{% endwith %}
 </div>
 {% with target_form = 'complete-collection-form' %}{% include '_procurement_collection_scope.html' %}{% endwith %}
 <p>Depois de corrigir os campos, use <strong>Coletar dados</strong> no topo.</p><a href="{{ back }}">Voltar a Coletas</a></section>

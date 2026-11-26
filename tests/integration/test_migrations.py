@@ -30,6 +30,9 @@ def test_alembic_upgrade_head_creates_integrity_columns(tmp_path: Path) -> None:
         document_columns = {row[1] for row in connection.execute("PRAGMA table_info(documents)")}
         crawl_columns = {row[1] for row in connection.execute("PRAGMA table_info(crawl_runs)")}
         payment_columns = {row[1] for row in connection.execute("PRAGMA table_info(payments)")}
+        payment_indexes = {
+            row[1]: row[2] for row in connection.execute("PRAGMA index_list(payments)")
+        }
         revision = connection.execute("SELECT version_num FROM alembic_version").fetchone()[0]
         participant_sql = connection.execute(
             "SELECT sql FROM sqlite_master WHERE type='table' AND name='participants'"
@@ -65,6 +68,14 @@ def test_alembic_upgrade_head_creates_integrity_columns(tmp_path: Path) -> None:
     assert "'cancelled'" in participant_sql
     assert "heartbeat_at" in crawl_columns
     assert {"commitment_external_id", "is_current"} <= payment_columns
+    assert {
+        "federal_identity",
+        "federal_beneficiary_role",
+        "federal_intermediary",
+        "federal_creditor_list",
+        "federal_identity_conflict",
+    } <= payment_columns
+    assert payment_indexes["ux_payments_federal_identity"] == 1
     assert {"amount", "scope", "lot_number", "evidence_id", "document_hash"} <= monetary_columns
     assert {"context", "coverage"} <= work_columns
     assert "contract_control_number" in payment_columns
@@ -85,7 +96,7 @@ def test_alembic_upgrade_head_creates_integrity_columns(tmp_path: Path) -> None:
     } <= item_columns
     assert tracking_columns["cnpj"][5] == 1
     assert tracking_columns["active"][3] == 1
-    assert revision == "0032_payment_tracking"
+    assert revision == "0035_federal_legacy_lookup"
 
 
 def test_upgrade_legacy_schema_keeps_raw_sentinel_and_unknown_completeness(tmp_path):
@@ -152,7 +163,8 @@ def test_upgrade_legacy_schema_keeps_raw_sentinel_and_unknown_completeness(tmp_p
             "SELECT raw_payload, collection_complete, pagination_metadata FROM source_records"
         ).fetchone()
         payment = connection.execute(
-            "SELECT commitment_number, commitment_external_id, is_current FROM payments"
+            "SELECT commitment_number, commitment_external_id, is_current, federal_identity, "
+            "federal_beneficiary_role, federal_identity_conflict FROM payments"
         ).fetchone()
         procurement = connection.execute("SELECT object_complement FROM procurements").fetchone()
         item = connection.execute(
@@ -189,7 +201,7 @@ def test_upgrade_legacy_schema_keeps_raw_sentinel_and_unknown_completeness(tmp_p
         ):
             assert connection.execute(f"SELECT count(*) FROM {table}").fetchone()[0] == 0  # noqa: S608 - fixed table allowlist
     assert row == ('{"sentinel": true}', None, None)
-    assert payment == ("123", None, 1)
+    assert payment == ("123", None, 1, None, None, None)
     assert procurement == (None,)
     assert item == ("Descrição existente", None, " descricao existente ")
     assert participant == ("5" * 32, "participant", "0" * 32)

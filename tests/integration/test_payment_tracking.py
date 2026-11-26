@@ -2,7 +2,7 @@
 
 from datetime import date
 from types import SimpleNamespace
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from sqlalchemy import func, select
 
@@ -10,8 +10,8 @@ from app import web
 from app.config import Settings
 from app.connectors.base import DataAvailability
 from app.jobs import scheduler
-from app.models import Company, CrawlRun, CrawlRunStatus, PaymentTrackingTarget
-from app.services.ingestion import complete_collection
+from app.models import CollectionBatch, Company, CrawlRun, CrawlRunStatus, PaymentTrackingTarget
+from app.services.ingestion import federal_payments
 from app.services.ingestion.complete_collection import (
     CollectionScope,
     CompleteCollection,
@@ -104,7 +104,7 @@ async def test_general_collection_uses_active_targets_for_each_year(database, mo
             assert chosen is settings
             self.sessions = session_factory
 
-        async def run(self, *, company_cnpj, year):
+        async def run(self, *, company_cnpj, year, **_kwargs):
             queries.append((company_cnpj, year))
             run_id = uuid4()
             async with self.sessions.begin() as db:
@@ -119,7 +119,7 @@ async def test_general_collection_uses_active_targets_for_each_year(database, mo
     async def skip(ticket, selected_scope):
         return StepResult("skipped")
 
-    monkeypatch.setattr(complete_collection, "PaymentIngestionService", FederalService)
+    monkeypatch.setattr(federal_payments, "PaymentIngestionService", FederalService)
     for stage in ("_procurements", "_tce", "_registries", "_contracts", "_municipal"):
         monkeypatch.setattr(collection, stage, skip)
     async with database.sessions.begin() as db:
@@ -144,7 +144,10 @@ async def test_general_collection_uses_active_targets_for_each_year(database, mo
         run = await db.get_one(CrawlRun, ticket.run_id)
         federal = next(s for s in run.cursor["complete_stages"] if s["key"] == "federal")
         assert federal["status"] == "completed"
-        assert len(federal["run_ids"]) == 2
+        assert len(federal["run_ids"]) == 1
+        child = await db.get_one(CrawlRun, UUID(federal["run_ids"][0]))
+        batch = await db.get_one(CollectionBatch, child.batch_id)
+        assert batch.cursors["federal"]["api"]["completed"] == 2
 
 
 async def test_scheduler_reads_tracking_changes_at_each_cycle(database, monkeypatch):

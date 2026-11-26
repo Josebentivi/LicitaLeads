@@ -177,6 +177,9 @@ class ContractRepository(BaseRepository[Contract]):
                 Payment.contract_id == contract_id,
                 Payment.is_current.is_(True),
                 _actual_payment_phase(),
+                Payment.federal_beneficiary_role.is_distinct_from("final"),
+                Payment.federal_intermediary.is_not(True),
+                Payment.federal_identity_conflict.is_not(True),
             )
         )
         count, valued_count, total = row.one()
@@ -211,7 +214,8 @@ class ContractRepository(BaseRepository[Contract]):
             "status": status,
             "grace_days": grace_days,
             "disclaimer": (
-                "Resumo dos registros de pagamento vigentes vinculados ao contrato no acervo. "
+                "Resumo dos pagamentos vigentes vinculados ao contrato no acervo. "
+                "Documentos a intermediários e repasses federais têm valores separados. "
                 "A cobertura das fontes pode ser parcial. Confirme a execução na fonte oficial."
             ),
         }

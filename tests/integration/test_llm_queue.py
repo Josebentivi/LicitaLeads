@@ -342,7 +342,11 @@ async def test_transient_retry_restart_and_prices_are_snapshotted(database, sett
     ).drain(wait=False)
     assert first_provider.calls == 1
     async with database.sessions() as session:
-        work = await session.scalar(select(LLMWorkItem))
+        work = (
+            await session.scalars(
+                select(LLMWorkItem).join(LLMAttempt, LLMAttempt.work_id == LLMWorkItem.id)
+            )
+        ).one()
         assert work.status == "pending" and work.next_attempt_at == now[0] + timedelta(seconds=60)
     now[0] += timedelta(seconds=61)
     changed = settings.model_copy(

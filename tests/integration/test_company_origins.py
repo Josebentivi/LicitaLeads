@@ -139,11 +139,16 @@ async def test_activity_location_is_distinct_from_headquarters_and_stale_facts(
     listing = BeautifulSoup((await api_client.get("/empresas?origin=payments")).text, "html.parser")
     link = listing.find("a", string="Empresa do teste")
     assert link and "section=payments" in link["href"]
-    page = BeautifulSoup((await api_client.get(link["href"])).text, "html.parser")
+    # Aggregates have no payment date and belong to the undated dossier view.
+    page = BeautifulSoup(
+        (await api_client.get(link["href"] + "&period=sem-data")).text, "html.parser"
+    )
     assert page.select_one("details[open]#company-payments .company-record")
     direct = BeautifulSoup((await api_client.get(f"/empresas/{cnpj}")).text, "html.parser")
     assert direct.select_one("details[open]#company-leads")
-    filtered = await api_client.get(f"/empresas/{cnpj}?section=procurements&status=documented")
+    filtered = await api_client.get(
+        f"/empresas/{cnpj}?section=procurements&status=documented&period=sem-data"
+    )
     selection = BeautifulSoup(filtered.text, "html.parser")
     assert selection.select_one("#company-procurements option[value=documented][selected]")
     assert len(selection.select("#company-procurements .company-record")) == 1

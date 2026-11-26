@@ -1,0 +1,8 @@
+{% if federal_batch.latest_run_id %}
+<small><a href="/crawls/{{ federal_batch.latest_run_id }}/federal">Ver cobertura e detalhes do lote federal</a></small>
+{% endif %}
+{% if federal_batch.can_continue %}
+<form method="post" action="/crawls/{{ federal_batch.latest_run_id }}/continue" data-submit-once>
+  <button class="button secondary compact" type="submit">Continuar coleta federal</button>
+</form>
+{% endif %}

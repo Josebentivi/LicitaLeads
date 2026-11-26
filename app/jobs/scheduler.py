@@ -27,6 +27,7 @@ from app.runtime_control import RuntimeChannel, shutdown_requested
 from app.services.ingestion import IngestionPipeline, PipelineRequest
 from app.services.ingestion.collection_rechecks import recheck_compras
 from app.services.ingestion.contacts import ContactEnrichmentService
+from app.services.ingestion.federal_payments import FEDERAL_LEASE, FederalCoverageService
 from app.services.ingestion.municipal_payments import run_selected_municipal_sources
 from app.services.ingestion.payments import PaymentIngestionService
 from app.services.ingestion.pipeline import PipelineBusy
@@ -64,7 +65,9 @@ JobCallable = Callable[[], Awaitable[object]]
 _active_jobs: set[asyncio.Task[Any]] = set()
 
 
-async def _leased(name: str, callback: JobCallable, *, minutes: int = 55) -> None:
+async def _leased(
+    name: str, callback: JobCallable, *, minutes: int = 55, lease_name: str | None = None
+) -> None:
     if shutdown_requested():
         return
     if component_paused("llm") if name == "process_llm_queue" else scheduler_paused():
@@ -74,10 +77,11 @@ async def _leased(name: str, callback: JobCallable, *, minutes: int = 55) -> Non
         )
         return
     owner = f"{socket.gethostname()}:{uuid4()}"
+    lease_name = lease_name or f"scheduler:{name}"
     now = datetime.now(UTC)
     async with write_session(async_session_factory) as session:
         acquired = await JobLeaseRepository(session).acquire(
-            name=f"scheduler:{name}",
+            name=lease_name,
             owner_id=owner,
             now=now,
             expires_at=now + timedelta(minutes=minutes),
@@ -85,7 +89,6 @@ async def _leased(name: str, callback: JobCallable, *, minutes: int = 55) -> Non
     if not acquired:
         logger.info("scheduled job skipped because its database lease is held", extra={"job": name})
         return
-    lease_name = f"scheduler:{name}"
     worker = asyncio.current_task()
     if worker:
         _active_jobs.add(worker)
@@ -326,6 +329,7 @@ async def poll_configured_payments() -> None:
     async with async_session_factory() as session:
         targets = await tracked_payment_cnpjs(session, settings.payment_poll_cnpjs)
     year = datetime.now(ZoneInfo(settings.timezone)).year
+    failed = 0
     for company_cnpj in targets:
         service = PaymentIngestionService(settings)
         try:
@@ -333,11 +337,21 @@ async def poll_configured_payments() -> None:
                 company_cnpj=company_cnpj, year=year, resume_automatically=True
             )
             if result.availability.value not in {"available", "empty"}:
-                raise RuntimeError(
-                    f"federal payment collection failed: {result.diagnostic or result.availability}"
-                )
+                failed += 1
+        except Exception:
+            failed += 1
         finally:
             await service.aclose()
+    if failed:
+        raise RuntimeError(f"Falha na consulta federal de {failed} favorecido(s)")
+
+
+async def resume_federal_coverage() -> None:
+    coverage = FederalCoverageService(get_settings(), sessions=async_session_factory)
+    try:
+        await coverage.resume_next()
+    finally:
+        await coverage.aclose()
 
 
 async def poll_municipal_payments() -> None:
@@ -442,10 +456,24 @@ def build_scheduler() -> AsyncIOScheduler:
         )
     if "transparencia" in settings.payment_sources and settings.transparencia_api_key.strip():
         scheduler.add_job(
-            partial(_leased, "poll_configured_payments", poll_configured_payments, minutes=120),
+            partial(
+                _leased,
+                "poll_configured_payments",
+                poll_configured_payments,
+                minutes=15,
+                lease_name=FEDERAL_LEASE,
+            ),
             "interval",
             hours=settings.scheduler_payment_hours,
             id="poll_configured_payments",
+            **common,
+        )
+    if "transparencia" in settings.payment_sources:
+        scheduler.add_job(
+            partial(_leased, "resume_federal_coverage", resume_federal_coverage),
+            "interval",
+            minutes=settings.scheduler_federal_coverage_minutes,
+            id="resume_federal_coverage",
             **common,
         )
     if settings.municipal_payment_sources:

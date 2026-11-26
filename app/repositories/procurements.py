@@ -482,6 +482,7 @@ class CompanyRepository(BaseRepository[Company]):
         published_to: datetime | None = None,
         active_only: bool = False,
         now: datetime | None = None,
+        publication_condition: ColumnElement[bool] | None = None,
     ):
         """Aggregate auditable participation outcomes per company."""
 
@@ -550,6 +551,8 @@ class CompanyRepository(BaseRepository[Company]):
             statement = statement.where(Procurement.publication_at >= published_from)
         if published_to is not None:
             statement = statement.where(Procurement.publication_at <= published_to)
+        if publication_condition is not None:
+            statement = statement.where(publication_condition)
         if active_only:
             statement = statement.where(
                 *_status_category_condition("aberta", now=now or datetime.now(UTC))
@@ -624,14 +627,18 @@ class CompanyRepository(BaseRepository[Company]):
         items = [(row[0], {**_stats_dict(row), "activity": activity[row[0].id]}) for row in rows]
         return Page(items=items, page=page, page_size=page_size, total=total)
 
-    async def stats_for_company(self, company_id: UUID | str) -> dict[str, object]:
-        stats = self._stats_subquery()
+    async def stats_for_company(
+        self, company_id: UUID | str, *, publication_condition: ColumnElement[bool] | None = None
+    ) -> dict[str, object]:
+        stats = self._stats_subquery(publication_condition=publication_condition)
         row = (
             await self.session.execute(select(stats).where(stats.c.company_id == company_id))
         ).one_or_none()
         return _stats_dict(row)
 
-    async def failure_breakdown(self, company_id: UUID | str) -> dict[str, object]:
+    async def failure_breakdown(
+        self, company_id: UUID | str, *, publication_condition: ColumnElement[bool] | None = None
+    ) -> dict[str, object]:
         """Count documented losing events by event type and reason.
 
         A company can be disqualified and ineligible in the same procurement, so
@@ -641,13 +648,19 @@ class CompanyRepository(BaseRepository[Company]):
         from app.services.participation_integrity import event_verified
 
         count = func.count(func.distinct(ProcurementEvent.procurement_id))
-        conditions = (
+        conditions: tuple[ColumnElement[bool], ...] = (
             ProcurementEvent.company_id == company_id,
             ProcurementEvent.event_type.in_(
                 [ProcurementEventType.DISQUALIFIED, ProcurementEventType.INELIGIBLE]
             ),
             event_verified(),
         )
+        if publication_condition is not None:
+            conditions += (
+                ProcurementEvent.procurement_id.in_(
+                    select(Procurement.id).where(publication_condition)
+                ),
+            )
 
         async def breakdown(column):
             rows = await self.session.execute(

@@ -78,8 +78,10 @@ from app.models.participation import (
     ReconciliationRun,
 )
 from app.models.payment_tracking import PaymentTrackingTarget
+from app.models.tce_ma_links import TceMaVerifiedLink
 
 __all__ = [
+    "TceMaVerifiedLink",
     "DocumentAlias",
     "DocumentIdentity",
     "FactVerification",

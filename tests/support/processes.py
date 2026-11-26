@@ -100,7 +100,8 @@ class Runtime:
             except httpx.HTTPError:
                 return False
 
-        wait_for(healthy)
+        # The managed fixture starts a supervisor, then both API and scheduler.
+        wait_for(healthy, seconds=90 if os.name == "nt" else 35)
         return child
 
     def stop(self, child):

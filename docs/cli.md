@@ -151,6 +151,7 @@ Jobs (intervalos configuráveis em `SCHEDULER_*`):
 | `reconcile_stale_crawls` | 15 min | Marca coletas travadas como `failed` para permitir retry |
 | `crawl_configured_contracts` | 24 h quando configurado | Contratos por órgão |
 | `poll_configured_payments` | 24 h com a fonte federal e a chave habilitadas | Pagamentos por CNPJ ativo em **Pagamentos › Acompanhamento federal** |
+| `resume_federal_coverage` | 30 min quando a fonte federal está habilitada | Continuação dos lotes federais limitados pela passagem anterior |
 | `poll_municipal_payments` | 24 h quando configurado | Fontes municipais selecionadas |
 
 Cada job roda sob um lease no banco (`JobLease`): se outra instância já detém o

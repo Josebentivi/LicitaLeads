@@ -85,6 +85,7 @@ Documentação oficial: <https://portaldatransparencia.gov.br/api-de-dados>
 | Capacidade | Situação | Endpoints oficiais | Observações |
 |---|---|---|---|
 | Pagamentos por favorecido | `available` | `GET /api-de-dados/despesas/documentos-por-favorecido` | Exige token gratuito (chave-api-dados). Cobre o Poder Executivo federal; ausencia de pagamento na base nao prova inadimplencia. |
+| Arquivos de pagamentos e favorecidos finais | `available` | [Catálogo de despesas da CGU](https://portaldatransparencia.gov.br/download-de-dados/despesas/) | Arquivos diários do Poder Executivo federal, filtrados pelos CNPJs no escopo congelado. |
 
 ### Contratos auditados
 
